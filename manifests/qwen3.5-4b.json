@@ -1,0 +1,255 @@
+{
+  "name": "Qwen3.5-4B",
+  "source": {
+    "repo": "Qwen/Qwen3.5-4B",
+    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+  },
+  "family": "qwen35",
+  "storage_dtype": "bfloat16",
+  "native_context": 262144,
+  "layers": [
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "attention",
+      "stored_bytes": 214969344
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "attention",
+      "stored_bytes": 214969344
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "attention",
+      "stored_bytes": 214969344
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "attention",
+      "stored_bytes": 214969344
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "attention",
+      "stored_bytes": 214969344
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "attention",
+      "stored_bytes": 214969344
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "attention",
+      "stored_bytes": 214969344
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "deltanet",
+      "stored_bytes": 225848000
+    },
+    {
+      "kind": "attention",
+      "stored_bytes": 214969344
+    }
+  ],
+  "kv_heads": 4,
+  "head_dim": 256,
+  "recurrent_state_bytes": 52690944,
+  "embed_output_bytes": 1271403520,
+  "vision_bytes": 667028480,
+  "host_resident_bytes": 0,
+  "mtp": {
+    "config_layers": 1,
+    "stored_bytes": 241199104
+  },
+  "unclassified_bytes": 0,
+  "mrope_section": [
+    11,
+    11,
+    10
+  ],
+  "image_token_id": 248056,
+  "matrices": [
+    {
+      "name": "embed_tokens",
+      "rows": 248320,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "deltanet.linear_attn.in_proj_a.weight",
+      "rows": 32,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "deltanet.linear_attn.in_proj_b.weight",
+      "rows": 32,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "deltanet.linear_attn.in_proj_qkv.weight",
+      "rows": 8192,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "deltanet.linear_attn.in_proj_z.weight",
+      "rows": 4096,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "deltanet.linear_attn.out_proj.weight",
+      "rows": 2560,
+      "cols": 4096,
+      "dtype": "BF16"
+    },
+    {
+      "name": "deltanet.mlp.down_proj.weight",
+      "rows": 2560,
+      "cols": 9216,
+      "dtype": "BF16"
+    },
+    {
+      "name": "deltanet.mlp.gate_proj.weight",
+      "rows": 9216,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "deltanet.mlp.up_proj.weight",
+      "rows": 9216,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "attention.mlp.down_proj.weight",
+      "rows": 2560,
+      "cols": 9216,
+      "dtype": "BF16"
+    },
+    {
+      "name": "attention.mlp.gate_proj.weight",
+      "rows": 9216,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "attention.mlp.up_proj.weight",
+      "rows": 9216,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "attention.self_attn.k_proj.weight",
+      "rows": 1024,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "attention.self_attn.o_proj.weight",
+      "rows": 2560,
+      "cols": 4096,
+      "dtype": "BF16"
+    },
+    {
+      "name": "attention.self_attn.q_proj.weight",
+      "rows": 8192,
+      "cols": 2560,
+      "dtype": "BF16"
+    },
+    {
+      "name": "attention.self_attn.v_proj.weight",
+      "rows": 1024,
+      "cols": 2560,
+      "dtype": "BF16"
+    }
+  ]
+}

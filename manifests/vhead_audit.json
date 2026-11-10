@@ -1,0 +1,11 @@
+{
+ "attn_qkv  q section (16 heads)": "identity",
+ "attn_qkv  k section (16 heads)": "identity",
+ "attn_qkv  v section (32 heads)": "GGUF-deinterleaved (16r+k)",
+ "attn_gate (z, 32 heads)": "GGUF-deinterleaved (16r+k)",
+ "ssm_beta  (in_proj_b)": "GGUF-deinterleaved (16r+k)",
+ "ssm_alpha (in_proj_a)": "GGUF-deinterleaved (16r+k)",
+ "conv1d q channels": "identity",
+ "conv1d k channels": "identity",
+ "conv1d v channels": "GGUF-deinterleaved (16r+k)"
+}
