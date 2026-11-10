@@ -1,0 +1,7 @@
+build/
+*.gguf
+*.safetensors
+__pycache__/
+.venv/
+models/
+release/
