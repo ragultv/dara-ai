@@ -38,7 +38,13 @@ __device__ __forceinline__ float wget(const void* W, const float* Sc, size_t e) 
 template <bool TRANS_W, int WF>
 __global__ void __launch_bounds__(kThreads, 2)
 attn_gemm_kernel(const void* __restrict__ W, const float* __restrict__ Sc, size_t ldw, const float* __restrict__ X, size_t ldx, float* __restrict__ Y, size_t ldy,
-                 int N, int T, int Kpad, int Kvalid) {
+                 int N, int T, int Kpad, int Kvalid, int rpt, int qoff) {
+    // Causal bound: rows of X are queries (token = row / rpt, at key index qoff + token). A tile never needs keys past its last query's index:
+    // the scores GEMM (keys are the output rows) skips tiles entirely above it -- the masked softmax ignores those entries -- and the values GEMM
+    // (keys are the reduction) stops there, where the probabilities are zero anyway. Halves the work of a causal prefill chunk.
+    const int last_key = qoff + (min(T - 1, static_cast<int>(blockIdx.y) * BN + BN - 1)) / rpt;
+    if (!TRANS_W && static_cast<int>(blockIdx.x) * BM > last_key) return;
+    if (TRANS_W) { Kvalid = min(Kvalid, last_key + 1); Kpad = min(Kpad, (Kvalid + BK - 1) / BK * BK); }
     __shared__ __align__(16) float Ws[BK][WS];
     __shared__ __align__(16) float Xs[BK][XS];
     const int tid = threadIdx.x;
@@ -164,10 +170,10 @@ template <int KF, int VF>
 void launch_pair(const void* Kh, const float* Ksc, const void* Vh, const float* Vsc, size_t kvw, const float* qrows, size_t ldq, float* S, size_t ldS, int P, int R,
                  int hd, int kstart, int pos0, int window, float scale, int rows_per_token, float* out, size_t ldo, cudaStream_t s) {
     attn_gemm_kernel<false, KF><<<dim3(static_cast<unsigned>((P + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN)), kThreads, 0, s>>>(
-        Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd);
+        Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart);
     masked_softmax_kernel<<<R, 256, 0, s>>>(S, ldS, P, kstart, pos0, window, scale, rows_per_token);
     attn_gemm_kernel<true, VF><<<dim3(static_cast<unsigned>((hd + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN)), kThreads, 0, s>>>(
-        Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P);
+        Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P, rows_per_token, pos0 - kstart);
 }
 
 }  // namespace
