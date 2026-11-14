@@ -195,9 +195,10 @@ struct LayerProf {
     std::vector<const char*> label;
     size_t used = 0;
     std::vector<std::pair<std::string, double>> total_ms;
-    LayerProf() { const char* e = std::getenv("DARA_LAYER_PROF"); on = e && e[0] == '1'; }
-    void mark(const char* l, void* stream) {
-        if (!on) return;
+    bool decode_only = false;   // DARA_LAYER_PROF=2: time single-token steps only (decode at long context without the prompt's events)
+    LayerProf() { const char* e = std::getenv("DARA_LAYER_PROF"); on = e && (e[0] == '1' || e[0] == '2'); decode_only = e && e[0] == '2'; }
+    void mark(const char* l, void* stream, int T) {
+        if (!on || (decode_only && T != 1)) return;
         if (used >= ev.size()) { cudaEvent_t e; cudaEventCreate(&e); ev.push_back(e); }
         cudaEventRecord(ev[used], static_cast<cudaStream_t>(stream));
         if (label.size() <= used) label.resize(used + 1);
@@ -229,7 +230,7 @@ std::string layer_prof_report() {
     for (auto& kv : p.total_ms) { std::snprintf(b, sizeof b, "  %-28s %9.1f ms  %5.1f%%\n", kv.first.c_str(), kv.second, 100.0 * kv.second / sum); r += b; }
     return r;
 }
-#define LP(label) lprof().mark(label, stream)
+#define LP(label) lprof().mark(label, stream, T)
 
 GpuLayerState make_gpu_layer_state(const GpuLayerWeights& w, size_t kv_capacity, KvFormat fmt) {
     GpuLayerState s;
@@ -417,6 +418,7 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
             if (s.kv_format == KvFormat::K16V8) cuda_check(f16kv_append_cuda(k, pos_dev, T, d.kv_heads, d.head_dim, s.Kq.p, stream), "f16 append K");
             else cuda_check(q8kv_append_cuda(k, pos_dev, T, d.kv_heads, d.head_dim, s.Kq.p, s.Kn.p, stream), "q8 append K");
             cuda_check(q8kv_append_cuda(v, pos_dev, T, d.kv_heads, d.head_dim, s.Vq.p, s.Vn.p, stream), "q8 append V");
+            LP("kv append");
             if (prefill_attn) prefill_attention(); else split_attention();
         } else if (s.kv_format == KvFormat::TQ4) {  // 4-bit cache: quantise-and-append, then attend in the rotated domain without expanding the cache
             cuda_check(tq_append_cuda(k, pos_dev, T, d.kv_heads, d.head_dim, s.Kq.p, s.Kn.p, stream), "tq append K");
