@@ -80,6 +80,9 @@ public:
     static void upload(const CpuLayerState& c, GpuLayerState& g, size_t kv_len);
 
     int threads() const;
+    // Keep the worker threads spinning (true) ahead of a burst of CPU work -- e.g. while the GPU runs its layers -- so the first CPU jobs do not wait
+    // for threads to wake from sleep; false lets them back off to yield/sleep.
+    void set_hot(bool on);
 
 private:
     struct Impl;
