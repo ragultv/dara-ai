@@ -59,6 +59,8 @@ public:
         for (auto& t : th_) t.join();
     }
     int size() const { return static_cast<int>(th_.size()) + 1; }
+    // While `hot` is set the idle workers keep spinning instead of yielding/sleeping, so the next job starts on all threads at once.
+    void set_hot(bool on) { hot_.store(on, std::memory_order_release); if (on) gen_wake_.fetch_add(1, std::memory_order_release); }
     void parallel_for(int n, const std::function<void(int)>& fn) {
         if (n <= 0) return;
         if (th_.empty() || n == 1) { for (int i = 0; i < n; ++i) fn(i); return; }
@@ -85,6 +87,7 @@ private:
             uint64_t g;
             int spins = 0;
             while ((g = gen_.load(std::memory_order_acquire)) == seen) {
+                if (hot_.load(std::memory_order_relaxed)) { _mm_pause(); continue; }
                 if (++spins < 20000) _mm_pause();
                 else if (spins < 40000) std::this_thread::yield();
                 else std::this_thread::sleep_for(std::chrono::microseconds(200));
@@ -99,7 +102,8 @@ private:
     std::vector<std::thread> th_;
     std::atomic<uint64_t> gen_{0};
     std::atomic<int> next_{0}, done_{0}, active_{0};
-    std::atomic<bool> stop_{false};
+    std::atomic<bool> stop_{false}, hot_{false};
+    std::atomic<uint64_t> gen_wake_{0};
     const std::function<void(int)>* fn_ = nullptr;
     int n_ = 0;
 };
@@ -476,6 +480,7 @@ CpuDecoder::CpuDecoder(int threads) {
 }
 CpuDecoder::~CpuDecoder() = default;
 int CpuDecoder::threads() const { return impl_->pool.size(); }
+void CpuDecoder::set_hot(bool on) { impl_->pool.set_hot(on); }
 
 static std::vector<float> down(const DevBuf<float>& b) {
     std::vector<float> v(b.n);

@@ -92,7 +92,8 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     const size_t C = static_cast<size_t>(std::max(1, opt.max_chunk_tokens));
     const size_t workspace = C * (14 * static_cast<size_t>(cfg.hidden) + 2 * static_cast<size_t>(cfg.inter) + 2 * static_cast<size_t>(cfg.heads) * cfg.head_dim * 2) * sizeof(float) + 32 * kMiB;
     // reserve: max(128 MiB, VRAM/32) -- on a 4 GB GPU 128 MiB (measured: ~150 MiB stays free in use at 21+2 9B layers, enough for 8K-token prefill scratch)
-    const size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(128 * kMiB, total_b / 32);
+    size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(128 * kMiB, total_b / 32);
+    if (const char* e = std::getenv("DARA_VRAM_SAFETY_MB")) safety = static_cast<size_t>(std::atoll(e)) * kMiB;   // tuning / experiments
 
     // ---- plan -----------------------------------------------------------------------------------------------
     dara::core::ModelManifest man;
@@ -403,6 +404,7 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     if (cpu_dec) { if (!cpu_current_) sync_hosted_to_cpu(); }
     else if (cpu_current_) sync_hosted_to_gpu();
     const int gpu_layers = cpu_dec ? resident_ : L;
+    if (cpu_dec) cpu_->set_hot(true);   // wake the CPU workers now: they will be spinning when the GPU layers finish
     if (resident_ < L && !cpu_dec) start_copy(resident_);  // prefetch the first hosted layer while the host gathers embeddings
 
     auto t0 = Clock::now();
@@ -563,6 +565,7 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
         }
     }
     rs.head_seconds = since(t0);
+    if (cpu_dec) cpu_->set_hot(false);
     sample_free();
     rs.seconds = since(t_call);
     rs.streamed_bytes = streamed_bytes_;
