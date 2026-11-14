@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     size_t kv = 2048;
     bool dump_layers = true, parse_special = false, stop_at_eos = false, think = false, profile = false, bench = false;
     int chunk_tokens = 0;
-    KvFormat kv_format = KvFormat::F32;  // --kv-mode f32|tq4
+    KvFormat kv_format = KvFormat::Q8;   // default INT8 K/V (near-lossless; --kv-mode f32 for the reference path)  // --kv-mode f32|tq4
     std::string chat_user, chat_system, teacher_file;  // --chat renders the model's chat template around the user message
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];

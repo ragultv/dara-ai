@@ -59,7 +59,9 @@ int matvec_cuda(const DeviceMatrix& m, const float* d_x, float* d_y, void* strea
 // Opt-in lossy fast decode (DARA_INT8=1): int8 activations + dp4a for Q4_K/Q5_K single-vector matvecs (see kernels/gemv_q8.cu). The scratch is allocated up
 // front by int8_init() (called from the model constructors, outside any graph capture) so a captured graph never allocates.
 bool int8_enabled() {
-    static const bool on = [] { const char* e = std::getenv("DARA_INT8"); return e && e[0] == '1'; }();
+    // DEFAULT ON (quality-gated: teacher-forced top-1 >= 126/128 on English / Tamil / code / JSON / 1.5K / 8K for 4B and Nano). DARA_INT8=0 selects the
+    // FP32 reference path (bitwise regression against the RC baselines).
+    static const bool on = [] { const char* e = std::getenv("DARA_INT8"); return !(e && e[0] == '0'); }();
     return on;
 }
 static void* g_q8_scratch = nullptr;

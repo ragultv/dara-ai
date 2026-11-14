@@ -123,13 +123,12 @@ private:
     std::vector<CpuLayerWeights> cpu_w_;   // index l - resident_
     std::vector<CpuLayerState> cpu_s_;
     bool cpu_current_ = false;
-    bool cpu_verify_pending_ = false;
     // CPU-decode placement: the output head stays in host RAM (its VRAM goes to layers, as llama.cpp does for partially offloaded models)
     // and hosted layers stream through ONE staging arena during prompt chunks.
     bool head_on_cpu_ = false;
     std::vector<uint8_t> head_host_;
     HostMatrix head_cpu_;
-    int nslots_ = 2;   // DARA_CPU_VERIFY: compare GPU vs CPU per layer on the next CPU decode step
+    int nslots_ = 2;   // staging arenas for hosted layers during prompt chunks (1 in CPU-decode placement)
 
     QwenConfig cfg_;
     const IModelWeights& weights_;

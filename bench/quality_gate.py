@@ -18,6 +18,8 @@ Q = os.path.join(ROOT, "build", "bench", "quality")
 MODELS = {
     "4b": dict(exe="qwen_generate.exe", gguf=os.path.join(ROOT, "models", "qwen3.5-4b-gguf", "Qwen3.5-4B-Q4_K_M.gguf"), vocab=248320, extra=[],
                long=os.path.join(ROOT, "build", "bench", "prompt1500_qwen.tokens.txt")),
+    "9b": dict(exe="qwen_generate.exe", gguf=os.path.join(ROOT, "models", "qwen3.5-9b-gguf", "Qwen3.5-9B-Q4_K_M.gguf"), vocab=248320, extra=[],
+               long=os.path.join(ROOT, "build", "bench", "prompt1500_qwen.tokens.txt")),
     "nano": dict(exe="nano_generate.exe", gguf=os.path.join(ROOT, "models", "gemma4-e2b-gguf", "gemma-4-E2B-it-Q4_K_M.gguf"), vocab=262144, extra=["--no-layers"],
                  long=os.path.join(ROOT, "build", "bench", "prompt1500_gemma.tokens.txt")),
 }
@@ -32,7 +34,8 @@ def run(model, workload, tag, int8, kv_mode, n_new, teacher=None):
     cmd = [os.path.join(BIN, m["exe"]), "--gguf", m["gguf"], *m["extra"], *src, "--new", str(n_new), "--kv", "12288" if workload.startswith("long8k") else "2048", "--kv-mode", kv_mode,
            "--logits-last", "1", "--out", out]
     if teacher: cmd += ["--teacher", teacher]
-    env = dict(os.environ, DARA_INT8=int8)
+    # the FP32 reference must not use the CPU decode path (its kernels are int8 by design): DARA_CPU_DECODE=0 keeps hosted layers on the GPU path
+    env = dict(os.environ, DARA_INT8=int8, DARA_CPU_DECODE="1" if int8 == "1" else "0")
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=3600)
     if p.returncode != 0:
         raise RuntimeError(f"{model} {workload} {tag} failed:\n{(p.stdout + p.stderr)[-1500:]}")

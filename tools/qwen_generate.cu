@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     size_t kv = 256;
     bool restore_test = true, parse_special = false, stop_at_eos = false;
     int chunk_tokens = 0;
-    KvFormat kv_format = KvFormat::F32;  // --kv-mode f32|tq4
+    KvFormat kv_format = KvFormat::Q8;   // default INT8 K/V (near-lossless; --kv-mode f32 for the reference path)  // --kv-mode f32|tq4
     int logits_last = 0;  // --logits-last N: logits only for the last N prompt positions (long-context quality runs), no layer dump
     bool bench = false;  // --bench: throughput measurement mode (last-position logits only, no layer dumps, no logits file, no restore test)
     std::string teacher_file;

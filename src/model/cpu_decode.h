@@ -72,10 +72,10 @@ public:
     // One token through one layer: x [hidden] -> y [hidden] (y may alias x), at absolute position `pos` (the KV length before this token).
     void forward(const CpuLayerWeights& w, CpuLayerState& s, const float* x, float* y, int64_t pos);
 
-    // State hand-over with the GPU copy of the same layer. kv_len: live K/V positions to copy.
     // y = M x for one vector (the output head when it lives in host RAM). M.cols % 256 == 0 for K-quants.
     void matvec(const HostMatrix& M, const float* x, float* y);
 
+    // State hand-over with the GPU copy of the same layer. kv_len: live K/V positions to copy.
     static void download(const GpuLayerState& g, CpuLayerState& c, size_t kv_len);
     static void upload(const CpuLayerState& c, GpuLayerState& g, size_t kv_len);
 
