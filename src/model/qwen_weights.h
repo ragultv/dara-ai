@@ -26,6 +26,8 @@ public:
     virtual std::vector<float> embed_row(int32_t token) const = 0; // [hidden]; served from host RAM after the first call
     virtual std::vector<float> final_norm_scale() const = 0;       // effective multiplier (+1 convention resolved)
     virtual DeviceMatrix load_output_head() const = 0;             // [vocab][hidden], uploaded by the caller's request
+    // The output head's raw blocks in host RAM (CPU-decode placement keeps the head out of VRAM). Sets *qt to its quantisation.
+    virtual std::vector<uint8_t> read_output_head(dara::kernels::QuantType* qt) const = 0;
 };
 
 class GgufWeights : public IModelWeights {
@@ -39,6 +41,7 @@ public:
     std::vector<float> embed_row(int32_t token) const override;
     std::vector<float> final_norm_scale() const override;
     DeviceMatrix load_output_head() const override;
+    std::vector<uint8_t> read_output_head(dara::kernels::QuantType* qt) const override;
 
 private:
     const dara::io::GgufCheckpoint& g_;
