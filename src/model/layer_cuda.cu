@@ -98,6 +98,8 @@ static int int8_gemm(const DeviceMatrix& m, const float* d_x, size_t ldx, float*
         if (d_x == g_share_x) { g_share_big_key[0] = m.cols; g_share_big_key[1] = static_cast<size_t>(nt); g_share_big_key[2] = ldx; }
         else g_share_big_key[0] = 0;
     }
+    // a few tokens (speculative verification, short steps): one weight read for all of them; a prompt chunk: the tiled GEMM
+    if (nt < dara::kernels::kGemmMinTokens) return dara::kernels::gemv_q8_multi_cuda(m.qtype, m.data.get(), m.ld, g_q8_big, m.cols, nt, d_y, ldy, m.rows, stream);
     return dara::kernels::gemm_q8_cuda(m.qtype, m.data.get(), m.ld, g_q8_big, m.cols, nt, d_y, ldy, m.rows, stream);
 }
 
@@ -115,6 +117,12 @@ int matvec_multi_cuda(const DeviceMatrix& m, const float* d_x, size_t ldx, float
                 g_share_cols = (ok && d_x == g_share_x) ? m.cols : 0;
             }
             if (ok && dara::kernels::gemv_q8_cuda(m.qtype, m.data.get(), m.ld, g_q8_scratch, m.cols, 1, 0, d_y, m.rows, stream) == 0) return 0;
+        }
+        static const bool multi_off = [] { const char* e = std::getenv("DARA_INT8_MULTI"); return e && e[0] == '0'; }();   // A/B switch
+        // measured (tests/gemv_q8_multi_test.cu, 9216x2560 Q4_K, cost relative to one token): multi-row int8 kernel T=2 1.22x, T=4 1.41x, T=8 2.79x,
+        // T=16 ~6x, always below the FP32 multi-vector GEMV; Q6_K's int8 kernel loses to FP32 at every T, so Q6_K keeps the FP32 path
+        if (int8_enabled() && !multi_off && nt >= 2 && m.qtype != dara::kernels::QuantType::Q6_K && dara::kernels::q8_supported(m.qtype) && m.cols % 256 == 0) {
+            if (int8_gemm(m, d_x, ldx, d_y, ldy, nt, stream) == 0) return 0;   // int8 multi-vector GEMV (otherwise the FP32 multi-vector path below)
         }
         if (int8_enabled() && nt >= dara::kernels::kGemmMinTokens && ldy % 4 == 0 && dara::kernels::gemm_q8_available(m.qtype) && m.cols % 256 == 0) {
             if (int8_gemm(m, d_x, ldx, d_y, ldy, nt, stream) == 0) return 0;   // otherwise fall through to the FP32 paths

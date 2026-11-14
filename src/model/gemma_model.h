@@ -60,6 +60,8 @@ public:
     // One greedy decode step: runs `token`, picks the next token on the GPU (argmax of the soft-capped logits, same choice as a host argmax) and copies back
     // only its id. The logits are copied to the host only when `logits` is non-null.
     int forward_greedy(int32_t token, RunStats* stats = nullptr, std::vector<float>* logits = nullptr);
+    // T tokens (a speculative verification step): the greedy token after EVERY position, chosen on the GPU (only T ids come back).
+    std::vector<int32_t> forward_argmax(const int32_t* tokens, int T, RunStats* stats = nullptr);
 
     size_t position() const { return pos_; }
     void rewind(size_t pos);  // K/V caches only need their length reset: entries past it are overwritten
@@ -124,7 +126,7 @@ private:
     // work stream (blocking, so it orders against the legacy default stream used for uploads) and CUDA-graph state
     DecodeGraph graph_;                // shared graph-decode engine (decode_graph.h); also owns the work stream
     std::vector<float> forward_impl(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
-                                    bool copy_logits, int* next_token);
+                                    bool copy_logits, int* next_token, std::vector<int32_t>* ids_out = nullptr);
     DevBuf<unsigned char> d_argmax_;   // argmax scratch + result (greedy decode)
     int* h_next_ = nullptr;            // pinned host copy of the chosen token
     DevBuf<int64_t> d_pos_;            // position of the single token being decoded, read by RoPE / KV append / attention

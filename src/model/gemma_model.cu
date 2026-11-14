@@ -604,6 +604,12 @@ std::vector<float> GemmaModel::forward(const int32_t* tokens, int T, int logits_
     return forward_impl(tokens, T, logits_from, layer_outputs, stats, true, nullptr);
 }
 
+std::vector<int32_t> GemmaModel::forward_argmax(const int32_t* tokens, int T, RunStats* stats) {
+    std::vector<int32_t> ids;
+    forward_impl(tokens, T, 0, nullptr, stats, false, nullptr, &ids);
+    return ids;
+}
+
 int GemmaModel::forward_greedy(int32_t token, RunStats* stats, std::vector<float>* logits) {
     int next = 0;
     std::vector<float> lg = forward_impl(&token, 1, 0, nullptr, stats, logits != nullptr, &next);
@@ -612,7 +618,7 @@ int GemmaModel::forward_greedy(int32_t token, RunStats* stats, std::vector<float
 }
 
 std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
-                                            bool copy_logits, int* next_token) {
+                                            bool copy_logits, int* next_token, std::vector<int32_t>* ids_out) {
     if (T <= 0 || logits_from < 0 || logits_from > T) throw std::invalid_argument("bad forward arguments");
     if (pos_ + static_cast<size_t>(T) > capacity_) throw std::length_error("K/V cache capacity exceeded");
     const auto t_call = Clock::now();
@@ -808,6 +814,14 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
             cuda_check(argmax_cuda(last, cfg_.vocab, d_argmax_.p, d_out), "argmax");
             cuda_check(cudaMemcpy(h_next_, d_out, sizeof(int), cudaMemcpyDeviceToHost), "next token copy");
             *next_token = *h_next_;
+        }
+        if (ids_out) {   // greedy token after every position, on the device
+            const size_t scr = argmax_scratch_bytes();
+            if (d_argmax_.n < scr + static_cast<size_t>(n_out) * sizeof(int)) d_argmax_ = DevBuf<unsigned char>(scr + static_cast<size_t>(std::max(n_out, 16)) * sizeof(int));
+            int* d_ids = reinterpret_cast<int*>(d_argmax_.p + scr);
+            for (int t = 0; t < n_out; ++t) cuda_check(argmax_cuda(dy + static_cast<size_t>(t) * cfg_.vocab, cfg_.vocab, d_argmax_.p, d_ids + t), "argmax");
+            ids_out->assign(static_cast<size_t>(n_out), 0);
+            cuda_check(cudaMemcpy(ids_out->data(), d_ids, static_cast<size_t>(n_out) * sizeof(int), cudaMemcpyDeviceToHost), "ids copy");
         }
         if (copy_logits) cuda_check(cudaMemcpy(logits.data(), dy, logits.size() * 4, cudaMemcpyDeviceToHost), "logits copy");
     }

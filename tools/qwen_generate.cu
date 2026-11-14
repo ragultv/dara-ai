@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
     int logits_last = 0;  // --logits-last N: logits only for the last N prompt positions (long-context quality runs), no layer dump
     bool bench = false;  // --bench: throughput measurement mode (last-position logits only, no layer dumps, no logits file, no restore test)
     std::string teacher_file;
-    int spec_k = 0, ngram_max = 3, ngram_min = 2;  // --spec K: prompt-lookup speculative decoding with up to K draft tokens
+    int spec_k = 0, ngram_max = 4, ngram_min = 3;  // --spec K: prompt-lookup speculative decoding with up to K draft tokens
     int force_resident = -1;  // -1: the planner decides how many layers live in VRAM
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -191,22 +191,24 @@ int main(int argc, char** argv) {
                 const int32_t cur = seq.back();
                 std::vector<int32_t> to_add;
                 if (draft.empty()) {
-                    std::vector<float> row = model.forward(&cur, 1, 0, nullptr, &st); note(st); ++passes;
-                    to_add.push_back(argmax(row.data(), V));
+                    std::vector<int32_t> ids;
+                    model.forward(&cur, 1, 0, nullptr, &st, &ids); note(st); ++passes;
+                    to_add.push_back(ids[0]);
                 } else {
                     const int kd = static_cast<int>(draft.size());
                     feed.assign(1, cur); feed.insert(feed.end(), draft.begin(), draft.end());
                     model.snapshot();
-                    std::vector<float> rows = model.forward(feed.data(), kd + 1, 0, nullptr, &st); note(st); ++passes; ++spec_steps; drafted += kd;
+                    std::vector<int32_t> ids;   // greedy token after each fed position, chosen on the GPU
+                    model.forward(feed.data(), kd + 1, 0, nullptr, &st, &ids); note(st); ++passes; ++spec_steps; drafted += kd;
                     int m = 0;
-                    while (m < kd && argmax(&rows[static_cast<size_t>(m) * V], V) == draft[m]) ++m;
+                    while (m < kd && ids[m] == draft[m]) ++m;
                     accepted += m;
-                    if (m == 0) { backoff = backoff ? std::min(backoff * 2, 8) : 1; cooldown = backoff; } else backoff = 0;
+                    if (m == 0) { backoff = backoff ? std::min(backoff * 2, 32) : 2; cooldown = backoff; } else backoff = 0;   // a failed check costs several steps: back off hard
                     if (m < kd) {  // a candidate was rejected: rebuild the state after the accepted prefix (cur + m drafts), no weight pass
                         model.rollback(m + 1); ++rollbacks;
                     }
                     for (int q = 0; q < m; ++q) to_add.push_back(draft[q]);
-                    to_add.push_back(argmax(&rows[static_cast<size_t>(m) * V], V));
+                    to_add.push_back(ids[m]);
                 }
                 for (int32_t id : to_add) {
                     seq.push_back(id); emit(id);

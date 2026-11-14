@@ -12,6 +12,7 @@
 #include "model/attn_splitkv.h"
 #include "model/tq_kv.h"
 #include "model/ops.h"
+#include "model/ops_cuda.h"
 
 namespace dara::model {
 
@@ -387,7 +388,8 @@ void QwenModel::start_copy(int layer) {
     streamed_bytes_ += p.matrix_bytes;
 }
 
-std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats) {
+std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
+                                      std::vector<int32_t>* argmax_out) {
     if (T <= 0 || logits_from < 0 || logits_from > T) throw std::invalid_argument("bad forward arguments");
     const auto t_call = Clock::now();
     const int H = cfg_.hidden, L = cfg_.layers;
@@ -506,7 +508,9 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     t0 = Clock::now();
     const std::vector<float> final_scale = weights_.final_norm_scale();
     const int n_out = T - logits_from;
-    std::vector<float> logits(static_cast<size_t>(n_out) * cfg_.vocab);
+    const bool ids_only = argmax_out != nullptr && !head_on_cpu_;
+    std::vector<float> logits(ids_only ? 0 : static_cast<size_t>(n_out) * cfg_.vocab);
+    if (argmax_out) argmax_out->assign(static_cast<size_t>(std::max(0, n_out)), 0);
     if (n_out > 0) {
         std::vector<float> normed(static_cast<size_t>(n_out) * H);
         for (int t = 0; t < n_out; ++t)
@@ -519,8 +523,22 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
         float* dy = pool_.get<float>(31, static_cast<size_t>(n_out) * cfg_.vocab);
         cuda_check(cudaMemcpy(dx, normed.data(), static_cast<size_t>(n_out) * H * sizeof(float), cudaMemcpyHostToDevice), "head input");
         cuda_check(matvec_multi_cuda(head_, dx, static_cast<size_t>(H), dy, static_cast<size_t>(cfg_.vocab), n_out), "lm_head");
-        cuda_check(cudaMemcpy(logits.data(), dy, logits.size() * sizeof(float), cudaMemcpyDeviceToHost), "logits copy");
+        if (ids_only) {   // greedy token of every row on the device; only n_out ints come back
+            const size_t scr = argmax_scratch_bytes();
+            if (d_argmax_.n < scr + static_cast<size_t>(n_out) * sizeof(int)) d_argmax_ = DevBuf<unsigned char>(scr + static_cast<size_t>(std::max(n_out, 16)) * sizeof(int));
+            int* d_ids = reinterpret_cast<int*>(d_argmax_.p + scr);
+            for (int t = 0; t < n_out; ++t)
+                cuda_check(argmax_cuda(dy + static_cast<size_t>(t) * cfg_.vocab, cfg_.vocab, d_argmax_.p, d_ids + t), "argmax");
+            cuda_check(cudaMemcpy(argmax_out->data(), d_ids, static_cast<size_t>(n_out) * sizeof(int), cudaMemcpyDeviceToHost), "ids copy");
+        } else {
+            cuda_check(cudaMemcpy(logits.data(), dy, logits.size() * sizeof(float), cudaMemcpyDeviceToHost), "logits copy");
         }
+        }
+        if (argmax_out && head_on_cpu_)   // CPU head: logits are already on the host
+            for (int t = 0; t < n_out; ++t) {
+                const float* r = &logits[static_cast<size_t>(t) * cfg_.vocab];
+                (*argmax_out)[t] = static_cast<int32_t>(std::max_element(r, r + cfg_.vocab) - r);
+            }
     }
     rs.head_seconds = since(t0);
     if (cpu_dec) cpu_->set_hot(false);

@@ -52,6 +52,8 @@ int gemm_quant_cuda(QuantType t, const void* dW, size_t ld_blocks, const float* 
 size_t q8act_bytes(size_t K, int T);
 // Prefill: Y[t*ldy + r] = W[r] . x_t for T int8 vectors in `scratch` (quantize_activations_cuda with T vectors); Q4_K / Q5_K. ~2.8x the FP32 GEMM.
 bool gemm_q8_available(QuantType t);
+// A few vectors (2..47; speculative verification): y[t*ldy + r] = W[r] . x_t for T int8 vectors in `scratch` (quantize_activations_cuda), Q4_K/Q5_K/Q6_K.
+int gemv_q8_multi_cuda(QuantType t, const void* dW, size_t ld_blocks, const void* scratch, size_t K, int T, float* dy, size_t ldy, size_t rows, void* stream = nullptr);
 // Prefill BF16 GEMM (exact weights, FP32 math): W [rows][ld] bf16. Same tile as the quantised GEMM. Returns non-zero for unsupported shapes.
 int gemm_bf16_cuda(const void* dW, size_t ld, const float* dx, size_t ldx, float* dy, size_t ldy, size_t rows, size_t cols, int T, void* stream = nullptr);
 int gemm_q8_cuda(QuantType t, const void* dW, size_t ld_blocks, const void* scratch, size_t K, int T, float* dy, size_t ldy, size_t rows, void* stream = nullptr);
