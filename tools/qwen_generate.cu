@@ -292,7 +292,7 @@ int main(int argc, char** argv) {
                         decode_sum.copy_wait_seconds / decode_steps, decode_sum.head_seconds / decode_steps, decode_sum.embed_seconds / decode_steps,
                         decode_sum.streamed_bytes / 1048576.0 / decode_steps);
         (void)H;
-        if (const char* lp = std::getenv("DARA_LAYER_PROF")) if (lp[0] == '1') std::printf("%s", layer_prof_report().c_str());
+        if (const char* lp = std::getenv("DARA_LAYER_PROF")) if (lp[0] == '1' || lp[0] == '2') std::printf("%s", layer_prof_report().c_str());
         return restore_ok ? 0 : 1;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "ERROR: %s\n", e.what());
