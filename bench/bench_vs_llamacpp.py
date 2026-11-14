@@ -57,6 +57,15 @@ def gpu_state():
     return dict(zip(keys, f)) if len(f) == len(keys) else {"raw": out.strip()}
 
 
+def on_battery():
+    """True when a laptop runs on battery (Windows Win32_Battery.BatteryStatus 1 = discharging): GPU and CPU are power-capped and timings are invalid."""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-WmiObject Win32_Battery).BatteryStatus"], capture_output=True, text=True, timeout=30).stdout.strip()
+        return out.splitlines()[0].strip() == "1" if out else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def wait_idle(max_used_mib=250, timeout=120):
     t0 = time.time()
     while True:
@@ -160,6 +169,8 @@ def main():
     report = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "gpu_before": gpu_state(), "dara_options": dict(DARA_OPTS), "models": {}}
     print(f"Dara options: {DARA_OPTS}")
 
+    if on_battery():
+        raise SystemExit("the machine is running on battery: GPU/CPU are power-capped and the comparison would be invalid. Connect AC power and rerun.")
     print("global warm-up (GPU clocks up, files cached)...")
     wait_idle()
     for m in a.models:
