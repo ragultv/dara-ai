@@ -313,7 +313,6 @@ void QwenModel::sync_hosted_to_cpu() {
         CpuDecoder::download(states_[l], cpu_s_[i], states_[l].pos);
     }
     cpu_current_ = true;
-    cpu_verify_pending_ = true;
 }
 
 void QwenModel::sync_hosted_to_gpu() {
@@ -491,47 +490,6 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     }
     }
     cuda_check(cudaMemcpy(hidden.data(), hid_dev[cur], TH_all * sizeof(float), cudaMemcpyDeviceToHost), "download hidden");  // waits for all layers
-    static const bool verify = [] { const char* e = std::getenv("DARA_CPU_VERIFY"); return e && e[0] == '1'; }();
-    if (cpu_dec && verify && cpu_verify_pending_) {
-        // Diagnostic (DARA_CPU_VERIFY=1), first CPU decode step after a hand-over (GPU and CPU states identical): every hosted layer runs on BOTH
-        // sides from the same input; prints the relative difference of the outputs. The GPU copies advance too, which is harmless: the CPU copy is
-        // authoritative until the next hand-over uploads it.
-        cpu_verify_pending_ = false;
-        std::vector<float> in = hidden, g_out(H), c_out(H);
-        float* dbuf[2] = {pool_.get<float>(40, H), pool_.get<float>(41, H)};
-        for (int l = resident_; l < L; ++l) {
-            const size_t i = static_cast<size_t>(l - resident_);
-            const size_t p0 = states_[l].pos;
-            start_copy(l);
-            const int slot = (l - resident_) % nslots_;
-            cuda_check(cudaEventSynchronize(static_cast<cudaEvent_t>(copy_done_[slot])), "verify: stage");
-            bind_matrices(layers_[l], arena_owner_[slot], arena_[slot]);
-            cuda_check(cudaMemcpy(dbuf[0], in.data(), H * sizeof(float), cudaMemcpyHostToDevice), "verify: in");
-            gpu_layer_forward_dev(layers_[l].weights, states_[l], dbuf[0], dbuf[1], 1, pool_, nullptr);
-            cuda_check(cudaMemcpy(g_out.data(), dbuf[1], H * sizeof(float), cudaMemcpyDeviceToHost), "verify: out");
-            cuda_check(cudaEventRecord(static_cast<cudaEvent_t>(compute_done_[slot]), 0), "verify: compute done");
-            slot_used_[slot] = true;
-            states_[l].pos = p0;
-            CpuLayerState scopy = cpu_s_[i];   // do not advance the real CPU state here
-            cpu_->forward(cpu_w_[i], scopy, in.data(), c_out.data(), static_cast<int64_t>(p0));
-            double num = 0, den = 0;
-            for (int k = 0; k < H; ++k) { num += (double(g_out[k]) - c_out[k]) * (double(g_out[k]) - c_out[k]); den += double(g_out[k]) * g_out[k]; }
-            std::fprintf(stderr, "[cpu verify] layer %d (%s) pos %zu: relative difference GPU vs CPU %.3e\n", l,
-                         states_[l].kind == LayerKind::DeltaNet ? "deltanet" : "attention", p0, std::sqrt(num / (den + 1e-30)));
-            in = g_out;   // next layer from the GPU output: isolates per-layer error
-        }
-        {   // end to end: the CPU chain on its own outputs vs the GPU chain (in = final GPU output)
-            std::vector<float> h = hidden;
-            for (int l = resident_; l < L; ++l) {
-                const size_t i = static_cast<size_t>(l - resident_);
-                CpuLayerState scopy = cpu_s_[i];
-                cpu_->forward(cpu_w_[i], scopy, h.data(), h.data(), static_cast<int64_t>(states_[l].pos));
-            }
-            double num = 0, den = 0, mx = 0;
-            for (int k = 0; k < H; ++k) { const double e = double(in[k]) - h[k]; num += e * e; den += double(in[k]) * in[k]; mx = std::max(mx, std::fabs(double(in[k]))); }
-            std::fprintf(stderr, "[cpu verify] end to end: relative difference %.3e (max |hidden| %.1f)\n", std::sqrt(num / (den + 1e-30)), mx);
-        }
-    }
     if (cpu_dec) {   // the hosted layers, on the CPU, in place on the downloaded hidden state
         for (int l = resident_; l < L; ++l) {
             const size_t i = static_cast<size_t>(l - resident_);

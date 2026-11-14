@@ -144,13 +144,6 @@ struct Q8Act {
                 _mm_storeu_si128(reinterpret_cast<__m128i*>(q.data() + b * 256 + g * 16), p8);
             }
         }
-        static const bool dbg = [] { const char* e = std::getenv("DARA_CPU_QERR"); return e && e[0] == '1'; }();
-        if (dbg) {   // relative quantisation error of this vector (diagnostic)
-            double num = 0, den = 0;
-            for (size_t i = 0; i < k; ++i) { const double r = x[i] - d[i / 256] * q[i]; num += r * r; den += static_cast<double>(x[i]) * x[i]; }
-            const double rel = std::sqrt(num / (den + 1e-30));
-            if (rel > 0.05) std::fprintf(stderr, "[q8 act] K=%zu relative error %.3f\n", k, rel);
-        }
     }
 };
 

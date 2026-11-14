@@ -19,21 +19,36 @@ fail() { echo "FAILED: $1" | tee -a "$LOG"; exit 1; }
 ok() { echo "ok: $1" | tee -a "$LOG"; }
 
 # 1. model logits against the frozen baselines
-build/cuda/qwen_generate.exe --gguf $G4 --prompt "The capital of France is" --new 8 --out $TMP/q4 > $TMP/q4.txt 2>&1
+DARA_INT8=0 DARA_ATTN_REF=1 DARA_CPU_DECODE=0 build/cuda/qwen_generate.exe --gguf $G4 --kv-mode f32 --prompt "The capital of France is" --new 8 --out $TMP/q4 > $TMP/q4.txt 2>&1
 cmp -s $BASE/res4b.logits.bin $TMP/q4.logits.bin && grep -q "restore, re-run 3 decode steps: logits bitwise identical" $TMP/q4.txt && ok "Qwen3.5-4B logits bitwise identical to rc1 baseline; checkpoint/restore bitwise identical" || fail "4B logits"
-DARA_NO_GRAPH=1 build/cuda/qwen_generate.exe --gguf $G4 --prompt "The capital of France is" --new 8 --out $TMP/q4e > $TMP/q4e.txt 2>&1
+DARA_INT8=0 DARA_ATTN_REF=1 DARA_CPU_DECODE=0 DARA_NO_GRAPH=1 build/cuda/qwen_generate.exe --gguf $G4 --kv-mode f32 --prompt "The capital of France is" --new 8 --out $TMP/q4e > $TMP/q4e.txt 2>&1
 cmp -s $BASE/res4b.logits.bin $TMP/q4e.logits.bin && ok "Qwen3.5-4B eager path (DARA_NO_GRAPH=1) bitwise identical to rc1 baseline" || fail "4B eager logits"
-build/cuda/nano_generate.exe --gguf $GN --tokens build/nano_prompt.tokens.txt --new 12 --kv 1024 --no-layers --out $TMP/n > $TMP/n.txt 2>&1
+DARA_INT8=0 DARA_ATTN_REF=1 DARA_CPU_DECODE=0 build/cuda/nano_generate.exe --gguf $GN --kv-mode f32 --tokens build/nano_prompt.tokens.txt --new 12 --kv 1024 --no-layers --out $TMP/n > $TMP/n.txt 2>&1
 cmp -s $BASE/nano_r-1.logits.bin $TMP/n.logits.bin && ok "Nano (Gemma 4 E2B) logits bitwise identical to rc1 baseline" || fail "Nano logits"
-DARA_NO_GRAPH=1 build/cuda/nano_generate.exe --gguf $GN --tokens build/nano_prompt.tokens.txt --new 12 --kv 1024 --no-layers --out $TMP/ne > $TMP/ne.txt 2>&1
+DARA_INT8=0 DARA_ATTN_REF=1 DARA_CPU_DECODE=0 DARA_NO_GRAPH=1 build/cuda/nano_generate.exe --gguf $GN --kv-mode f32 --tokens build/nano_prompt.tokens.txt --new 12 --kv 1024 --no-layers --out $TMP/ne > $TMP/ne.txt 2>&1
 cmp -s $BASE/nano_r-1.logits.bin $TMP/ne.logits.bin && ok "Nano eager path (DARA_NO_GRAPH=1) bitwise identical to rc1 baseline" || fail "Nano eager logits"
 if [ "$WITH9B" = "--with-9b" ]; then
-  build/cuda/qwen_generate.exe --gguf $G9 --prompt-file build/prompts/t0.txt --new 8 --out $TMP/q9 > $TMP/q9.txt 2>&1
+  DARA_INT8=0 DARA_ATTN_REF=1 DARA_CPU_DECODE=0 build/cuda/qwen_generate.exe --gguf $G9 --kv-mode f32 --prompt-file build/prompts/t0.txt --new 8 --out $TMP/q9 > $TMP/q9.txt 2>&1
   cmp -s $BASE/9b_t0.logits.bin $TMP/q9.logits.bin && ok "Qwen3.5-9B (hybrid) logits bitwise identical to rc1 baseline" || fail "9B logits"
 fi
+# 1b. the DEFAULT path (int8 activations + INT8 K/V; 9B with CPU decode of its host-resident layers): lossy by design, so it is checked for
+#     determinism here (two runs bitwise identical) and its logits are recorded as this candidate's int8 baselines; its quality against the FP32
+#     reference is established by bench/quality_gate.py (teacher-forced, several workloads), not by these checks.
+for k in 1 2; do
+  build/cuda/qwen_generate.exe --gguf $G4 --prompt "The capital of France is" --new 32 --out $TMP/d4_$k > $TMP/d4_$k.txt 2>&1
+  build/cuda/nano_generate.exe --gguf $GN --tokens build/nano_prompt.tokens.txt --new 32 --kv 1024 --no-layers --out $TMP/dn_$k > $TMP/dn_$k.txt 2>&1
+done
+cmp -s $TMP/d4_1.logits.bin $TMP/d4_2.logits.bin && ok "Qwen3.5-4B default int8 path deterministic (two runs bitwise identical)" || fail "4B int8 determinism"
+cmp -s $TMP/dn_1.logits.bin $TMP/dn_2.logits.bin && ok "Nano default int8 path deterministic (two runs bitwise identical)" || fail "Nano int8 determinism"
+if [ "$WITH9B" = "--with-9b" ]; then
+  for k in 1 2; do build/cuda/qwen_generate.exe --gguf $G9 --prompt-file build/prompts/t0.txt --new 16 --out $TMP/d9_$k > $TMP/d9_$k.txt 2>&1; done
+  cmp -s $TMP/d9_1.logits.bin $TMP/d9_2.logits.bin && ok "Qwen3.5-9B default path (int8, CPU decode of hosted layers) deterministic" || fail "9B int8 determinism"
+fi
+DARA_TEST_KV=q8 build/cuda/qwen_graph_test.exe $G4 > $TMP/qwen_graph_q8.txt 2>&1 && tail -1 $TMP/qwen_graph_q8.txt | grep -q '^ok$' && ok "Qwen graph tests in the default int8 + INT8 K/V mode" || fail "qwen_graph_test (int8, q8 KV)"
+DARA_TEST_KV=q8 build/cuda/nano_graph_test.exe $GN > $TMP/nano_graph_q8.txt 2>&1 && tail -1 $TMP/nano_graph_q8.txt | grep -q '^ok$' && ok "Nano graph tests in the default int8 + INT8 K/V mode" || fail "nano_graph_test (int8, q8 KV)"
 # 2. graph / eager equivalence under relocation, restore, long decode, injected graph failures and allocation failures
-build/cuda/nano_graph_test.exe $GN > $TMP/nano_graph.txt 2>&1 && tail -1 $TMP/nano_graph.txt | grep -q '^ok$' && ok "Nano graph tests: graphs == eager bitwise through re-capture, rewind, 560 replays; failure injection (capture/instantiate/launch/allocation) recovers cleanly" || fail "nano_graph_test"
-build/cuda/qwen_graph_test.exe $G4 > $TMP/qwen_graph.txt 2>&1 && tail -1 $TMP/qwen_graph.txt | grep -q '^ok$' && ok "Qwen graph tests: graphs == eager bitwise through re-capture, DeltaNet-state restore, 560 replays; failure injection recovers cleanly" || fail "qwen_graph_test"
+DARA_INT8=0 build/cuda/nano_graph_test.exe $GN > $TMP/nano_graph.txt 2>&1 && tail -1 $TMP/nano_graph.txt | grep -q '^ok$' && ok "Nano graph tests: graphs == eager bitwise through re-capture, rewind, 560 replays; failure injection (capture/instantiate/launch/allocation) recovers cleanly" || fail "nano_graph_test"
+DARA_INT8=0 build/cuda/qwen_graph_test.exe $G4 > $TMP/qwen_graph.txt 2>&1 && tail -1 $TMP/qwen_graph.txt | grep -q '^ok$' && ok "Qwen graph tests: graphs == eager bitwise through re-capture, DeltaNet-state restore, 560 replays; failure injection recovers cleanly" || fail "qwen_graph_test"
 # 3. tokenizers and chat template vs Hugging Face
 build/cuda/gemma_tokenizer_test.exe $GN build/golden/gemma_tokenizer_golden.json > $TMP/tok.txt 2>&1 && tail -1 $TMP/tok.txt | grep -q '^ok$' && ok "Gemma tokenizer identical to Hugging Face" || fail "gemma tokenizer"
 build/cuda/gemma_chat_test.exe $GN build/golden/gemma_chat_golden.json > $TMP/chat.txt 2>&1 && tail -1 $TMP/chat.txt | grep -q '^ok$' && ok "Gemma chat template identical to Hugging Face" || fail "gemma chat template"
@@ -50,14 +65,17 @@ cp build/cuda/*.exe build/cuda/cudart64_13.dll $R/bin/
 (cd $R/bin && sha256sum * > ../SHA256SUMS.txt)
 cp $TMP/q4.logits.bin $R/results/res4b.logits.bin; cp $TMP/n.logits.bin $R/results/nano.logits.bin
 [ "$WITH9B" = "--with-9b" ] && cp $TMP/q9.logits.bin $R/results/9b_t0.logits.bin
+cp $TMP/d4_1.logits.bin $R/results/int8_4b.logits.bin; cp $TMP/dn_1.logits.bin $R/results/int8_nano.logits.bin
+[ "$WITH9B" = "--with-9b" ] && cp $TMP/d9_1.logits.bin $R/results/int8_9b_t0.logits.bin
 cp $TMP/*.txt $R/results/ 2>/dev/null
 (cd $R/results && sha256sum *.bin > SHA256SUMS.txt)
 SRC_HASH=$(find src tools tests docs CMakeLists.txt -type f 2>/dev/null | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
 {
   echo "# Dara release candidate $NAME"
   echo
-  echo "Created $(date -u +%Y-%m-%dT%H:%M:%SZ). Source tree is not under version control; identity = SHA-256 over every file in src, tools, tests, docs and CMakeLists.txt:"
-  echo "source-tree sha256: $SRC_HASH"
+  echo "Created $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+  echo "git commit: $(git rev-parse HEAD 2>/dev/null)$(git diff --quiet 2>/dev/null || echo ' (working tree has uncommitted changes)')"
+  echo "source-tree sha256 (src, tools, tests, docs, CMakeLists.txt): $SRC_HASH"
   echo "GPU code targets: $(head -1 build/build_rc2.txt 2>/dev/null | sed 's/CUDA targets: //' | cut -c1-300)"
   echo "Toolchain: CUDA 13.1.1 (redist), MSVC 14.44, C++20."
   echo
@@ -70,6 +88,11 @@ SRC_HASH=$(find src tools tests docs CMakeLists.txt -type f 2>/dev/null | sort |
   echo
   echo "## Measured speed (not a controlled cross-runtime benchmark; this laptop GPU throttles, +-10%)"
   echo "CUDA-graph decode (default) and the eager fallback (DARA_NO_GRAPH=1) are BOTH supported execution paths; both are checked bitwise against the baseline above."
+  echo "Default path (int8 activations + INT8 K/V):"
+  echo "- Qwen 4B: $(grep -h 'warm decode' $TMP/d4_1.txt | sed 's/warm decode: //')"
+  echo "- Nano   : $(grep -h 'warm decode' $TMP/dn_1.txt | sed 's/warm decode: //')"
+  [ "$WITH9B" = "--with-9b" ] && echo "- Qwen 9B: $(grep -h 'warm decode' $TMP/d9_1.txt | sed 's/warm decode: //')"
+  echo "FP32 reference path (DARA_INT8=0, reference attention):"
   echo "- Qwen 4B, graphs: $(grep -h 'warm decode' $TMP/q4.txt | sed 's/warm decode: //')"
   echo "- Qwen 4B, eager : $(grep -h 'warm decode' $TMP/q4e.txt | sed 's/warm decode: //')"
   echo "- Nano,     graphs: $(grep -h 'warm decode' $TMP/n.txt | sed 's/warm decode: //')"
