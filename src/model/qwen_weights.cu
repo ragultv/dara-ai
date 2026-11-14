@@ -139,4 +139,13 @@ DeviceMatrix GgufWeights::load_output_head() const {
     return upload_quant_raw(gguf_qtype(in.type, name), bytes.data(), cfg_.vocab, cfg_.hidden);
 }
 
+
+std::vector<uint8_t> GgufWeights::read_output_head(dara::kernels::QuantType* qt) const {
+    const std::string name = cfg_.tied_embeddings ? "token_embd.weight" : "output.weight";
+    const auto& in = g_.info(name);
+    if (in.cols() != static_cast<uint64_t>(cfg_.hidden) || in.rows() != static_cast<uint64_t>(cfg_.vocab)) throw std::runtime_error("unexpected shape for " + name);
+    if (qt) *qt = gguf_qtype(in.type, name);
+    return g_.read(name);
+}
+
 }  // namespace dara::model

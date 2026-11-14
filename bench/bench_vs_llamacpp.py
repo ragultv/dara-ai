@@ -40,7 +40,7 @@ MODELS = {
     "4b": dict(gguf=os.path.join(ROOT, "models", "qwen3.5-4b-gguf", "Qwen3.5-4B-Q4_K_M.gguf"), exe="qwen_generate.exe", family="qwen",
                ngl=[99], label="Qwen3.5-4B Q4_K_M"),
     "9b": dict(gguf=os.path.join(ROOT, "models", "qwen3.5-9b-gguf", "Qwen3.5-9B-Q4_K_M.gguf"), exe="qwen_generate.exe", family="qwen",
-               ngl=[99, 28, 24, 20], label="Qwen3.5-9B Q4_K_M"),
+               ngl=[22, 24, 20], label="Qwen3.5-9B Q4_K_M"),
 }
 
 

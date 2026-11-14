@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "io/gguf_checkpoint.h"
+#include "model/cpu_decode.h"
 #include "model/decode_graph.h"
 #include "model/layer_cuda.h"
 #include "model/packed_layer.h"
@@ -114,6 +115,21 @@ public:
 
 private:
     void start_copy(int layer);
+    // CPU decode of the hosted layers (cpu_decode.h): single-token steps run layers [resident_, L) on the CPU from their host images.
+    // The hosted layers' state is current on exactly one side; cpu_current_ says which (true: CpuLayerState is newer than the GPU copy).
+    void sync_hosted_to_cpu();
+    void sync_hosted_to_gpu();
+    std::unique_ptr<CpuDecoder> cpu_;
+    std::vector<CpuLayerWeights> cpu_w_;   // index l - resident_
+    std::vector<CpuLayerState> cpu_s_;
+    bool cpu_current_ = false;
+    bool cpu_verify_pending_ = false;
+    // CPU-decode placement: the output head stays in host RAM (its VRAM goes to layers, as llama.cpp does for partially offloaded models)
+    // and hosted layers stream through ONE staging arena during prompt chunks.
+    bool head_on_cpu_ = false;
+    std::vector<uint8_t> head_host_;
+    HostMatrix head_cpu_;
+    int nslots_ = 2;   // DARA_CPU_VERIFY: compare GPU vs CPU per layer on the next CPU decode step
 
     QwenConfig cfg_;
     const IModelWeights& weights_;

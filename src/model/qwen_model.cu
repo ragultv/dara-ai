@@ -91,7 +91,8 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     const size_t head_bytes = weights.head_bytes();
     const size_t C = static_cast<size_t>(std::max(1, opt.max_chunk_tokens));
     const size_t workspace = C * (14 * static_cast<size_t>(cfg.hidden) + 2 * static_cast<size_t>(cfg.inter) + 2 * static_cast<size_t>(cfg.heads) * cfg.head_dim * 2) * sizeof(float) + 32 * kMiB;
-    const size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(256 * kMiB, total_b / 16);
+    // reserve: max(128 MiB, VRAM/32) -- on a 4 GB GPU 128 MiB (measured: ~150 MiB stays free in use at 21+2 9B layers, enough for 8K-token prefill scratch)
+    const size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(128 * kMiB, total_b / 32);
 
     // ---- plan -----------------------------------------------------------------------------------------------
     dara::core::ModelManifest man;
@@ -126,6 +127,24 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         staging = 2 * align_up(max_layer);
         req.budget.workspace_bytes = workspace + staging;
         plan = dara::core::plan_placement(req);
+    }
+    {   // CPU decode of hosted layers: re-plan with the head in host RAM and a single staging arena (more layers fit in VRAM)
+        const char* ce = std::getenv("DARA_CPU_DECODE");
+        const bool cpu_mode = !(ce && ce[0] == '0') && cpu_decode_available() && cpu_decode_supports(opt.kv_format);
+        size_t hosted_bytes = 0;
+        for (int i = static_cast<int>(plan.gpu_layers); i < L; ++i) hosted_bytes += layer_bytes[i];
+        if (cpu_mode && plan.host_layers > 0 && opt.force_resident_layers < 0 && sys.available_bytes > hosted_bytes + head_bytes + ram_margin) {
+            dara::core::PlacementRequest r2 = req;
+            r2.model.embed_output_bytes = 0;
+            r2.budget.workspace_bytes = workspace + align_up(max_layer);
+            const dara::core::PlacementPlan p2 = dara::core::plan_placement(r2);
+            if (p2.kind != dara::core::Placement::DoesNotFit && p2.kind != dara::core::Placement::StorageBacked && p2.gpu_layers > plan.gpu_layers) {
+                plan = p2;
+                head_on_cpu_ = true;
+                nslots_ = 1;
+                staging = align_up(max_layer);
+            }
+        }
     }
     int resident = static_cast<int>(plan.gpu_layers);
     if (opt.force_resident_layers >= 0) resident = std::min(L, opt.force_resident_layers);
@@ -175,7 +194,14 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         }
         states_.push_back(std::move(s));
     }
-    head_ = weights.load_output_head();
+    if (head_on_cpu_) {
+        dara::kernels::QuantType hq;
+        head_host_ = weights.read_output_head(&hq);
+        const size_t rb = head_host_.size() / static_cast<size_t>(cfg_.vocab);
+        head_cpu_ = HostMatrix{head_host_.data(), hq, static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden), rb};
+    } else {
+        head_ = weights.load_output_head();
+    }
     layers_.reserve(L);
     report_.hosted_pinned = true;
     for (int i = 0; i < L; ++i) {
@@ -191,7 +217,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     }
     report_.resident_layers = resident_;
     report_.hosted_layers = L - resident_;
-    report_.head_bytes = head_.bytes;
+    report_.head_bytes = head_on_cpu_ ? 0 : head_.bytes;
     weights.embed_row(0);  // read the embedding table into host RAM now (cold load), not on the first token
     report_.embedding_host_bytes = weights.embedding_bytes();
     report_.state_bytes = state_bytes + kv_bytes;
@@ -202,8 +228,8 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     if (resident_ < L) {  // staging arenas + copy stream for hosted layers
         size_t hosted_max = 0;
         for (int i = resident_; i < L; ++i) hosted_max = std::max(hosted_max, layers_[i].matrix_bytes);
-        report_.staging_bytes = 2 * hosted_max;
-        for (int k = 0; k < 2; ++k) {
+        report_.staging_bytes = static_cast<size_t>(nslots_) * hosted_max;
+        for (int k = 0; k < nslots_; ++k) {
             arena_[k] = static_cast<uint8_t*>(counted_malloc(hosted_max));
             const size_t bytes = hosted_max;
             arena_owner_[k] = std::shared_ptr<void>(arena_[k], [bytes](void* p) { counted_free(p, bytes); });
@@ -232,6 +258,20 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     }
     if (const char* e = std::getenv("DARA_NO_GRAPH")) use_graphs_ = !(e[0] == '1');
     reserve_pool();  // size every scratch slot for the largest chunk now, so a captured graph never sees an allocation or a moved buffer
+    {   // CPU decode of hosted layers (DARA_CPU_DECODE=0 disables; DARA_CPU_THREADS overrides the thread count)
+        const char* e = std::getenv("DARA_CPU_DECODE");
+        const bool want = !(e && e[0] == '0');
+        if (want && (resident_ < cfg_.layers || head_on_cpu_) && cpu_decode_available() && cpu_decode_supports(opt.kv_format)) {
+            const char* th = std::getenv("DARA_CPU_THREADS");
+            cpu_ = std::make_unique<CpuDecoder>(th ? std::atoi(th) : 0);
+            for (int l = resident_; l < cfg_.layers; ++l) {
+                cpu_w_.push_back(CpuDecoder::make_weights(layers_[l]));
+                cpu_s_.push_back(CpuDecoder::make_state(cpu_w_.back(), kv_capacity, opt.kv_format));
+            }
+            report_.plan += " + CPU decode of the " + std::to_string(cfg_.layers - resident_) + " hosted layers (" + std::to_string(cpu_->threads()) + " threads)";
+            if (head_on_cpu_) report_.plan += ", output head in host RAM, 1 staging arena";
+        }
+    }
     load_seconds_ = since(t_start);
   } catch (...) {
     release_raw();  // a constructor that throws never runs the destructor
@@ -266,7 +306,25 @@ void QwenModel::release_raw() {
 
 QwenModel::~QwenModel() { release_raw(); }
 
+void QwenModel::sync_hosted_to_cpu() {
+    for (size_t i = 0; i < cpu_s_.size(); ++i) {
+        const int l = resident_ + static_cast<int>(i);
+        CpuDecoder::download(states_[l], cpu_s_[i], states_[l].pos);
+    }
+    cpu_current_ = true;
+    cpu_verify_pending_ = true;
+}
+
+void QwenModel::sync_hosted_to_gpu() {
+    for (size_t i = 0; i < cpu_s_.size(); ++i) {
+        const int l = resident_ + static_cast<int>(i);
+        CpuDecoder::upload(cpu_s_[i], states_[l], states_[l].pos);
+    }
+    cpu_current_ = false;
+}
+
 QwenModel::Checkpoint QwenModel::checkpoint() const {
+    if (cpu_current_) const_cast<QwenModel*>(this)->sync_hosted_to_gpu();   // checkpoints copy the GPU states
     Checkpoint c;
     c.pos = pos_;
     for (const auto& s : states_) c.layers.push_back(gpu_layer_checkpoint(s));
@@ -277,9 +335,11 @@ void QwenModel::restore(const Checkpoint& c) {
     if (c.layers.size() != states_.size()) throw std::invalid_argument("checkpoint does not match this model");
     for (size_t i = 0; i < states_.size(); ++i) gpu_layer_restore(states_[i], c.layers[i]);
     pos_ = c.pos;
+    cpu_current_ = false;   // the GPU copy is the restored one
 }
 
 void QwenModel::snapshot() {
+    if (cpu_current_) sync_hosted_to_gpu();   // the snapshot shadows the GPU states
     if (shadow_conv_.empty()) {  // first use: allocate the in-VRAM shadow of every DeltaNet layer's state
         shadow_conv_.resize(states_.size());
         shadow_S_.resize(states_.size());
@@ -318,7 +378,7 @@ void QwenModel::rollback(int keep) {
 }
 
 void QwenModel::start_copy(int layer) {
-    const int slot = (layer - resident_) % 2;
+    const int slot = (layer - resident_) % nslots_;
     PackedLayer& p = layers_[layer];
     // The host runs ahead of the GPU now: do not overwrite this staging slot until compute that read it has finished.
     if (slot_used_[slot]) cuda_check(cudaStreamWaitEvent(static_cast<cudaStream_t>(copy_stream_), static_cast<cudaEvent_t>(compute_done_[slot]), 0), "copy waits for compute");
@@ -338,7 +398,12 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     sample_free();
     streamed_bytes_ = 0;
 
-    if (resident_ < L) start_copy(resident_);  // prefetch the first hosted layer while the host gathers embeddings
+    // single-token decode with hosted layers: those layers run on the CPU (no weight streaming); everything else keeps the GPU path
+    const bool cpu_dec = cpu_ && T == 1 && !layer_outputs && !record_next_;
+    if (cpu_dec) { if (!cpu_current_) sync_hosted_to_cpu(); }
+    else if (cpu_current_) sync_hosted_to_gpu();
+    const int gpu_layers = cpu_dec ? resident_ : L;
+    if (resident_ < L && !cpu_dec) start_copy(resident_);  // prefetch the first hosted layer while the host gathers embeddings
 
     auto t0 = Clock::now();
     std::vector<float> hidden(static_cast<size_t>(T) * H);
@@ -359,7 +424,8 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     int cur = 0;
     t0 = Clock::now();
     // CUDA-graph decode: one captured launch for all layers (resident weights, single token, nothing recording or reading per-layer data).
-    const bool use_graph = use_graphs_ && T == 1 && resident_ == L && !layer_outputs && !record_next_ &&
+    // With CPU decode of hosted layers, the graph covers the VRAM-resident prefix [0, gpu_layers) and the CPU runs the rest.
+    const bool use_graph = use_graphs_ && T == 1 && (resident_ == L || cpu_dec) && !layer_outputs && !record_next_ &&
                            pos_ + 1 <= static_cast<size_t>(kAttentionMaxKvLen);
     bool graph_done = false;
     if (use_graph) {
@@ -368,11 +434,12 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
         try {
             *h_pos_ = static_cast<int64_t>(pos_);
             cuda_check(cudaMemcpyAsync(d_pos_.p, h_pos_, sizeof(int64_t), cudaMemcpyHostToDevice, graph_.stream()), "upload position");
-            const std::vector<void*> key = {hid_dev[0], hid_dev[1], pool_.get<float>(1, 1), pool_.get<float>(10, 1), pool_.get<float>(17, 1)};
+            const std::vector<void*> key = {hid_dev[0], hid_dev[1], pool_.get<float>(1, 1), pool_.get<float>(10, 1), pool_.get<float>(17, 1),
+                                            reinterpret_cast<void*>(static_cast<uintptr_t>(gpu_layers))};
             if (!graph_.ready_for(key)) {
                 graph_.capture(key, [&] {
                     int c = 0;
-                    for (int l = 0; l < L; ++l) {
+                    for (int l = 0; l < gpu_layers; ++l) {
                         gpu_layer_forward_dev(layers_[l].weights, states_[l], hid_dev[c], hid_dev[1 - c], 1, pool_, nullptr, graph_.stream_ptr(), d_pos_.p);
                         c = 1 - c;
                     }
@@ -389,18 +456,18 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
         }
     }
     if (graph_done) {
-        for (GpuLayerState& st : states_) st.pos += 1;  // host bookkeeping the replayed graph cannot do
-        cur = L % 2;                                    // each layer flips the ping-pong buffers
+        for (int l = 0; l < gpu_layers; ++l) states_[l].pos += 1;  // host bookkeeping the replayed graph cannot do (CPU layers count their own)
+        cur = gpu_layers % 2;                                      // each layer flips the ping-pong buffers
     } else {
-    for (int l = 0; l < L; ++l) {
+    for (int l = 0; l < gpu_layers; ++l) {
         PackedLayer& p = layers_[l];
         if (l >= resident_) {  // hosted layer: wait for its copy, bind to the arena, and start the next layer's copy
-            const int slot = (l - resident_) % 2;
+            const int slot = (l - resident_) % nslots_;
             const auto tw = Clock::now();
             cuda_check(cudaEventSynchronize(static_cast<cudaEvent_t>(copy_done_[slot])), "wait for staged layer");
             rs.copy_wait_seconds += since(tw);
             bind_matrices(p, arena_owner_[slot], arena_[slot]);
-            if (l + 1 < L) start_copy(l + 1);
+            if (l + 1 < L && nslots_ == 2) start_copy(l + 1);   // double buffer: prefetch the next layer now
         }
         float* tape = (record_next_ && T <= kMaxSpecTokens && T <= C && states_[l].kind == LayerKind::DeltaNet) ? tape_[l].p : nullptr;
         for (int c0 = 0; c0 < T; c0 += C) {
@@ -408,9 +475,10 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
             gpu_layer_forward_dev(p.weights, states_[l], hid_dev[cur] + static_cast<size_t>(c0) * H, hid_dev[1 - cur] + static_cast<size_t>(c0) * H, n, pool_, tape);
         }
         if (l >= resident_) {  // this layer's weights stay in use until its compute drains; tell the copy stream when that happens
-            const int slot = (l - resident_) % 2;
+            const int slot = (l - resident_) % nslots_;
             cuda_check(cudaEventRecord(static_cast<cudaEvent_t>(compute_done_[slot]), 0), "record compute done");
             slot_used_[slot] = true;
+            if (nslots_ == 1 && l + 1 < gpu_layers) start_copy(l + 1);   // single arena: the next copy waits for this layer's compute
         }
         cur = 1 - cur;
         if (layer_outputs) {
@@ -421,6 +489,54 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     }
     }
     cuda_check(cudaMemcpy(hidden.data(), hid_dev[cur], TH_all * sizeof(float), cudaMemcpyDeviceToHost), "download hidden");  // waits for all layers
+    static const bool verify = [] { const char* e = std::getenv("DARA_CPU_VERIFY"); return e && e[0] == '1'; }();
+    if (cpu_dec && verify && cpu_verify_pending_) {
+        // Diagnostic (DARA_CPU_VERIFY=1), first CPU decode step after a hand-over (GPU and CPU states identical): every hosted layer runs on BOTH
+        // sides from the same input; prints the relative difference of the outputs. The GPU copies advance too, which is harmless: the CPU copy is
+        // authoritative until the next hand-over uploads it.
+        cpu_verify_pending_ = false;
+        std::vector<float> in = hidden, g_out(H), c_out(H);
+        float* dbuf[2] = {pool_.get<float>(40, H), pool_.get<float>(41, H)};
+        for (int l = resident_; l < L; ++l) {
+            const size_t i = static_cast<size_t>(l - resident_);
+            const size_t p0 = states_[l].pos;
+            start_copy(l);
+            const int slot = (l - resident_) % nslots_;
+            cuda_check(cudaEventSynchronize(static_cast<cudaEvent_t>(copy_done_[slot])), "verify: stage");
+            bind_matrices(layers_[l], arena_owner_[slot], arena_[slot]);
+            cuda_check(cudaMemcpy(dbuf[0], in.data(), H * sizeof(float), cudaMemcpyHostToDevice), "verify: in");
+            gpu_layer_forward_dev(layers_[l].weights, states_[l], dbuf[0], dbuf[1], 1, pool_, nullptr);
+            cuda_check(cudaMemcpy(g_out.data(), dbuf[1], H * sizeof(float), cudaMemcpyDeviceToHost), "verify: out");
+            cuda_check(cudaEventRecord(static_cast<cudaEvent_t>(compute_done_[slot]), 0), "verify: compute done");
+            slot_used_[slot] = true;
+            states_[l].pos = p0;
+            CpuLayerState scopy = cpu_s_[i];   // do not advance the real CPU state here
+            cpu_->forward(cpu_w_[i], scopy, in.data(), c_out.data(), static_cast<int64_t>(p0));
+            double num = 0, den = 0;
+            for (int k = 0; k < H; ++k) { num += (double(g_out[k]) - c_out[k]) * (double(g_out[k]) - c_out[k]); den += double(g_out[k]) * g_out[k]; }
+            std::fprintf(stderr, "[cpu verify] layer %d (%s) pos %zu: relative difference GPU vs CPU %.3e\n", l,
+                         states_[l].kind == LayerKind::DeltaNet ? "deltanet" : "attention", p0, std::sqrt(num / (den + 1e-30)));
+            in = g_out;   // next layer from the GPU output: isolates per-layer error
+        }
+        {   // end to end: the CPU chain on its own outputs vs the GPU chain (in = final GPU output)
+            std::vector<float> h = hidden;
+            for (int l = resident_; l < L; ++l) {
+                const size_t i = static_cast<size_t>(l - resident_);
+                CpuLayerState scopy = cpu_s_[i];
+                cpu_->forward(cpu_w_[i], scopy, h.data(), h.data(), static_cast<int64_t>(states_[l].pos));
+            }
+            double num = 0, den = 0, mx = 0;
+            for (int k = 0; k < H; ++k) { const double e = double(in[k]) - h[k]; num += e * e; den += double(in[k]) * in[k]; mx = std::max(mx, std::fabs(double(in[k]))); }
+            std::fprintf(stderr, "[cpu verify] end to end: relative difference %.3e (max |hidden| %.1f)\n", std::sqrt(num / (den + 1e-30)), mx);
+        }
+    }
+    if (cpu_dec) {   // the hosted layers, on the CPU, in place on the downloaded hidden state
+        for (int l = resident_; l < L; ++l) {
+            const size_t i = static_cast<size_t>(l - resident_);
+            cpu_->forward(cpu_w_[i], cpu_s_[i], hidden.data(), hidden.data(), static_cast<int64_t>(states_[l].pos));
+            states_[l].pos += 1;
+        }
+    }
     layer_prof_flush();  // no-op unless DARA_LAYER_PROF=1; the copy above synchronised the stream
     rs.compute_seconds = since(t0) - rs.copy_wait_seconds;
     if (record_next_) { tape_tokens_ = (T <= kMaxSpecTokens && T <= C) ? T : 0; record_next_ = false; }
@@ -436,11 +552,15 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
         for (int t = 0; t < n_out; ++t)
             rmsnorm(&hidden[static_cast<size_t>(t + logits_from) * H], final_scale.data(), H, cfg_.eps, &normed[static_cast<size_t>(t) * H]);
         // One batched projection: the output head is read once per group of 8 rows instead of once per row.
+        if (head_on_cpu_) {
+            for (int t = 0; t < n_out; ++t) cpu_->matvec(head_cpu_, &normed[static_cast<size_t>(t) * H], &logits[static_cast<size_t>(t) * cfg_.vocab]);
+        } else {
         float* dx = pool_.get<float>(30, static_cast<size_t>(n_out) * H);
         float* dy = pool_.get<float>(31, static_cast<size_t>(n_out) * cfg_.vocab);
         cuda_check(cudaMemcpy(dx, normed.data(), static_cast<size_t>(n_out) * H * sizeof(float), cudaMemcpyHostToDevice), "head input");
         cuda_check(matvec_multi_cuda(head_, dx, static_cast<size_t>(H), dy, static_cast<size_t>(cfg_.vocab), n_out), "lm_head");
         cuda_check(cudaMemcpy(logits.data(), dy, logits.size() * sizeof(float), cudaMemcpyDeviceToHost), "logits copy");
+        }
     }
     rs.head_seconds = since(t0);
     sample_free();
