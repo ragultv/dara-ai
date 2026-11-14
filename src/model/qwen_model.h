@@ -81,8 +81,10 @@ public:
     // Runs `tokens` (T ids) through all layers starting at the current position, advancing every layer's state.
     // Returns logits for positions [logits_from, T) of this call as [(T - logits_from)][vocab] floats.
     // If layer_outputs is non-null it receives each layer's output [T][hidden] (host copies, for validation).
+    // argmax_out (optional): instead of returning logits, the greedy token of every position [logits_from, T) is computed on the device and only those ids
+    // are copied back (speculative verification and greedy decode: no vocab-sized transfers). The returned vector is then empty.
     std::vector<float> forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs = nullptr,
-                               RunStats* stats = nullptr);
+                               RunStats* stats = nullptr, std::vector<int32_t>* argmax_out = nullptr);
 
     size_t position() const { return pos_; }
     const QwenConfig& config() const { return cfg_; }
@@ -126,6 +128,7 @@ private:
     // CPU-decode placement: the output head stays in host RAM (its VRAM goes to layers, as llama.cpp does for partially offloaded models)
     // and hosted layers stream through ONE staging arena during prompt chunks.
     bool head_on_cpu_ = false;
+    DevBuf<unsigned char> d_argmax_;   // argmax scratch + per-row results (greedy / verification steps)
     std::vector<uint8_t> head_host_;
     HostMatrix head_cpu_;
     int nslots_ = 2;   // staging arenas for hosted layers during prompt chunks (1 in CPU-decode placement)

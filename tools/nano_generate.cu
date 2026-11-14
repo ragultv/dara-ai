@@ -39,6 +39,7 @@ int main(int argc, char** argv) {
     size_t kv = 2048;
     bool dump_layers = true, parse_special = false, stop_at_eos = false, think = false, profile = false, bench = false;
     int chunk_tokens = 0;
+    int spec_k = 0, ngram_max = 4, ngram_min = 3;   // --spec K: prompt-lookup speculative decoding (greedy-exact)
     KvFormat kv_format = KvFormat::Q8;   // default INT8 K/V (near-lossless; --kv-mode f32 for the reference path)  // --kv-mode f32|tq4
     std::string chat_user, chat_system, teacher_file;  // --chat renders the model's chat template around the user message
     for (int i = 1; i < argc; ++i) {
@@ -60,6 +61,9 @@ int main(int argc, char** argv) {
         else if (a == "--resident") force_resident = std::atoi(next().c_str());
         else if (a == "--no-layers") dump_layers = false;
         else if (a == "--bench") { bench = true; dump_layers = false; }   // throughput mode: decode logits are not copied to the host or saved
+        else if (a == "--spec") spec_k = std::atoi(next().c_str());
+        else if (a == "--ngram") ngram_max = std::atoi(next().c_str());
+        else if (a == "--ngram-min") ngram_min = std::atoi(next().c_str());
         else if (a == "--chunk") chunk_tokens = std::atoi(next().c_str());   // prefill chunk size (default: the model's, 64)
         else if (a == "--kv-mode") { const std::string m = next(); if (m == "tq4") kv_format = KvFormat::TQ4; else if (m == "q8") kv_format = KvFormat::Q8; else if (m == "k16v8") kv_format = KvFormat::K16V8; else if (m == "f32") kv_format = KvFormat::F32; else { std::fprintf(stderr, "--kv-mode must be f32, q8 or tq4\n"); return 2; } }
         else if (a == "--teacher") teacher_file = next();   // teacher forcing: feed the continuation of this reference tokens file instead of our own argmax
@@ -164,7 +168,56 @@ int main(int argc, char** argv) {
         RunStats sum;
         int steps = 0;
         const auto t_dec0 = std::chrono::steady_clock::now();
-        for (int k = 1; k < n_new && !hit_eos; ++k) {
+        long spec_steps = 0, drafted = 0, accepted = 0, passes = 0;
+        if (spec_k > 0 && teacher.empty()) {
+            // Speculative decoding, greedy-exact (same scheme as qwen_generate): prompt lookup proposes up to spec_k tokens, ONE forward of cur + drafts
+            // gives the model's own greedy token after each, the longest agreeing prefix is kept and the KV length rewound past the rest (Gemma's only
+            // state is its K/V cache). A step with no accepted draft backs off for a few tokens, so non-repetitive text is never slower.
+            if (spec_k > 15) spec_k = 15;
+            auto lookup = [&](std::vector<int32_t>& draft, int limit) {
+                draft.clear();
+                const int n_sz = static_cast<int>(seq.size());
+                for (int n = ngram_max; n >= ngram_min && draft.empty(); --n) {
+                    if (n_sz <= n) continue;
+                    for (int j = n_sz - n - 1; j >= 0; --j) {
+                        bool eq = true;
+                        for (int q = 0; q < n && eq; ++q) eq = seq[j + q] == seq[n_sz - n + q];
+                        if (!eq) continue;
+                        for (int q = j + n; q < n_sz && static_cast<int>(draft.size()) < limit; ++q) draft.push_back(seq[q]);
+                        if (!draft.empty()) break;
+                    }
+                }
+            };
+            std::vector<int32_t> draft, feed;
+            int cooldown = 0, backoff = 0;
+            while (static_cast<int>(seq.size()) - T0 < n_new && !hit_eos) {
+                const int budget = n_new - (static_cast<int>(seq.size()) - T0) - 1;
+                if (cooldown > 0) { --cooldown; draft.clear(); } else lookup(draft, std::min(spec_k, budget));
+                const int32_t cur = seq.back();
+                std::vector<int32_t> to_add;
+                if (draft.empty()) {
+                    to_add.push_back(model.forward_greedy(cur, &st)); ++passes;
+                } else {
+                    const int kd = static_cast<int>(draft.size());
+                    feed.assign(1, cur); feed.insert(feed.end(), draft.begin(), draft.end());
+                    const size_t p0 = model.position();
+                    const std::vector<int32_t> ids = model.forward_argmax(feed.data(), kd + 1, &st); ++passes; ++spec_steps; drafted += kd;
+                    int m = 0;
+                    while (m < kd && ids[m] == draft[m]) ++m;
+                    accepted += m;
+                    if (m == 0) { backoff = backoff ? std::min(backoff * 2, 32) : 2; cooldown = backoff; } else backoff = 0;   // a failed check costs several steps: back off hard
+                    if (m < kd) model.rewind(p0 + static_cast<size_t>(m) + 1);   // keep cur + the accepted drafts
+                    for (int q = 0; q < m; ++q) to_add.push_back(draft[q]);
+                    to_add.push_back(ids[m]);
+                }
+                sum.seconds += st.seconds; sum.compute_seconds += st.compute_seconds; sum.head_seconds += st.head_seconds; sum.embed_seconds += st.embed_seconds;
+                for (int32_t id : to_add) {
+                    seq.push_back(id); emit(id); ++steps;
+                    if (is_eos(id)) { hit_eos = true; break; }
+                }
+            }
+        }
+        for (int k = 1; (spec_k == 0 || !teacher.empty()) && k < n_new && !hit_eos; ++k) {
             const int32_t feed = tok;
             std::vector<float> row;
             tok = model.forward_greedy(feed, &st, bench ? nullptr : &row);   // next token chosen on the GPU (same as the host argmax)
@@ -190,6 +243,9 @@ int main(int argc, char** argv) {
             std::printf("warm decode: %d steps, %.4f s/token = %.2f tok/s (wall %.2f tok/s) | compute %.4f s, copy-wait %.4f s, head %.4f s, embed %.4f s, streamed %.1f MiB/token\n",
                         steps, sum.seconds / steps, steps / sum.seconds, steps / wall, sum.compute_seconds / steps, sum.copy_wait_seconds / steps,
                         sum.head_seconds / steps, sum.embed_seconds / steps, sum.streamed_bytes / 1048576.0 / steps);
+        if (spec_k > 0 && spec_steps > 0)
+            std::printf("speculation: %ld verify steps, %ld drafted, %ld accepted (%.0f%%, %.2f per step), %ld model passes for %d tokens\n", spec_steps, drafted, accepted,
+                        drafted ? 100.0 * accepted / drafted : 0.0, static_cast<double>(accepted) / spec_steps, passes, steps);
         if (profile) std::printf("%s", model.profile_report().c_str());
         const auto sys = dara::core::query_system_memory();
         std::printf("memory: Dara's counted device peak %.0f MiB (all other VRAM users on this GPU excluded), lowest free VRAM seen %.0f MiB, host peak working set %.0f MiB\n",
