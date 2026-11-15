@@ -509,8 +509,13 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
     std::optional<Int8SharedInput> share_qkv(std::in_place, h1);   // q, k, v all read h1 (unchanged until the pre-feed-forward norm)
     cuda_check(matvec_multi_cuda(p.mats[kQ], h1, H, q, static_cast<size_t>(heads) * hd, n, st), "q_proj");
     PM("attn matmul (q/k/v/o)");
+    // fast mode: fused kernels (fewer launches per layer); the FP32 reference path (DARA_INT8=0) keeps the separate, validated kernels
+    const bool fused = int8_enabled();
+    if (fused) cuda_check(norm_rope_cuda(q, s.q_norm.p, n, heads, hd, c.eps, dpos, s.inv_freq.p, st), "q norm + rope");
+    else {
     cuda_check(rmsnorm_cuda(q, s.q_norm.p, n * heads, hd, c.eps, q, st), "q_norm");
     cuda_check(rope_cuda(q, n, heads, hd, hd, dpos, s.inv_freq.p, st), "rope q");
+    }
     PM("rope+qk norm");
 
     const int src = c.kv_src[l];
@@ -521,6 +526,9 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
         cuda_check(matvec_multi_cuda(p.mats[kK], h1, H, k, kvw, n, st), "k_proj");
         cuda_check(matvec_multi_cuda(p.mats[kV], h1, H, v, kvw, n, st), "v_proj");
         PM("attn matmul (q/k/v/o)");
+        if (fused && opt_.kv_format == KvFormat::Q8) {   // k norm + rope, v norm, both INT8 appends: one kernel
+            cuda_check(kv_finish_q8_cuda(k, v, s.k_norm.p, n, kvh, hd, c.eps, dpos, s.inv_freq.p, kv_[l].Kq.p, kv_[l].Kn.p, kv_[l].Vq.p, kv_[l].Vn.p, st), "kv finish");
+        } else {
         cuda_check(rmsnorm_cuda(k, s.k_norm.p, n * kvh, hd, c.eps, k, st), "k_norm");
         cuda_check(rope_cuda(k, n, kvh, hd, hd, dpos, s.inv_freq.p, st), "rope k");
         cuda_check(rmsnorm_cuda(v, ones_.p, n * kvh, hd, c.eps, v, st), "v_norm");  // parameter-free RMSNorm
@@ -533,6 +541,7 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
             cuda_check(tq_append_cuda(v, dpos, n, kvh, hd, kv_[l].Vq.p, kv_[l].Vn.p, st), "tq append V");
         } else {
             cuda_check(kv_append_cuda(kv_[l].K.p, kv_[l].V.p, k, v, dpos, n, static_cast<int>(kvw), st), "append K/V");
+        }
         }
         PM("kv append / v norm");
     }
@@ -569,8 +578,11 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
     share_qkv.reset();
     cuda_check(matvec_multi_cuda(p.mats[kO], att, static_cast<size_t>(heads) * hd, o, H, n, st), "o_proj");
     PM("attn matmul (q/k/v/o)");
+    if (fused) cuda_check(norm_residual_cuda(o, s.post_attn_norm.p, n, H, c.eps, x, 1.0f, false, x1, st), "post-attention norm + residual");
+    else {
     cuda_check(rmsnorm_cuda(o, s.post_attn_norm.p, n, H, c.eps, o, st), "post-attention norm");
     cuda_check(add_cuda(x, o, x1, nH, st), "residual 1");
+    }
     PM("norm");
 
     cuda_check(rmsnorm_cuda(x1, s.pre_ff_norm.p, n, H, c.eps, h1, st), "pre-feed-forward norm");
@@ -584,8 +596,11 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
     PM("geglu");
     cuda_check(matvec_multi_cuda(p.mats[kDown], g, static_cast<size_t>(I), d, H, n, st), "down_proj");
     PM("mlp matmul (gate/up/down)");
+    if (fused) cuda_check(norm_residual_cuda(d, s.post_ff_norm.p, n, H, c.eps, x1, 1.0f, false, x1, st), "post-feed-forward norm + residual");
+    else {
     cuda_check(rmsnorm_cuda(d, s.post_ff_norm.p, n, H, c.eps, d, st), "post-feed-forward norm");
     cuda_check(add_cuda(x1, d, x1, nH, st), "residual 2");
+    }
     PM("norm");
 
     // per-layer input: gate -> GELU * per-layer embedding -> projection -> norm -> residual
@@ -593,9 +608,12 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
     cuda_check(geglu_cuda(pg, pli_l, pg, static_cast<size_t>(n) * PD, st), "per-layer gate activation");
     cuda_check(matvec_multi_cuda(s.proj, pg, static_cast<size_t>(PD), pp, H, n, st), "per-layer projection");
     PM("per-layer input block");
+    if (fused) cuda_check(norm_residual_cuda(pp, s.post_pli_norm.p, n, H, c.eps, x1, s.layer_scalar, true, out, st), "post per-layer norm + residual + scale");
+    else {
     cuda_check(rmsnorm_cuda(pp, s.post_pli_norm.p, n, H, c.eps, pp, st), "post per-layer norm");
     cuda_check(add_cuda(x1, pp, out, nH, st), "residual 3");
     cuda_check(scale_cuda(out, s.layer_scalar, nH, st), "layer scalar");
+    }
     PM("per-layer input block");
 }
 

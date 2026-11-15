@@ -39,4 +39,13 @@ int kv_append_cuda(float* d_Kc, float* d_Vc, const float* d_k, const float* d_v,
 // Largest number of attended positions the attention kernel supports (it keeps one score per position in shared memory).
 constexpr int kGemmaMaxContext = 12288;
 
+// Fused decode-path kernels (fewer launches per layer). Same arithmetic as the separate kernels they replace.
+// out = (res + rmsnorm(y) * w) [* scale]; res and out may alias.
+int norm_residual_cuda(const float* y, const float* w, int rows, int n, float eps, const float* res, float scale, bool scaled, float* out, void* stream = nullptr);
+// x <- rope(rmsnorm(x) * w) per (token, head), rot_dim == head_dim.
+int norm_rope_cuda(float* x, const float* w, int tokens, int heads, int hd, float eps, const int64_t* d_pos, const float* inv_freq, void* stream = nullptr);
+// k <- rope(rmsnorm(k) * k_norm), v <- rmsnorm(v); both quantised to INT8 (per-32 scales) and written at each token's position.
+int kv_finish_q8_cuda(const float* k, const float* v, const float* k_norm, int tokens, int kv_heads, int hd, float eps, const int64_t* d_pos, const float* inv_freq,
+                      uint8_t* Kq, float* Ks, uint8_t* Vq, float* Vs, void* stream = nullptr);
+
 }  // namespace dara::model

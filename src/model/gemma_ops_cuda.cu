@@ -107,6 +107,112 @@ gemma_attention_kernel(const float* __restrict__ q, const float* __restrict__ K,
 
 inline unsigned grid_for(size_t n) { const size_t b = (n + 255) / 256; return static_cast<unsigned>(b < 4096 ? b : 4096); }
 
+
+// ---- fused decode kernels (fewer launches per layer; each reproduces the separate kernels' arithmetic in the same order) -------------------------
+// Block-wide sum of squares with the same partition and reduction order as rmsnorm_kernel (ops_cuda.cu).
+__device__ __forceinline__ float block_rms_inv(const float* xr, int n, float eps) {
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) ss = fmaf(xr[i], xr[i], ss);
+    for (int off = 16; off > 0; off >>= 1) ss += __shfl_down_sync(0xffffffffu, ss, off);
+    __shared__ float warp_sums[32];
+    __shared__ float s_r;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    if (lane == 0) warp_sums[warp] = ss;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float total = 0.0f;
+        for (int w = 0; w < (blockDim.x + 31) / 32; ++w) total += warp_sums[w];
+        s_r = rsqrtf(total / static_cast<float>(n) + eps);
+    }
+    __syncthreads();
+    const float r = s_r;
+    __syncthreads();   // s_r / warp_sums may be reused by a following call in the same kernel
+    return r;
+}
+
+// out = (res + rmsnorm(y) * w) * scale     (post-attention / post-feed-forward / per-layer norms followed by the residual add [and the layer scalar])
+__global__ void norm_residual_kernel(const float* __restrict__ y, const float* __restrict__ w, int n, float eps, const float* __restrict__ res, float scale,
+                                     bool scaled, float* __restrict__ out) {
+    const float* yr = y + static_cast<size_t>(blockIdx.x) * n;
+    const float* rr = res + static_cast<size_t>(blockIdx.x) * n;
+    float* orow = out + static_cast<size_t>(blockIdx.x) * n;
+    const float r = block_rms_inv(yr, n, eps);
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        const float v = rr[i] + yr[i] * r * w[i];
+        orow[i] = scaled ? v * scale : v;
+    }
+}
+
+// per (token, head): x <- rope(rmsnorm(x) * w) with rot_dim == head_dim (Gemma's q path); the head vector staged in shared memory
+__global__ void norm_rope_kernel(float* __restrict__ x, const float* __restrict__ w, int heads, int hd, float eps, const int64_t* __restrict__ pos,
+                                 const float* __restrict__ inv_freq) {
+    extern __shared__ float sh[];
+    const int t = blockIdx.x / heads;
+    float* p = x + static_cast<size_t>(blockIdx.x) * hd;
+    const float r = block_rms_inv(p, hd, eps);
+    for (int i = threadIdx.x; i < hd; i += blockDim.x) sh[i] = p[i] * r * w[i];
+    __syncthreads();
+    const int half = hd / 2;
+    for (int i = threadIdx.x; i < half; i += blockDim.x) {
+        const float angle = static_cast<float>(pos[t]) * inv_freq[i];
+        float s, c;
+        sincosf(angle, &s, &c);
+        const float a = sh[i], b = sh[i + half];
+        p[i] = a * c - b * s;
+        p[i + half] = b * c + a * s;
+    }
+}
+
+// INT8 K/V finish for one (token, kv head): k <- rope(rmsnorm(k) * k_norm), v <- rmsnorm(v) (parameter-free), then both quantised per 32 values exactly as
+// q8kv_append_kernel and written at the token's position. Replaces k_norm, rope k, v_norm and the two appends.
+__global__ void kv_finish_q8_kernel(const float* __restrict__ k, const float* __restrict__ v, const float* __restrict__ kw, int kv_heads, int hd, float eps,
+                                    const int64_t* __restrict__ pos, const float* __restrict__ inv_freq, int8_t* __restrict__ Kq, float* __restrict__ Ks,
+                                    int8_t* __restrict__ Vq, float* __restrict__ Vs) {
+    extern __shared__ float sh[];   // hd floats (k after norm), then hd floats (v after norm), then hd (k after rope)
+    float* sk = sh;
+    float* sv = sh + hd;
+    float* skr = sh + 2 * hd;
+    const int t = blockIdx.x / kv_heads, h = blockIdx.x % kv_heads;
+    const float* kp = k + static_cast<size_t>(blockIdx.x) * hd;
+    const float* vp = v + static_cast<size_t>(blockIdx.x) * hd;
+    const float rk = block_rms_inv(kp, hd, eps);
+    const float rv = block_rms_inv(vp, hd, eps);
+    for (int i = threadIdx.x; i < hd; i += blockDim.x) { sk[i] = kp[i] * rk * kw[i]; sv[i] = vp[i] * rv * 1.0f; }
+    __syncthreads();
+    const int half = hd / 2;
+    for (int i = threadIdx.x; i < half; i += blockDim.x) {
+        const float angle = static_cast<float>(pos[t]) * inv_freq[i];
+        float s, c;
+        sincosf(angle, &s, &c);
+        const float a = sk[i], b = sk[i + half];
+        skr[i] = a * c - b * s;
+        skr[i + half] = b * c + a * s;
+    }
+    __syncthreads();
+    const size_t p = static_cast<size_t>(pos[t]);
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
+    for (int g = warp; g < hd / 32; g += nw) {   // one warp per 32-value group, as q8kv_append_kernel
+        const size_t base = (p * kv_heads + h) * hd + static_cast<size_t>(g) * 32 + lane;
+        const size_t sbase = (p * kv_heads + h) * (hd / 32) + g;
+        {
+            const float val = skr[g * 32 + lane];
+            float amax = fabsf(val);
+            for (int off = 16; off > 0; off >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+            const float inv = amax > 0.0f ? 127.0f / amax : 0.0f;
+            Kq[base] = static_cast<int8_t>(__float2int_rn(val * inv));
+            if (lane == 0) Ks[sbase] = amax / 127.0f;
+        }
+        {
+            const float val = sv[g * 32 + lane];
+            float amax = fabsf(val);
+            for (int off = 16; off > 0; off >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+            const float inv = amax > 0.0f ? 127.0f / amax : 0.0f;
+            Vq[base] = static_cast<int8_t>(__float2int_rn(val * inv));
+            if (lane == 0) Vs[sbase] = amax / 127.0f;
+        }
+    }
+}
+
 }  // namespace
 
 int kv_append_cuda(float* Kc, float* Vc, const float* k, const float* v, const int64_t* d_pos, int T, int kv_width, void* stream) {
@@ -166,6 +272,31 @@ int gemma_attention_cuda(const float* q, const float* K, const float* V, const i
         if (e != cudaSuccess) return static_cast<int>(e);
     }
     gemma_attention_kernel<<<dim3(T, heads), kAttnThreads, smem, static_cast<cudaStream_t>(stream)>>>(q, K, V, d_pos, heads, kv_heads, head_dim, window, out);
+    return static_cast<int>(cudaGetLastError());
+}
+
+
+int norm_residual_cuda(const float* y, const float* w, int rows, int n, float eps, const float* res, float scale, bool scaled, float* out, void* stream) {
+    if (!y || !w || !res || !out || rows < 0 || n <= 0) return static_cast<int>(cudaErrorInvalidValue);
+    if (rows == 0) return 0;
+    norm_residual_kernel<<<rows, n >= 1024 ? 256 : 128, 0, static_cast<cudaStream_t>(stream)>>>(y, w, n, eps, res, scale, scaled, out);
+    return static_cast<int>(cudaGetLastError());
+}
+
+int norm_rope_cuda(float* x, const float* w, int tokens, int heads, int hd, float eps, const int64_t* d_pos, const float* inv_freq, void* stream) {
+    if (!x || !w || !d_pos || !inv_freq || tokens < 0 || heads <= 0 || hd <= 0 || hd % 2) return static_cast<int>(cudaErrorInvalidValue);
+    if (tokens == 0) return 0;
+    norm_rope_kernel<<<tokens * heads, hd >= 1024 ? 256 : 128, static_cast<size_t>(hd) * sizeof(float), static_cast<cudaStream_t>(stream)>>>(x, w, heads, hd, eps, d_pos,
+                                                                                                                                         inv_freq);
+    return static_cast<int>(cudaGetLastError());
+}
+
+int kv_finish_q8_cuda(const float* k, const float* v, const float* k_norm, int tokens, int kv_heads, int hd, float eps, const int64_t* d_pos, const float* inv_freq,
+                      uint8_t* Kq, float* Ks, uint8_t* Vq, float* Vs, void* stream) {
+    if (!k || !v || !k_norm || !d_pos || !inv_freq || !Kq || !Ks || !Vq || !Vs || tokens < 0 || kv_heads <= 0 || hd % 32) return static_cast<int>(cudaErrorInvalidValue);
+    if (tokens == 0) return 0;
+    kv_finish_q8_kernel<<<tokens * kv_heads, hd >= 1024 ? 256 : 128, 3 * static_cast<size_t>(hd) * sizeof(float), static_cast<cudaStream_t>(stream)>>>(
+        k, v, k_norm, kv_heads, hd, eps, d_pos, inv_freq, reinterpret_cast<int8_t*>(Kq), Ks, reinterpret_cast<int8_t*>(Vq), Vs);
     return static_cast<int>(cudaGetLastError());
 }
 
