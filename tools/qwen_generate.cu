@@ -20,6 +20,7 @@
 
 #include "core/system.h"
 #include "io/gguf_checkpoint.h"
+#include "model/flash_drafter.h"
 #include "model/qwen_model.h"
 #include "tokenizer/tokenizer.h"
 
@@ -42,6 +43,8 @@ int main(int argc, char** argv) {
     bool bench = false;  // --bench: throughput measurement mode (last-position logits only, no layer dumps, no logits file, no restore test)
     std::string teacher_file;
     int spec_k = 0, ngram_max = 4, ngram_min = 3;  // --spec K: prompt-lookup speculative decoding with up to K draft tokens
+    float flash_min_p = 0.0f;   // --flash-min-p P: draft only while the drafter's cumulative probability stays >= P
+    std::string flash_path;   // --flash <drafter.bin>: Dara Flash speculative decoding (trained drafter), up to --spec K draft tokens (default 4)
     int force_resident = -1;  // -1: the planner decides how many layers live in VRAM
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -55,6 +58,8 @@ int main(int argc, char** argv) {
         else if (a == "--resident") force_resident = std::atoi(next().c_str());
         else if (a == "--teacher") teacher_file = next();   // teacher forcing: feed the continuation of this reference tokens file instead of our own argmax
         else if (a == "--spec") spec_k = std::atoi(next().c_str());
+        else if (a == "--flash") flash_path = next();
+        else if (a == "--flash-min-p") flash_min_p = static_cast<float>(std::atof(next().c_str()));
         else if (a == "--ngram") { ngram_max = std::atoi(next().c_str()); }
         else if (a == "--ngram-min") { ngram_min = std::atoi(next().c_str()); }
         else if (a == "--new") n_new = std::atoi(next().c_str());
@@ -137,7 +142,9 @@ int main(int argc, char** argv) {
 
         // ---- prefill: logits at every prompt position, plus every layer's output ----------------
         std::vector<std::vector<float>> layer_out;
-        std::vector<float> lg = model.forward(prompt.data(), T0, bench ? T0 - 1 : (logits_last > 0 ? std::max(0, T0 - logits_last) : 0), (bench || logits_last > 0) ? nullptr : &layer_out, &st);
+        std::vector<float> prompt_feats;   // --flash: the target's final normed states of the prompt (the drafter's input)
+        std::vector<float> lg = model.forward(prompt.data(), T0, bench ? T0 - 1 : (logits_last > 0 ? std::max(0, T0 - logits_last) : 0), (bench || logits_last > 0) ? nullptr : &layer_out, &st,
+                                              nullptr, flash_path.empty() ? nullptr : &prompt_feats, 0);
         note(st); step_seconds.push_back(st.seconds);
         all_logits.insert(all_logits.end(), lg.begin(), lg.end());
         std::printf("prefill %d tokens: %.3f s\n", T0, st.seconds);
@@ -161,9 +168,61 @@ int main(int argc, char** argv) {
         seq.push_back(tok);
         emit(tok);
         bool hit_eos = stop_at_eos && tokenizer && tok == tokenizer->eos_id();
+        std::unique_ptr<FlashDrafter> flash;   // loaded once, like the model (not part of the decode time)
+        if (!flash_path.empty()) {
+            const auto tl = std::chrono::steady_clock::now();
+            flash = std::make_unique<FlashDrafter>(flash_path, gguf, [&](int32_t t) { return weights->embed_row(t); }, kv + 16);
+            std::printf("flash drafter load: %.3f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tl).count());
+        }
         const auto t_dec0 = std::chrono::steady_clock::now();
         long passes = 0, spec_steps = 0, drafted = 0, accepted = 0, rollbacks = 0;  // one pass = one read of all model weights
-        if (spec_k > 0) {
+        if (!flash_path.empty()) {
+            if (!teacher.empty()) throw std::runtime_error("--teacher needs plain decoding (no --flash)");
+            if (spec_k <= 0) spec_k = 4;
+            if (spec_k > 7) spec_k = 7;
+            restore_test = false;
+            const auto tf0 = std::chrono::steady_clock::now();
+            std::vector<int32_t> nxt(prompt.begin() + 1, prompt.end());
+            nxt.push_back(tok);
+            std::vector<float> y; int32_t d1 = 0;
+            flash->extend(prompt_feats.data(), nxt.data(), T0, y, d1);
+            float p1 = flash->last_prob();
+            std::printf("flash drafter: prompt pass %.3f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tf0).count());
+            std::vector<int32_t> draft, feed, ids;
+            std::vector<float> feats;
+            double fp_draft = 0, fp_verify = 0, fp_roll = 0, fp_ext = 0, fp_head = 0, fp_comp = 0, fp_emb = 0;
+            while (static_cast<int>(seq.size() - prompt.size()) < n_new && !hit_eos) {
+                const int budget = n_new - static_cast<int>(seq.size() - prompt.size()) - 1;
+                const int32_t cur = seq.back();
+                const size_t dpos = flash->position();
+                draft.clear();
+                auto ft0 = std::chrono::steady_clock::now();
+                flash->draft(y, d1, p1, std::min(spec_k, budget), flash_min_p, draft);
+                auto ft1 = std::chrono::steady_clock::now(); fp_draft += std::chrono::duration<double>(ft1 - ft0).count();
+                const int kd = static_cast<int>(draft.size());
+                feed.assign(1, cur); feed.insert(feed.end(), draft.begin(), draft.end());
+                if (kd > 0) model.snapshot();
+                model.forward(feed.data(), kd + 1, 0, nullptr, &st, &ids, &feats, 0); note(st); ++passes;
+                auto ft2 = std::chrono::steady_clock::now(); fp_verify += std::chrono::duration<double>(ft2 - ft1).count(); fp_head += st.head_seconds; fp_comp += st.compute_seconds; fp_emb += st.embed_seconds;
+                int m = 0;
+                while (m < kd && ids[m] == draft[m]) ++m;
+                if (kd > 0) { ++spec_steps; drafted += kd; accepted += m; }
+                if (m < kd) { model.rollback(m + 1); ++rollbacks; }
+                std::vector<int32_t> to_add(draft.begin(), draft.begin() + m);
+                to_add.push_back(ids[m]);
+                flash->rewind(dpos);   // drop the drafter's own guesses; re-feed it the target's true states of the accepted positions
+                auto ft3 = std::chrono::steady_clock::now(); fp_roll += std::chrono::duration<double>(ft3 - ft2).count();
+                flash->extend(feats.data(), to_add.data(), m + 1, y, d1);
+                p1 = flash->last_prob();
+                fp_ext += std::chrono::duration<double>(std::chrono::steady_clock::now() - ft3).count();
+                for (int32_t id : to_add) {
+                    seq.push_back(id); emit(id);
+                    if (stop_at_eos && tokenizer && id == tokenizer->eos_id()) { hit_eos = true; break; }
+                }
+            }
+            std::printf("flash time: draft %.3f s, verify %.3f s, accept/rollback %.3f s, drafter extend %.3f s (verify: layers %.3f s, head %.3f s, embed %.3f s)\n", fp_draft, fp_verify, fp_roll, fp_ext, fp_comp, fp_head, fp_emb);
+            spec_k = std::max(spec_k, 1);   // the plain loop below must not run
+        } else if (spec_k > 0) {
             // Speculative decoding, greedy-exact: prompt lookup proposes up to spec_k tokens; one multi-token forward scores them
             // all; the longest prefix the model itself would have produced is kept (rolling the state back if any was rejected).
             restore_test = false;

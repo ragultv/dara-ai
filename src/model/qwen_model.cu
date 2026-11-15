@@ -389,7 +389,7 @@ void QwenModel::start_copy(int layer) {
 }
 
 std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
-                                      std::vector<int32_t>* argmax_out) {
+                                      std::vector<int32_t>* argmax_out, std::vector<float>* features_out, int feat_from) {
     if (T <= 0 || logits_from < 0 || logits_from > T) throw std::invalid_argument("bad forward arguments");
     const auto t_call = Clock::now();
     const int H = cfg_.hidden, L = cfg_.layers;
@@ -511,6 +511,11 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     const bool ids_only = argmax_out != nullptr && !head_on_cpu_;
     std::vector<float> logits(ids_only ? 0 : static_cast<size_t>(n_out) * cfg_.vocab);
     if (argmax_out) argmax_out->assign(static_cast<size_t>(std::max(0, n_out)), 0);
+    if (features_out) {   // final normed hidden states for the drafter (host-side final norm, as for the head below)
+        const int f0 = feat_from < 0 ? logits_from : std::min(feat_from, T);
+        features_out->resize(static_cast<size_t>(T - f0) * H);
+        for (int t = f0; t < T; ++t) rmsnorm(&hidden[static_cast<size_t>(t) * H], final_scale.data(), H, cfg_.eps, &(*features_out)[static_cast<size_t>(t - f0) * H]);
+    }
     if (n_out > 0) {
         std::vector<float> normed(static_cast<size_t>(n_out) * H);
         for (int t = 0; t < n_out; ++t)

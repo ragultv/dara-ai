@@ -55,13 +55,16 @@ public:
 
     // Runs T tokens from the current position; returns logits (soft-capped) for positions [logits_from, T) as [(T-logits_from)][vocab].
     // layer_outputs (optional) receives each layer's output [T][hidden] for validation.
+    // features (optional): the final normed hidden state of every position [T][hidden] (Dara Flash drafter input).
     std::vector<float> forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs = nullptr,
-                               RunStats* stats = nullptr);
+                               RunStats* stats = nullptr, std::vector<float>* features = nullptr);
     // One greedy decode step: runs `token`, picks the next token on the GPU (argmax of the soft-capped logits, same choice as a host argmax) and copies back
     // only its id. The logits are copied to the host only when `logits` is non-null.
     int forward_greedy(int32_t token, RunStats* stats = nullptr, std::vector<float>* logits = nullptr);
     // T tokens (a speculative verification step): the greedy token after EVERY position, chosen on the GPU (only T ids come back).
-    std::vector<int32_t> forward_argmax(const int32_t* tokens, int T, RunStats* stats = nullptr);
+    std::vector<int32_t> forward_argmax(const int32_t* tokens, int T, RunStats* stats = nullptr, std::vector<float>* features = nullptr);
+    // Dequantised token_embd row (unscaled): the drafter's token input (same values as tools/gguf_dump_tensor).
+    std::vector<float> embed_row_raw(int32_t token) const;
 
     size_t position() const { return pos_; }
     void rewind(size_t pos);  // K/V caches only need their length reset: entries past it are overwritten
@@ -126,7 +129,7 @@ private:
     // work stream (blocking, so it orders against the legacy default stream used for uploads) and CUDA-graph state
     DecodeGraph graph_;                // shared graph-decode engine (decode_graph.h); also owns the work stream
     std::vector<float> forward_impl(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
-                                    bool copy_logits, int* next_token, std::vector<int32_t>* ids_out = nullptr);
+                                    bool copy_logits, int* next_token, std::vector<int32_t>* ids_out = nullptr, std::vector<float>* feats_out = nullptr);
     DevBuf<unsigned char> d_argmax_;   // argmax scratch + result (greedy decode)
     int* h_next_ = nullptr;            // pinned host copy of the chosen token
     DevBuf<int64_t> d_pos_;            // position of the single token being decoded, read by RoPE / KV append / attention
