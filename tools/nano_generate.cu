@@ -20,6 +20,7 @@
 #include <stdexcept>
 
 #include "io/gguf_checkpoint.h"
+#include "model/flash_drafter.h"
 #include "model/gemma_model.h"
 #include "tokenizer/gemma_chat.h"
 #include "tokenizer/gemma_tokenizer.h"
@@ -39,6 +40,8 @@ int main(int argc, char** argv) {
     size_t kv = 2048;
     bool dump_layers = true, parse_special = false, stop_at_eos = false, think = false, profile = false, bench = false;
     int chunk_tokens = 0;
+    float flash_min_p = 0.0f;   // --flash-min-p P: draft only while the drafter's cumulative probability stays >= P
+    std::string flash_path;   // --flash <drafter.dflash>: Dara Flash speculative decoding, up to --spec K draft tokens (default 4)
     int spec_k = 0, ngram_max = 4, ngram_min = 3;   // --spec K: prompt-lookup speculative decoding (greedy-exact)
     KvFormat kv_format = KvFormat::Q8;   // default INT8 K/V (near-lossless; --kv-mode f32 for the reference path)  // --kv-mode f32|tq4
     std::string chat_user, chat_system, teacher_file;  // --chat renders the model's chat template around the user message
@@ -62,6 +65,8 @@ int main(int argc, char** argv) {
         else if (a == "--no-layers") dump_layers = false;
         else if (a == "--bench") { bench = true; dump_layers = false; }   // throughput mode: decode logits are not copied to the host or saved
         else if (a == "--spec") spec_k = std::atoi(next().c_str());
+        else if (a == "--flash") flash_path = next();
+        else if (a == "--flash-min-p") flash_min_p = static_cast<float>(std::atof(next().c_str()));
         else if (a == "--ngram") ngram_max = std::atoi(next().c_str());
         else if (a == "--ngram-min") ngram_min = std::atoi(next().c_str());
         else if (a == "--chunk") chunk_tokens = std::atoi(next().c_str());   // prefill chunk size (default: the model's, 64)
@@ -139,7 +144,8 @@ int main(int argc, char** argv) {
         RunStats st;
         std::vector<std::vector<float>> layer_out;
         const int from = bench ? T0 - 1 : (logits_last > 0 ? std::max(0, T0 - logits_last) : 0);   // --bench: last position only (like the Qwen tool)
-        std::vector<float> lg = model.forward(prompt.data(), T0, from, dump_layers ? &layer_out : nullptr, &st);
+        std::vector<float> prompt_feats;   // --flash: final normed states of the prompt (the drafter's input)
+        std::vector<float> lg = model.forward(prompt.data(), T0, from, dump_layers ? &layer_out : nullptr, &st, flash_path.empty() ? nullptr : &prompt_feats);
         all_logits.insert(all_logits.end(), lg.begin(), lg.end());
         std::printf("prefill %d tokens: %.2f s | embed (host) %.3f s, layers %.3f s, head %.3f s\n", T0, st.seconds, st.embed_seconds, st.compute_seconds,
                     st.head_seconds);
@@ -167,9 +173,52 @@ int main(int argc, char** argv) {
         bool hit_eos = is_eos(tok);
         RunStats sum;
         int steps = 0;
+        std::unique_ptr<FlashDrafter> flash;   // loaded once, like the model (not part of the decode time)
+        if (!flash_path.empty()) {
+            const auto tl = std::chrono::steady_clock::now();
+            flash = std::make_unique<FlashDrafter>(flash_path, gguf, [&](int32_t t) { return model.embed_row_raw(t); }, kv + 16);
+            std::printf("flash drafter load: %.3f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tl).count());
+        }
         const auto t_dec0 = std::chrono::steady_clock::now();
         long spec_steps = 0, drafted = 0, accepted = 0, passes = 0;
-        if (spec_k > 0 && teacher.empty()) {
+        if (!flash_path.empty() && teacher.empty()) {
+            if (spec_k <= 0) spec_k = 4;
+            if (spec_k > 15) spec_k = 15;
+            const auto tf0 = std::chrono::steady_clock::now();
+            std::vector<int32_t> nxt(prompt.begin() + 1, prompt.end());
+            nxt.push_back(tok);
+            std::vector<float> y; int32_t d1 = 0;
+            flash->extend(prompt_feats.data(), nxt.data(), T0, y, d1);
+            float p1 = flash->last_prob();
+            std::printf("flash drafter: prompt pass %.3f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tf0).count());
+            std::vector<int32_t> draft, feed;
+            std::vector<float> feats;
+            while (static_cast<int>(seq.size()) - T0 < n_new && !hit_eos) {
+                const int budget = n_new - (static_cast<int>(seq.size()) - T0) - 1;
+                const int32_t cur = seq.back();
+                const size_t dpos = flash->position(), p0 = model.position();
+                draft.clear();
+                flash->draft(y, d1, p1, std::min(spec_k, budget), flash_min_p, draft);
+                const int kd = static_cast<int>(draft.size());
+                feed.assign(1, cur); feed.insert(feed.end(), draft.begin(), draft.end());
+                const std::vector<int32_t> ids = model.forward_argmax(feed.data(), kd + 1, &st, &feats); ++passes;
+                int m = 0;
+                while (m < kd && ids[m] == draft[m]) ++m;
+                if (kd > 0) { ++spec_steps; drafted += kd; accepted += m; }
+                if (m < kd) model.rewind(p0 + static_cast<size_t>(m) + 1);
+                std::vector<int32_t> to_add(draft.begin(), draft.begin() + m);
+                to_add.push_back(ids[m]);
+                flash->rewind(dpos);
+                flash->extend(feats.data(), to_add.data(), m + 1, y, d1);
+                p1 = flash->last_prob();
+                sum.seconds += st.seconds; sum.compute_seconds += st.compute_seconds; sum.head_seconds += st.head_seconds; sum.embed_seconds += st.embed_seconds;
+                for (int32_t id : to_add) {
+                    seq.push_back(id); emit(id); ++steps;
+                    if (is_eos(id)) { hit_eos = true; break; }
+                }
+            }
+            spec_k = std::max(spec_k, 1);
+        } else if (spec_k > 0 && teacher.empty()) {
             // Speculative decoding, greedy-exact (same scheme as qwen_generate): prompt lookup proposes up to spec_k tokens, ONE forward of cur + drafts
             // gives the model's own greedy token after each, the longest agreeing prefix is kept and the KV length rewound past the rest (Gemma's only
             // state is its K/V cache). A step with no accepted draft backs off for a few tokens, so non-repetitive text is never slower.

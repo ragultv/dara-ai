@@ -84,7 +84,10 @@ public:
     // argmax_out (optional): instead of returning logits, the greedy token of every position [logits_from, T) is computed on the device and only those ids
     // are copied back (speculative verification and greedy decode: no vocab-sized transfers). The returned vector is then empty.
     std::vector<float> forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs = nullptr,
-                               RunStats* stats = nullptr, std::vector<int32_t>* argmax_out = nullptr);
+                               RunStats* stats = nullptr, std::vector<int32_t>* argmax_out = nullptr, std::vector<float>* features_out = nullptr,
+                               int feat_from = -1);
+    // features_out (optional): the FINAL hidden states (after the final norm: what the output head reads) of positions [feat_from, T) as [T - feat_from][hidden]
+    // (feat_from < 0: same range as the logits). Used by the Dara Flash drafter.
 
     size_t position() const { return pos_; }
     const QwenConfig& config() const { return cfg_; }

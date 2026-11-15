@@ -104,7 +104,92 @@ recurrence_kernel(const float* __restrict__ conv_out, const float* __restrict__ 
     normed[idx] = norm_w[v] * (o * r) * siluf_(z[idx]);
 }
 
+__global__ void conv_seq_kernel(const float* __restrict__ w, float* __restrict__ state, const float* __restrict__ qkv,
+                                float* __restrict__ out, int channels, int taps, int T) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+    const int hist = taps - 1;
+    float* h = state + static_cast<size_t>(c) * hist;
+    const float* wc = w + static_cast<size_t>(c) * taps;
+    float hr[8];
+    for (int k = 0; k < hist; ++k) hr[k] = h[k];
+    for (int t = 0; t < T; ++t) {
+        const float cur = qkv[static_cast<size_t>(t) * channels + c];
+        float acc = 0.0f;
+        for (int k = 0; k < hist; ++k) acc += wc[k] * hr[k];
+        acc += wc[taps - 1] * cur;
+        out[static_cast<size_t>(t) * channels + c] = siluf_(acc);
+        for (int k = 0; k + 1 < hist; ++k) hr[k] = hr[k + 1];
+        hr[hist - 1] = cur;
+    }
+    for (int k = 0; k < hist; ++k) h[k] = hr[k];
+}
+
+__global__ void __launch_bounds__(kDim)
+recurrence_seq_kernel(const float* __restrict__ conv_out, const float* __restrict__ z, const float* __restrict__ b,
+                      const float* __restrict__ a, const float* __restrict__ ssm_a, const float* __restrict__ dt_bias,
+                      const float* __restrict__ norm_w, float* __restrict__ S_all, float* __restrict__ normed,
+                      int k_heads, int v_heads, int key_dim, int conv_dim, int value_dim, int gguf_order, float eps, int T) {
+    const int h = blockIdx.x;
+    const int v = threadIdx.x;
+    const int kh = gguf_order ? (h % k_heads) : (h / (v_heads / k_heads));
+    __shared__ float qs[kDim], ks[kDim], red[4];
+    __shared__ float s_beta, s_decay;
+    float* S = S_all + static_cast<size_t>(h) * kDim * kDim;  // [k][v]
+    float col[kDim];
+#pragma unroll
+    for (int k = 0; k < kDim; ++k) col[k] = S[static_cast<size_t>(k) * kDim + v];
+    for (int t = 0; t < T; ++t) {
+        const float* co = conv_out + static_cast<size_t>(t) * conv_dim;
+        const float qv = co[static_cast<size_t>(kh) * kDim + v], kv_ = co[key_dim + static_cast<size_t>(kh) * kDim + v];
+        const float qsum = block_sum_128(qv * qv, red);
+        const float ksum = block_sum_128(kv_ * kv_, red);
+        qs[v] = qv * rsqrtf(qsum + 1e-6f) * rsqrtf(static_cast<float>(kDim));
+        ks[v] = kv_ * rsqrtf(ksum + 1e-6f);
+        if (v == 0) {
+            s_beta = sigmoidf_(b[static_cast<size_t>(t) * v_heads + h]);
+            s_decay = expf(ssm_a[h] * softplusf_(a[static_cast<size_t>(t) * v_heads + h] + dt_bias[h]));
+        }
+        __syncthreads();
+        const float decay = s_decay, beta = s_beta;
+        float kvm = 0.0f;
+#pragma unroll
+        for (int k = 0; k < kDim; ++k) {
+            col[k] *= decay;
+            kvm = fmaf(col[k], ks[k], kvm);
+        }
+        const float vt = co[2 * key_dim + static_cast<size_t>(h) * kDim + v];
+        const float delta = (vt - kvm) * beta;
+        float o = 0.0f;
+#pragma unroll
+        for (int k = 0; k < kDim; ++k) {
+            col[k] = fmaf(ks[k], delta, col[k]);
+            o = fmaf(col[k], qs[k], o);
+        }
+        const float ms = block_sum_128(o * o, red) / static_cast<float>(kDim);
+        const float r = rsqrtf(ms + eps);
+        const size_t idx = static_cast<size_t>(t) * value_dim + static_cast<size_t>(h) * kDim + v;
+        normed[idx] = norm_w[v] * (o * r) * siluf_(z[idx]);
+        __syncthreads();   // qs/ks/s_beta/s_decay are rewritten by the next token
+    }
+#pragma unroll
+    for (int k = 0; k < kDim; ++k) S[static_cast<size_t>(k) * kDim + v] = col[k];
+}
+
 }  // namespace
+
+int deltanet_seq_cuda(const DeltaNetDims& d, VHeadOrder order, const DeltaNetDeviceParams& p, float* d_conv_state, float* d_S, int T,
+                      const float* d_qkv, const float* d_z, const float* d_b, const float* d_a, float* d_conv_scratch, float* d_normed,
+                      void* stream) {
+    if (d.k_dim != kDim || d.v_dim != kDim || d.conv_kernel < 2 || d.conv_kernel > 8 || d.v_heads % d.k_heads != 0 || T <= 0)
+        return static_cast<int>(cudaErrorInvalidValue);
+    auto s = static_cast<cudaStream_t>(stream);
+    const int ch = d.conv_dim();
+    conv_seq_kernel<<<(ch + 255) / 256, 256, 0, s>>>(p.conv_w, d_conv_state, d_qkv, d_conv_scratch, ch, d.conv_kernel, T);
+    recurrence_seq_kernel<<<d.v_heads, kDim, 0, s>>>(d_conv_scratch, d_z, d_b, d_a, p.ssm_a, p.dt_bias, p.norm_w, d_S, d_normed, d.k_heads, d.v_heads,
+                                                     d.key_dim(), ch, d.value_dim(), order == VHeadOrder::Gguf ? 1 : 0, d.eps, T);
+    return static_cast<int>(cudaGetLastError());
+}
 
 size_t deltanet_conv_state_floats(const DeltaNetDims& d) { return static_cast<size_t>(d.conv_dim()) * (d.conv_kernel - 1); }
 size_t deltanet_S_floats(const DeltaNetDims& d) { return static_cast<size_t>(d.v_heads) * d.k_dim * d.v_dim; }

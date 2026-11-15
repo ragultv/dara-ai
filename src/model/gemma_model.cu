@@ -618,14 +618,24 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
 }
 
 // ---- forward --------------------------------------------------------------------------------------------------------------------
-std::vector<float> GemmaModel::forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats) {
-    return forward_impl(tokens, T, logits_from, layer_outputs, stats, true, nullptr);
+std::vector<float> GemmaModel::forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
+                                       std::vector<float>* features) {
+    return forward_impl(tokens, T, logits_from, layer_outputs, stats, true, nullptr, nullptr, features);
 }
 
-std::vector<int32_t> GemmaModel::forward_argmax(const int32_t* tokens, int T, RunStats* stats) {
+std::vector<int32_t> GemmaModel::forward_argmax(const int32_t* tokens, int T, RunStats* stats, std::vector<float>* features) {
     std::vector<int32_t> ids;
-    forward_impl(tokens, T, 0, nullptr, stats, false, nullptr, &ids);
+    forward_impl(tokens, T, 0, nullptr, stats, false, nullptr, &ids, features);
     return ids;
+}
+
+std::vector<float> GemmaModel::embed_row_raw(int32_t token) const {
+    if (token < 0 || token >= cfg_.vocab) throw std::out_of_range("token id outside the vocabulary");
+    const auto& ef = dara::kernels::quant_format(qtype_of(embd_type_, "token_embd.weight"));
+    const size_t eb = static_cast<size_t>(cfg_.hidden) / ef.block_weights;
+    std::vector<float> e(static_cast<size_t>(cfg_.hidden));
+    ef.dequant_f32(embd_.data() + static_cast<size_t>(token) * eb * ef.block_bytes, eb, e.data());
+    return e;
 }
 
 int GemmaModel::forward_greedy(int32_t token, RunStats* stats, std::vector<float>* logits) {
@@ -636,7 +646,7 @@ int GemmaModel::forward_greedy(int32_t token, RunStats* stats, std::vector<float
 }
 
 std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
-                                            bool copy_logits, int* next_token, std::vector<int32_t>* ids_out) {
+                                            bool copy_logits, int* next_token, std::vector<int32_t>* ids_out, std::vector<float>* feats_out) {
     if (T <= 0 || logits_from < 0 || logits_from > T) throw std::invalid_argument("bad forward arguments");
     if (pos_ + static_cast<size_t>(T) > capacity_) throw std::length_error("K/V cache capacity exceeded");
     const auto t_call = Clock::now();
@@ -818,6 +828,12 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
 
     // ---- final norm, tied head, soft-cap ----------------------------------------------------------------------------------------
     t0 = Clock::now();
+    if (feats_out) {   // final normed hidden states of all T positions (Dara Flash)
+        float* xf = pool_.get<float>(48, TH);
+        cuda_check(rmsnorm_cuda(hid[cur], out_norm_.p, T, H, cfg_.eps, xf), "feature norm");
+        feats_out->resize(TH);
+        cuda_check(cudaMemcpy(feats_out->data(), xf, TH * 4, cudaMemcpyDeviceToHost), "features copy");
+    }
     const int n_out = T - logits_from;
     std::vector<float> logits(copy_logits ? static_cast<size_t>(n_out) * cfg_.vocab : 0);
     if (n_out > 0) {

@@ -364,9 +364,15 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
             cuda_check(cudaMemcpyAsync(tp, b, static_cast<size_t>(T) * VH * 4, cudaMemcpyDeviceToDevice, static_cast<cudaStream_t>(stream)), "tape b"); tp += static_cast<size_t>(T) * VH;
             cuda_check(cudaMemcpyAsync(tp, a, static_cast<size_t>(T) * VH * 4, cudaMemcpyDeviceToDevice, static_cast<cudaStream_t>(stream)), "tape a");
         }
-        for (int t = 0; t < T; ++t)
-            cuda_check(deltanet_step_cuda(d, w.order, params, s.conv_state.p, s.S.p, qkv + t * CD, z + t * VD, b + t * VH, a + t * VH, scratch,
-                                          nm + t * VD, stream), "deltanet step");
+        static const bool seq_off = [] { const char* e = std::getenv("DARA_DN_SEQ"); return e && e[0] == '0'; }();
+        if (T > 1 && !seq_off) {   // all T tokens in two launches, state kept in registers (bitwise == the per-token loop)
+            float* cs = sp.get<float>(19, static_cast<size_t>(T) * CD);
+            cuda_check(deltanet_seq_cuda(d, w.order, params, s.conv_state.p, s.S.p, T, qkv, z, b, a, cs, nm, stream), "deltanet seq");
+        } else {
+            for (int t = 0; t < T; ++t)
+                cuda_check(deltanet_step_cuda(d, w.order, params, s.conv_state.p, s.S.p, qkv + t * CD, z + t * VD, b + t * VH, a + t * VH, scratch,
+                                              nm + t * VD, stream), "deltanet step");
+        }
         LP("deltanet recurrence");
         cuda_check(matvec_multi_cuda(w.dn_out, nm, VD, m, H, T, stream), "out_proj");
         LP("dn out_proj");

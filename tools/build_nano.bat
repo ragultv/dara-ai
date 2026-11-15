@@ -17,7 +17,9 @@ set K=src\kernels\gemv.cu src\kernels\gemv_cpu.cpp src\kernels\q4k_gemv.cu src\k
 set M=src\model\layer_cuda.cu src\model\tq_kv.cu src\model\attn_splitkv.cu src\model\attn_prefill.cu src\model\attention_cuda.cu src\model\deltanet_cuda.cu src\model\ops_cuda.cu src\model\ops.cpp src\model\deltanet.cpp src\model\attention.cpp src\model\layer.cpp src\model\packed_layer.cu
 set C=src\io\gguf_checkpoint.cpp src\io\gguf.cpp src\core\system.cpp src\core\placement.cpp src\core\budget.cpp src\core\manifest.cpp
 
-"%CUDA%\bin\nvcc.exe" %NVFLAGS% tools\nano_generate.cu src\model\gemma_model.cu src\model\gemma_ops_cuda.cu src\tokenizer\gemma_tokenizer.cpp src\tokenizer\gemma_chat.cpp src\tokenizer\unicode.cpp %M% %C% %K% -o build\cuda\nano_generate.exe -lcudart || exit /b 1
+"%CUDA%\bin\nvcc.exe" %NVFLAGS% tools\nano_generate.cu src\model\flash_drafter.cu src\model\gemma_model.cu src\model\gemma_ops_cuda.cu src\tokenizer\gemma_tokenizer.cpp src\tokenizer\gemma_chat.cpp src\tokenizer\unicode.cpp %M% %C% %K% -o build\cuda\nano_generate.exe -lcudart || exit /b 1
 echo built build\cuda\nano_generate.exe
+"%CUDA%\bin\nvcc.exe" %NVFLAGS% tools\flash_data_gemma.cu src\model\gemma_model.cu src\model\gemma_ops_cuda.cu src\tokenizer\gemma_tokenizer.cpp src\tokenizer\gemma_chat.cpp src\tokenizer\unicode.cpp %M% %C% %K% -o build\cuda\flash_data_gemma.exe -lcudart || exit /b 1
+echo built build\cuda\flash_data_gemma.exe
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% tests\nano_graph_test.cu src\model\gemma_model.cu src\model\gemma_ops_cuda.cu %M% %C% %K% -o build\cuda\nano_graph_test.exe -lcudart || exit /b 1
 echo built build\cuda\nano_graph_test.exe
