@@ -34,6 +34,7 @@ struct QwenConfig {
     double partial_rotary = 0.25;
     float eps = 1e-6f;
     bool tied_embeddings = true;
+    size_t context_length = 0;   // the model's native maximum context (GGUF <arch>.context_length; 0 = not stated)
     std::vector<LayerKind> kinds;
     int rot_dim() const { return static_cast<int>(head_dim * partial_rotary); }
     // Derives the configuration from the GGUF metadata and tensor shapes. Throws on an unsupported architecture or any
@@ -46,6 +47,13 @@ struct ResidencyOptions {
     int force_resident_layers = -1; // -1: let the planner decide; otherwise exactly this many layers (prefix) live in VRAM
     size_t safety_bytes = 0;        // extra VRAM kept free; 0 = max(256 MiB, 1/16 of total)
     KvFormat kv_format = KvFormat::F32;  // KV cache format of the attention layers (F32 reference or 4-bit TurboQuant)
+    // Memory the caller will allocate on the GPU after the model (e.g. the Flash drafter): a fixed part and a part per context
+    // position. Counted by the placement planner, so the model leaves room for it.
+    size_t extra_vram_bytes = 0, extra_bytes_per_token = 0;
+    // kv_capacity == 0 ("auto"): the largest context (multiple of 1024, at most the model's native context) that keeps every layer
+    // and the output head in VRAM. A model that cannot be fully VRAM-resident even with a short context gets auto_partial_context
+    // and the planner places what fits (more context would push more layers to the CPU).
+    size_t auto_partial_context = 32768;
 };
 
 struct PlacementReport {
@@ -93,6 +101,7 @@ public:
     const QwenConfig& config() const { return cfg_; }
     const PlacementReport& placement() const { return report_; }
     double load_seconds() const { return load_seconds_; }   // cold load: disk -> host images -> VRAM slabs
+    size_t kv_capacity() const { return kv_capacity_; }      // positions the caches hold (the auto choice when constructed with 0)
     // CUDA Graphs (see decode_graph.h): a resident single-token decode step is captured once and replayed with one launch. Results are
     // bitwise identical to the eager path. Not used while layers are streamed from host RAM, when per-layer outputs are requested, or
     // right after snapshot() (the verification forward records recurrence inputs). DARA_NO_GRAPH=1 or set_graphs(false) disables.
@@ -119,6 +128,8 @@ public:
     void rollback(int keep = 0);
 
 private:
+    std::vector<float> forward_one(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
+                                   std::vector<int32_t>* argmax_out, std::vector<float>* features_out, int feat_from);
     void start_copy(int layer);
     // CPU decode of the hosted layers (cpu_decode.h): single-token steps run layers [resident_, L) on the CPU from their host images.
     // The hosted layers' state is current on exactly one side; cpu_current_ says which (true: CpuLayerState is newer than the GPU copy).

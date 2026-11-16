@@ -26,6 +26,9 @@ public:
     using EmbedFn = std::function<std::vector<float>(int32_t)>;
     FlashDrafter(const std::string& path, const dara::io::GgufCheckpoint& g, EmbedFn embed, size_t kv_capacity);
     ~FlashDrafter();
+    // VRAM the drafter will take (upper bounds, read from the file header): a fixed part (weights, head rows, buffers) and a part per
+    // context position (its INT8 K/V). The target model reserves this when it sizes its own context.
+    static void vram_estimate(const std::string& path, const dara::io::GgufCheckpoint& g, size_t& fixed_bytes, size_t& per_token_bytes);
 
     // Feeds n real positions: feats [n][hidden] = target states f_t, next [n] = x_{t+1}; appends to the drafter's cache at its current position.
     // Returns the drafter's prediction for the position after the last one (feature + token), ready to start drafting.

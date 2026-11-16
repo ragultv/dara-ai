@@ -429,7 +429,7 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
         const bool prefill_attn = !ref && !dev_pos && T >= kPrefillAttnMinTokens && s.kv_format != KvFormat::TQ4;
         auto prefill_attention = [&] {
             const int p0 = static_cast<int>(s.pos);
-            const size_t pf = attn_prefill_scratch_floats(T, p0, 0, d.heads);
+            const size_t pf = attn_prefill_scratch_floats(T, p0, 0, d.heads, d.kv_heads);
             float* ps = sp.get<float>(18, pf);
             const bool q8 = kv_q8_values(s.kv_format);   // K/V in Kq/Vq (Q8 or K16V8)
             cuda_check(attn_prefill_cuda(afmt, q, gate, q8 ? static_cast<const void*>(s.Kq.p) : s.Kc.p, q8 ? s.Kn.p : nullptr,

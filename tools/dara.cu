@@ -4,11 +4,15 @@
 //   gemma4  -> Nano               (tools/nano_generate.cu)
 // The drivers are compiled into this executable with their main() renamed (-Dmain=...), so every option they accept works here.
 //
+// Context: --kv auto is the default here (the largest context that keeps every layer and the output head in VRAM, after room for the
+// Flash drafter; a model that does not fit fully, e.g. 9B on 4 GB, gets 32K and the planner places what fits). --kv N overrides.
+//
 // Usage: dara --gguf <model.gguf> [driver options...]
 //        dara --info --gguf <model.gguf>      print the detected architecture and exit
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "io/gguf.h"
 
@@ -44,5 +48,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (info) { std::printf("architecture: %s -> %s\n", arch.c_str(), tier); return 0; }
-    return arch == "qwen35" ? dara_qwen_main(argc, argv) : dara_nano_main(argc, argv);
+    // default context: auto (the largest that keeps the model in VRAM; see ResidencyOptions) unless --kv is given
+    std::vector<char*> args(argv, argv + argc);
+    bool has_kv = false;
+    for (int i = 1; i < argc; ++i) if (std::strcmp(argv[i], "--kv") == 0) has_kv = true;
+    static char kv_flag[] = "--kv", kv_auto[] = "auto";
+    if (!has_kv) { args.push_back(kv_flag); args.push_back(kv_auto); }
+    const int n = static_cast<int>(args.size());
+    args.push_back(nullptr);
+    return arch == "qwen35" ? dara_qwen_main(n, args.data()) : dara_nano_main(n, args.data());
 }
