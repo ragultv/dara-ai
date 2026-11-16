@@ -443,6 +443,27 @@ struct CpuDecoder::Impl {
         for (const auto& e : list) mv_bytes += e.first->rows * e.first->row_bytes;
         ++mv_calls;
     }
+    // y_i[t * rows_i + r] = M_i x_t for T quantised inputs acts[0..T): weights read from RAM once (a chunk of rows stays in cache across the tokens)
+    void matvecs_multi(std::initializer_list<std::pair<const HostMatrix*, float*>> list, int T) {
+        if (T == 1) { act_swap(); matvecs(list); act_swap(); return; }
+        chunks.clear();
+        size_t rows = 0;
+        for (const auto& e : list) rows += e.first->rows;
+        const size_t per = std::max<size_t>(8, (rows + pool.size() * 4 - 1) / (pool.size() * 4));
+        for (const auto& e : list)
+            for (size_t r0 = 0; r0 < e.first->rows; r0 += per) chunks.push_back({e.first, e.second, r0, std::min(e.first->rows, r0 + per)});
+        const auto t0 = std::chrono::steady_clock::now();
+        pool.parallel_for(static_cast<int>(chunks.size()), [&](int i) {
+            const auto& ch = chunks[static_cast<size_t>(i)];
+            for (int t = 0; t < T; ++t) dot_rows(*ch.m, ch.r0, ch.r1, acts[static_cast<size_t>(t)], ch.y + static_cast<size_t>(t) * ch.m->rows);
+        });
+        mv_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        for (const auto& e : list) mv_bytes += e.first->rows * e.first->row_bytes;
+        ++mv_calls;
+    }
+    void act_swap() { std::swap(act, acts[0]); }   // the single-token path quantises into `act`
+    std::vector<Q8Act> acts;
+    std::vector<float> hT, x1T, mT, qkvT, zT, bT, aT, normedT, qgT, kT, vT, attT, gT, uT;
     struct ChunkT { const HostMatrix* m; float* y; size_t r0, r1; };
     std::vector<ChunkT> chunks;
     // elementwise work split over the pool in blocks of 1024
@@ -557,170 +578,236 @@ void CpuDecoder::matvec(const HostMatrix& M, const float* x, float* y) {
     impl_->matvec(M, y);
 }
 
+// ---- per-token cores (shared by the single-token and the multi-token paths, so both do bitwise the same arithmetic) ---------------------------
+// DeltaNet: conv + l2norm + recurrence + gated RMSNorm for ONE token whose projections are qkv/z/b/a; advances s.conv and s.S; writes normed [value_dim].
+static void dn_core(CpuDecoder::Impl& I, const CpuLayerWeights& w, CpuLayerState& s, const float* qkv, const float* z, const float* bb, const float* aa,
+                    float* normed) {
+    const DeltaNetDims& d = w.dn;
+    const int cd = d.conv_dim(), kd = d.key_dim(), taps = d.conv_kernel, hist = taps - 1;
+    I.conv.resize(cd);
+    I.qn.resize(static_cast<size_t>(d.k_heads) * d.k_dim); I.kn.resize(I.qn.size());
+    I.parallel_elems(cd, [&](int c) {   // causal depthwise conv (state: the last 3 inputs, oldest first) + silu
+        float* hs = &s.conv[static_cast<size_t>(c) * hist];
+        const float* wc = &w.conv_w[static_cast<size_t>(c) * taps];
+        float acc = 0.0f;
+        for (int k = 0; k < hist; ++k) acc += wc[k] * hs[k];
+        acc += wc[taps - 1] * qkv[c];
+        I.conv[c] = siluf(acc);
+        for (int k = 0; k + 1 < hist; ++k) hs[k] = hs[k + 1];
+        hs[hist - 1] = qkv[c];
+    });
+    const float qscale = 1.0f / std::sqrt(static_cast<float>(d.k_dim));
+    const float* qc = I.conv.data();
+    const float* kc = I.conv.data() + kd;
+    const float* vc = I.conv.data() + 2 * kd;
+    for (int h = 0; h < d.k_heads; ++h) {
+        double sq = 0, sk = 0;
+        for (int i = 0; i < d.k_dim; ++i) { sq += static_cast<double>(qc[h * d.k_dim + i]) * qc[h * d.k_dim + i]; sk += static_cast<double>(kc[h * d.k_dim + i]) * kc[h * d.k_dim + i]; }
+        const float rq = static_cast<float>(1.0 / std::sqrt(sq + 1e-6)), rk = static_cast<float>(1.0 / std::sqrt(sk + 1e-6));
+        for (int i = 0; i < d.k_dim; ++i) { I.qn[h * d.k_dim + i] = qc[h * d.k_dim + i] * rq * qscale; I.kn[h * d.k_dim + i] = kc[h * d.k_dim + i] * rk; }
+    }
+    // recurrence, one task per V head: S <- S*exp(g); kv = S^T k; delta = (v - kv)*beta; S <- S + k (x) delta; o = S^T q;  then the gated RMSNorm
+    const auto t_r = std::chrono::steady_clock::now();
+    I.pool.parallel_for(d.v_heads, [&](int h) {
+        const int kh = key_head_for_v(w.order, h, d);
+        const float beta = sigmoidf(bb[h]);
+        const float decay = std::exp(w.ssm_a[h] * softplusf(aa[h] + w.dt_bias[h]));
+        float* S = &s.S[static_cast<size_t>(h) * d.k_dim * d.v_dim];
+        const float* k = &I.kn[static_cast<size_t>(kh) * d.k_dim];
+        const float* q = &I.qn[static_cast<size_t>(kh) * d.k_dim];
+        const float* v = vc + static_cast<size_t>(h) * d.v_dim;
+        float o[512];
+        float kv[512];
+        for (int vi = 0; vi < d.v_dim; ++vi) kv[vi] = 0.0f;
+        for (int ki = 0; ki < d.k_dim; ++ki) {          // row-wise over S (contiguous in v): decay and kv = S^T k
+            float* Sr = S + static_cast<size_t>(ki) * d.v_dim;
+            const float kk = k[ki];
+            for (int vi = 0; vi < d.v_dim; ++vi) { Sr[vi] *= decay; kv[vi] += Sr[vi] * kk; }
+        }
+        for (int vi = 0; vi < d.v_dim; ++vi) { kv[vi] = (v[vi] - kv[vi]) * beta; o[vi] = 0.0f; }   // kv now holds delta
+        for (int ki = 0; ki < d.k_dim; ++ki) {
+            float* Sr = S + static_cast<size_t>(ki) * d.v_dim;
+            const float kk = k[ki], qq = q[ki];
+            for (int vi = 0; vi < d.v_dim; ++vi) { Sr[vi] += kk * kv[vi]; o[vi] += Sr[vi] * qq; }
+        }
+        if (!normed) return;   // replay: only the state matters
+        double ms = 0.0;
+        for (int i = 0; i < d.v_dim; ++i) ms += static_cast<double>(o[i]) * o[i];
+        const float r = static_cast<float>(1.0 / std::sqrt(ms / d.v_dim + d.eps));
+        for (int i = 0; i < d.v_dim; ++i)
+            normed[static_cast<size_t>(h) * d.v_dim + i] = w.norm_w[i] * (o[i] * r) * siluf(z[static_cast<size_t>(h) * d.v_dim + i]);
+    });
+    I.t_rec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_r).count();
+}
+
+// Attention for ONE token at absolute position pos: qg [q_rows] (query|gate per head), k/v [kv_width] projections; appends K/V; writes att [out_width].
+static void attn_core(CpuDecoder::Impl& I, const CpuLayerWeights& w, CpuLayerState& s, const float* qg, const float* kin, const float* vin, int64_t pos,
+                      float* att) {
+    const AttentionDims& d = w.at;
+    const int hd = d.head_dim, NH = d.heads, KH = d.kv_heads, OW = d.out_width(), KW = d.kv_width();
+    I.q.resize(static_cast<size_t>(NH) * hd); I.gate.resize(OW); I.k.assign(kin, kin + KW); I.v.assign(vin, vin + KW);
+    for (int h = 0; h < NH; ++h) {
+        std::copy_n(&qg[static_cast<size_t>(h) * 2 * hd], hd, &I.q[static_cast<size_t>(h) * hd]);
+        std::copy_n(&qg[static_cast<size_t>(h) * 2 * hd + hd], hd, &I.gate[static_cast<size_t>(h) * hd]);
+    }
+    for (int h = 0; h < NH; ++h) rms(&I.q[static_cast<size_t>(h) * hd], w.q_norm.data(), hd, d.eps, &I.q[static_cast<size_t>(h) * hd]);
+    for (int h = 0; h < KH; ++h) rms(&I.k[static_cast<size_t>(h) * hd], w.k_norm.data(), hd, d.eps, &I.k[static_cast<size_t>(h) * hd]);
+    I.cs.resize(d.rot_dim / 2); I.sn.resize(d.rot_dim / 2);
+    rope_cos_sin(pos, w.inv_freq, I.cs.data(), I.sn.data());
+    rope_apply(I.q.data(), NH, hd, d.rot_dim, I.cs.data(), I.sn.data());
+    rope_apply(I.k.data(), KH, hd, d.rot_dim, I.cs.data(), I.sn.data());
+    if (static_cast<size_t>(pos) >= s.kv_cap) throw std::length_error("K/V cache capacity exceeded");
+    const bool q8 = s.kv_format == KvFormat::Q8;
+    if (q8) {   // same quantiser as q8kv_append_cuda: per 32 values, scale = max|x| / 127, round to nearest even
+        auto put = [&](const float* src, int8_t* codes, float* scales) {
+            for (int g = 0; g < KW / 32; ++g) {
+                float amax = 0.0f;
+                for (int i = 0; i < 32; ++i) amax = std::max(amax, std::fabs(src[g * 32 + i]));
+                const float inv = amax > 0.0f ? 127.0f / amax : 0.0f;
+                for (int i = 0; i < 32; ++i) codes[g * 32 + i] = static_cast<int8_t>(std::nearbyint(src[g * 32 + i] * inv));
+                scales[g] = amax / 127.0f;
+            }
+        };
+        put(I.k.data(), &s.Kq[static_cast<size_t>(pos) * KW], &s.Kn[static_cast<size_t>(pos) * KW / 32]);
+        put(I.v.data(), &s.Vq[static_cast<size_t>(pos) * KW], &s.Vn[static_cast<size_t>(pos) * KW / 32]);
+    } else {
+        std::copy(I.k.begin(), I.k.end(), &s.K[static_cast<size_t>(pos) * KW]);
+        std::copy(I.v.begin(), I.v.end(), &s.V[static_cast<size_t>(pos) * KW]);
+    }
+    const size_t n = static_cast<size_t>(pos) + 1;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+    const auto t_a = std::chrono::steady_clock::now();
+    I.pool.parallel_for(NH, [&](int h) {
+        const int kh = h / d.groups();
+        const float* qh = &I.q[static_cast<size_t>(h) * hd];
+        std::vector<float> sc(n);
+        float mx = -INFINITY;
+        for (size_t j = 0; j < n; ++j) {
+            float acc = 0.0f;
+            const size_t base = j * KW + static_cast<size_t>(kh) * hd;
+            if (q8) {
+                for (int g = 0; g < hd / 32; ++g) {
+                    float dd = 0.0f;
+                    for (int i = 0; i < 32; ++i) dd += qh[g * 32 + i] * static_cast<float>(s.Kq[base + g * 32 + i]);
+                    acc += dd * s.Kn[base / 32 + g];
+                }
+            } else {
+                for (int i = 0; i < hd; ++i) acc += qh[i] * s.K[base + i];
+            }
+            sc[j] = acc * scale;
+            mx = std::max(mx, sc[j]);
+        }
+        float denom = 0.0f;
+        for (size_t j = 0; j < n; ++j) { sc[j] = std::exp(sc[j] - mx); denom += sc[j]; }
+        float* o = &att[static_cast<size_t>(h) * hd];
+        for (int i = 0; i < hd; ++i) o[i] = 0.0f;
+        for (size_t j = 0; j < n; ++j) {
+            const size_t base = j * KW + static_cast<size_t>(kh) * hd;
+            const float p = sc[j] / denom;
+            if (q8) {
+                for (int g = 0; g < hd / 32; ++g) {
+                    const float f = p * s.Vn[base / 32 + g];
+                    for (int i = 0; i < 32; ++i) o[g * 32 + i] += f * static_cast<float>(s.Vq[base + g * 32 + i]);
+                }
+            } else {
+                for (int i = 0; i < hd; ++i) o[i] += p * s.V[base + i];
+            }
+        }
+        for (int i = 0; i < hd; ++i) o[i] *= sigmoidf(I.gate[static_cast<size_t>(h) * hd + i]);   // output gate before o_proj
+    });
+    I.t_att += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_a).count();
+}
+
 void CpuDecoder::forward(const CpuLayerWeights& w, CpuLayerState& s, const float* x, float* y, int64_t pos) {
+    forward_multi(w, s, x, y, pos, 1, nullptr);
+}
+
+size_t CpuDecoder::tape_floats(const CpuLayerWeights& w, int T) {
+    if (w.kind != LayerKind::DeltaNet) return 0;
+    const DeltaNetDims& d = w.dn;
+    return static_cast<size_t>(T) * (static_cast<size_t>(d.conv_dim()) + d.value_dim() + 2 * static_cast<size_t>(d.v_heads));
+}
+
+// T tokens through one layer. Every matrix row is read from RAM once and applied to all T activations while it is in cache (the int8 kernels are
+// the single-token ones, called per token: same arithmetic, so T steps here == T single-token forwards, bitwise). The recurrence / attention run
+// token by token. tape (optional, DeltaNet): the per-token recurrence inputs, for replay() after a speculative rollback.
+void CpuDecoder::forward_multi(const CpuLayerWeights& w, CpuLayerState& s, const float* x, float* y, int64_t pos0, int T, float* tape) {
     Impl& I = *impl_;
     const auto t_fwd = std::chrono::steady_clock::now();
     const int H = w.hidden;
-    I.h.resize(H); I.x1.resize(H); I.m.resize(H);
-    rms(x, w.input_norm.data(), H, w.eps, I.h.data());
-    I.act.quantize(I.h.data(), H);
-
+    const size_t TH = static_cast<size_t>(T) * H;
+    if (static_cast<int>(I.acts.size()) < T) I.acts.resize(static_cast<size_t>(T));
+    I.hT.resize(TH); I.x1T.resize(TH); I.mT.resize(TH);
+    for (int t = 0; t < T; ++t) {
+        rms(x + static_cast<size_t>(t) * H, w.input_norm.data(), H, w.eps, &I.hT[static_cast<size_t>(t) * H]);
+        I.acts[t].quantize(&I.hT[static_cast<size_t>(t) * H], H);
+    }
     if (w.kind == LayerKind::DeltaNet) {
         const DeltaNetDims& d = w.dn;
-        const int cd = d.conv_dim(), kd = d.key_dim(), vd = d.value_dim(), taps = d.conv_kernel, hist = taps - 1;
-        I.qkv.resize(cd); I.conv.resize(cd); I.z.resize(vd); I.b.resize(d.v_heads); I.a.resize(d.v_heads); I.core.resize(vd); I.normed.resize(vd);
-        I.qn.resize(static_cast<size_t>(d.k_heads) * d.k_dim); I.kn.resize(I.qn.size());
-        I.matvecs({{&w.in_qkv, I.qkv.data()}, {&w.in_z, I.z.data()}, {&w.in_b, I.b.data()}, {&w.in_a, I.a.data()}});
-        I.parallel_elems(cd, [&](int c) {   // causal depthwise conv (state: the last 3 inputs, oldest first) + silu
-            float* hs = &s.conv[static_cast<size_t>(c) * hist];
-            const float* wc = &w.conv_w[static_cast<size_t>(c) * taps];
-            float acc = 0.0f;
-            for (int k = 0; k < hist; ++k) acc += wc[k] * hs[k];
-            acc += wc[taps - 1] * I.qkv[c];
-            I.conv[c] = siluf(acc);
-            for (int k = 0; k + 1 < hist; ++k) hs[k] = hs[k + 1];
-            hs[hist - 1] = I.qkv[c];
-        });
-        const float qscale = 1.0f / std::sqrt(static_cast<float>(d.k_dim));
-        const float* qc = I.conv.data();
-        const float* kc = I.conv.data() + kd;
-        const float* vc = I.conv.data() + 2 * kd;
-        for (int h = 0; h < d.k_heads; ++h) {
-            double sq = 0, sk = 0;
-            for (int i = 0; i < d.k_dim; ++i) { sq += static_cast<double>(qc[h * d.k_dim + i]) * qc[h * d.k_dim + i]; sk += static_cast<double>(kc[h * d.k_dim + i]) * kc[h * d.k_dim + i]; }
-            const float rq = static_cast<float>(1.0 / std::sqrt(sq + 1e-6)), rk = static_cast<float>(1.0 / std::sqrt(sk + 1e-6));
-            for (int i = 0; i < d.k_dim; ++i) { I.qn[h * d.k_dim + i] = qc[h * d.k_dim + i] * rq * qscale; I.kn[h * d.k_dim + i] = kc[h * d.k_dim + i] * rk; }
+        const size_t cd = static_cast<size_t>(d.conv_dim()), vd = static_cast<size_t>(d.value_dim()), vh = static_cast<size_t>(d.v_heads);
+        I.qkvT.resize(T * cd); I.zT.resize(T * vd); I.bT.resize(T * vh); I.aT.resize(T * vh); I.normedT.resize(T * vd);
+        I.matvecs_multi({{&w.in_qkv, I.qkvT.data()}, {&w.in_z, I.zT.data()}, {&w.in_b, I.bT.data()}, {&w.in_a, I.aT.data()}}, T);
+        if (tape) {
+            float* tp = tape;
+            std::copy(I.qkvT.begin(), I.qkvT.begin() + T * cd, tp); tp += T * cd;
+            std::copy(I.zT.begin(), I.zT.begin() + T * vd, tp); tp += T * vd;
+            std::copy(I.bT.begin(), I.bT.begin() + T * vh, tp); tp += T * vh;
+            std::copy(I.aT.begin(), I.aT.begin() + T * vh, tp);
         }
-        // recurrence, one task per V head: S <- S*exp(g); kv = S^T k; delta = (v - kv)*beta; S <- S + k (x) delta; o = S^T q;  then the gated RMSNorm
-        const auto t_r = std::chrono::steady_clock::now();
-        I.pool.parallel_for(d.v_heads, [&](int h) {
-            const int kh = key_head_for_v(w.order, h, d);
-            const float beta = sigmoidf(I.b[h]);
-            const float decay = std::exp(w.ssm_a[h] * softplusf(I.a[h] + w.dt_bias[h]));
-            float* S = &s.S[static_cast<size_t>(h) * d.k_dim * d.v_dim];
-            const float* k = &I.kn[static_cast<size_t>(kh) * d.k_dim];
-            const float* q = &I.qn[static_cast<size_t>(kh) * d.k_dim];
-            const float* v = vc + static_cast<size_t>(h) * d.v_dim;
-            float* o = &I.core[static_cast<size_t>(h) * d.v_dim];
-            float kv[512];
-            for (int vi = 0; vi < d.v_dim; ++vi) kv[vi] = 0.0f;
-            for (int ki = 0; ki < d.k_dim; ++ki) {          // row-wise over S (contiguous in v): decay and kv = S^T k
-                float* Sr = S + static_cast<size_t>(ki) * d.v_dim;
-                const float kk = k[ki];
-                for (int vi = 0; vi < d.v_dim; ++vi) { Sr[vi] *= decay; kv[vi] += Sr[vi] * kk; }
-            }
-            for (int vi = 0; vi < d.v_dim; ++vi) { kv[vi] = (v[vi] - kv[vi]) * beta; o[vi] = 0.0f; }   // kv now holds delta
-            for (int ki = 0; ki < d.k_dim; ++ki) {
-                float* Sr = S + static_cast<size_t>(ki) * d.v_dim;
-                const float kk = k[ki], qq = q[ki];
-                for (int vi = 0; vi < d.v_dim; ++vi) { Sr[vi] += kk * kv[vi]; o[vi] += Sr[vi] * qq; }
-            }
-            double ms = 0.0;
-            for (int i = 0; i < d.v_dim; ++i) ms += static_cast<double>(o[i]) * o[i];
-            const float r = static_cast<float>(1.0 / std::sqrt(ms / d.v_dim + d.eps));
-            for (int i = 0; i < d.v_dim; ++i)
-                I.normed[static_cast<size_t>(h) * d.v_dim + i] = w.norm_w[i] * (o[i] * r) * siluf(I.z[static_cast<size_t>(h) * d.v_dim + i]);
-        });
-        I.t_rec += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_r).count();
-        I.act.quantize(I.normed.data(), vd);
-        I.matvec(w.dn_out, I.m.data());
+        for (int t = 0; t < T; ++t)
+            dn_core(I, w, s, &I.qkvT[t * cd], &I.zT[t * vd], &I.bT[t * vh], &I.aT[t * vh], &I.normedT[t * vd]);
+        for (int t = 0; t < T; ++t) I.acts[t].quantize(&I.normedT[t * vd], vd);
+        I.matvecs_multi({{&w.dn_out, I.mT.data()}}, T);
     } else {
         const AttentionDims& d = w.at;
-        const int hd = d.head_dim, NH = d.heads, KH = d.kv_heads, OW = d.out_width(), KW = d.kv_width();
-        I.qg.resize(d.q_rows()); I.q.resize(static_cast<size_t>(NH) * hd); I.gate.resize(OW); I.k.resize(KW); I.v.resize(KW); I.att.resize(OW);
-        I.matvecs({{&w.q_proj, I.qg.data()}, {&w.k_proj, I.k.data()}, {&w.v_proj, I.v.data()}});
-        for (int h = 0; h < NH; ++h) {
-            std::copy_n(&I.qg[static_cast<size_t>(h) * 2 * hd], hd, &I.q[static_cast<size_t>(h) * hd]);
-            std::copy_n(&I.qg[static_cast<size_t>(h) * 2 * hd + hd], hd, &I.gate[static_cast<size_t>(h) * hd]);
-        }
-        for (int h = 0; h < NH; ++h) rms(&I.q[static_cast<size_t>(h) * hd], w.q_norm.data(), hd, d.eps, &I.q[static_cast<size_t>(h) * hd]);
-        for (int h = 0; h < KH; ++h) rms(&I.k[static_cast<size_t>(h) * hd], w.k_norm.data(), hd, d.eps, &I.k[static_cast<size_t>(h) * hd]);
-        I.cs.resize(d.rot_dim / 2); I.sn.resize(d.rot_dim / 2);
-        rope_cos_sin(pos, w.inv_freq, I.cs.data(), I.sn.data());
-        rope_apply(I.q.data(), NH, hd, d.rot_dim, I.cs.data(), I.sn.data());
-        rope_apply(I.k.data(), KH, hd, d.rot_dim, I.cs.data(), I.sn.data());
-        if (static_cast<size_t>(pos) >= s.kv_cap) throw std::length_error("K/V cache capacity exceeded");
-        const bool q8 = s.kv_format == KvFormat::Q8;
-        if (q8) {   // same quantiser as q8kv_append_cuda: per 32 values, scale = max|x| / 127, round to nearest even
-            auto put = [&](const float* src, int8_t* codes, float* scales) {
-                for (int g = 0; g < KW / 32; ++g) {
-                    float amax = 0.0f;
-                    for (int i = 0; i < 32; ++i) amax = std::max(amax, std::fabs(src[g * 32 + i]));
-                    const float inv = amax > 0.0f ? 127.0f / amax : 0.0f;
-                    for (int i = 0; i < 32; ++i) codes[g * 32 + i] = static_cast<int8_t>(std::nearbyint(src[g * 32 + i] * inv));
-                    scales[g] = amax / 127.0f;
-                }
-            };
-            put(I.k.data(), &s.Kq[static_cast<size_t>(pos) * KW], &s.Kn[static_cast<size_t>(pos) * KW / 32]);
-            put(I.v.data(), &s.Vq[static_cast<size_t>(pos) * KW], &s.Vn[static_cast<size_t>(pos) * KW / 32]);
-        } else {
-            std::copy(I.k.begin(), I.k.end(), &s.K[static_cast<size_t>(pos) * KW]);
-            std::copy(I.v.begin(), I.v.end(), &s.V[static_cast<size_t>(pos) * KW]);
-        }
-        const size_t n = static_cast<size_t>(pos) + 1;
-        const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-        const auto t_a = std::chrono::steady_clock::now();
-        I.pool.parallel_for(NH, [&](int h) {
-            const int kh = h / d.groups();
-            const float* qh = &I.q[static_cast<size_t>(h) * hd];
-            std::vector<float> sc(n);
-            float mx = -INFINITY;
-            for (size_t j = 0; j < n; ++j) {
-                float acc = 0.0f;
-                const size_t base = j * KW + static_cast<size_t>(kh) * hd;
-                if (q8) {
-                    for (int g = 0; g < hd / 32; ++g) {
-                        float dd = 0.0f;
-                        for (int i = 0; i < 32; ++i) dd += qh[g * 32 + i] * static_cast<float>(s.Kq[base + g * 32 + i]);
-                        acc += dd * s.Kn[base / 32 + g];
-                    }
-                } else {
-                    for (int i = 0; i < hd; ++i) acc += qh[i] * s.K[base + i];
-                }
-                sc[j] = acc * scale;
-                mx = std::max(mx, sc[j]);
-            }
-            float denom = 0.0f;
-            for (size_t j = 0; j < n; ++j) { sc[j] = std::exp(sc[j] - mx); denom += sc[j]; }
-            float* o = &I.att[static_cast<size_t>(h) * hd];
-            for (int i = 0; i < hd; ++i) o[i] = 0.0f;
-            for (size_t j = 0; j < n; ++j) {
-                const size_t base = j * KW + static_cast<size_t>(kh) * hd;
-                const float p = sc[j] / denom;
-                if (q8) {
-                    for (int g = 0; g < hd / 32; ++g) {
-                        const float f = p * s.Vn[base / 32 + g];
-                        for (int i = 0; i < 32; ++i) o[g * 32 + i] += f * static_cast<float>(s.Vq[base + g * 32 + i]);
-                    }
-                } else {
-                    for (int i = 0; i < hd; ++i) o[i] += p * s.V[base + i];
-                }
-            }
-            for (int i = 0; i < hd; ++i) o[i] *= sigmoidf(I.gate[static_cast<size_t>(h) * hd + i]);   // output gate before o_proj
-        });
-        I.t_att += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_a).count();
-        I.act.quantize(I.att.data(), OW);
-        I.matvec(w.o_proj, I.m.data());
+        const size_t qr = static_cast<size_t>(d.q_rows()), kw = static_cast<size_t>(d.kv_width()), ow = static_cast<size_t>(d.out_width());
+        I.qgT.resize(T * qr); I.kT.resize(T * kw); I.vT.resize(T * kw); I.attT.resize(T * ow);
+        I.matvecs_multi({{&w.q_proj, I.qgT.data()}, {&w.k_proj, I.kT.data()}, {&w.v_proj, I.vT.data()}}, T);
+        for (int t = 0; t < T; ++t) attn_core(I, w, s, &I.qgT[t * qr], &I.kT[t * kw], &I.vT[t * kw], pos0 + t, &I.attT[t * ow]);
+        for (int t = 0; t < T; ++t) I.acts[t].quantize(&I.attT[t * ow], ow);
+        I.matvecs_multi({{&w.o_proj, I.mT.data()}}, T);
     }
-    for (int i = 0; i < H; ++i) I.x1[i] = x[i] + I.m[i];
+    for (size_t i = 0; i < TH; ++i) I.x1T[i] = x[i] + I.mT[i];
 
     // MLP: down(silu(gate(h2)) * up(h2))
-    rms(I.x1.data(), w.post_norm.data(), H, w.eps, I.h.data());
-    I.act.quantize(I.h.data(), H);
-    I.g.resize(w.inter); I.u.resize(w.inter);
-    I.matvecs({{&w.gate, I.g.data()}, {&w.up, I.u.data()}});
-    I.parallel_elems(w.inter, [&](int i) { I.g[i] = siluf(I.g[i]) * I.u[i]; });
-    I.act.quantize(I.g.data(), w.inter);
-    I.matvec(w.down, I.m.data());
-    for (int i = 0; i < H; ++i) y[i] = I.x1[i] + I.m[i];
+    const size_t IN = static_cast<size_t>(w.inter);
+    for (int t = 0; t < T; ++t) {
+        rms(&I.x1T[static_cast<size_t>(t) * H], w.post_norm.data(), H, w.eps, &I.hT[static_cast<size_t>(t) * H]);
+        I.acts[t].quantize(&I.hT[static_cast<size_t>(t) * H], H);
+    }
+    I.gT.resize(T * IN); I.uT.resize(T * IN);
+    I.matvecs_multi({{&w.gate, I.gT.data()}, {&w.up, I.uT.data()}}, T);
+    I.parallel_elems(static_cast<int>(T * IN), [&](int i) { I.gT[i] = siluf(I.gT[i]) * I.uT[i]; });
+    for (int t = 0; t < T; ++t) I.acts[t].quantize(&I.gT[t * IN], IN);
+    I.matvecs_multi({{&w.down, I.mT.data()}}, T);
+    for (size_t i = 0; i < TH; ++i) y[i] = I.x1T[i] + I.mT[i];
     if (I.prof) {
         I.total_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_fwd).count();
-        if (++I.tokens % 64 == 0)
-            std::fprintf(stderr, "[cpu decode] %ld layer-steps: %.2f ms/layer-step total, matvec %.2f ms (%ld calls, %.1f GB/s), other %.2f ms\n", I.tokens,
-                         I.total_s * 1e3 / I.tokens, I.mv_s * 1e3 / I.tokens, I.mv_calls, I.mv_bytes / I.mv_s / 1e9, (I.total_s - I.mv_s) * 1e3 / I.tokens);
-        if (I.tokens % 64 == 0) for (int q = 0; q < 4; ++q) if (I.q_b[q]) std::fprintf(stderr, "    qtype %d: %.1f GB/s (%.1f%% of matvec time)\n", q, I.q_b[q] / I.q_s[q] / 1e9, 100.0 * I.q_s[q] / I.mv_s);
-        if (I.tokens % 64 == 0) std::fprintf(stderr, "    of 'other': deltanet recurrence %.2f ms, attention core %.2f ms per layer-step\n", I.t_rec * 1e3 / I.tokens, I.t_att * 1e3 / I.tokens);
+        I.tokens += T;
+        if (I.tokens % 64 < static_cast<long>(T)) {
+            std::fprintf(stderr, "[cpu decode] %ld layer-token-steps: %.2f ms per layer-token total, matvec %.2f ms (%ld calls, %.1f GB/s of weights), other %.2f ms\n",
+                         I.tokens, I.total_s * 1e3 / I.tokens, I.mv_s * 1e3 / I.tokens, I.mv_calls, I.mv_bytes / I.mv_s / 1e9, (I.total_s - I.mv_s) * 1e3 / I.tokens);
+            std::fprintf(stderr, "    of 'other': deltanet recurrence %.2f ms, attention core %.2f ms per layer-token\n", I.t_rec * 1e3 / I.tokens, I.t_att * 1e3 / I.tokens);
+        }
     }
+}
+
+void CpuDecoder::replay(const CpuLayerWeights& w, CpuLayerState& s, const float* tape, int T, int keep) {
+    if (w.kind != LayerKind::DeltaNet) return;
+    const DeltaNetDims& d = w.dn;
+    const size_t cd = static_cast<size_t>(d.conv_dim()), vd = static_cast<size_t>(d.value_dim()), vh = static_cast<size_t>(d.v_heads);
+    const float* qkv = tape;
+    const float* z = qkv + T * cd;
+    const float* b = z + T * vd;
+    const float* a = b + T * vh;
+    for (int t = 0; t < keep; ++t) dn_core(*impl_, w, s, qkv + t * cd, z + t * vd, b + t * vh, a + t * vh, nullptr);
+}
+
+void CpuDecoder::matvec_multi(const HostMatrix& M, const float* x, int T, float* y) {
+    Impl& I = *impl_;
+    if (static_cast<int>(I.acts.size()) < T) I.acts.resize(static_cast<size_t>(T));
+    for (int t = 0; t < T; ++t) I.acts[t].quantize(x + static_cast<size_t>(t) * M.cols, M.cols);
+    I.matvecs_multi({{&M, y}}, T);
 }
 
 }  // namespace dara::model

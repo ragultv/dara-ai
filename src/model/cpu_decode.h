@@ -71,6 +71,14 @@ public:
 
     // One token through one layer: x [hidden] -> y [hidden] (y may alias x), at absolute position `pos` (the KV length before this token).
     void forward(const CpuLayerWeights& w, CpuLayerState& s, const float* x, float* y, int64_t pos);
+    // T consecutive tokens (a speculative verification step): x/y [T][hidden] (y may alias x), first token at position pos0. Each weight row is read
+    // from RAM once for all T tokens; the result is bitwise that of T single-token forwards. tape: optional DeltaNet recurrence inputs (tape_floats).
+    void forward_multi(const CpuLayerWeights& w, CpuLayerState& s, const float* x, float* y, int64_t pos0, int T, float* tape);
+    static size_t tape_floats(const CpuLayerWeights& w, int T);
+    // After restoring a DeltaNet layer's state to its value before a T-token forward_multi, re-applies the first `keep` tokens from the tape.
+    void replay(const CpuLayerWeights& w, CpuLayerState& s, const float* tape, int T, int keep);
+    // y [T][M.rows] = M x_t for T vectors x [T][M.cols] (the host-RAM output head in a verification step): M read once.
+    void matvec_multi(const HostMatrix& M, const float* x, int T, float* y);
 
     // y = M x for one vector (the output head when it lives in host RAM). M.cols % 256 == 0 for K-quants.
     void matvec(const HostMatrix& M, const float* x, float* y);
@@ -84,8 +92,8 @@ public:
     // for threads to wake from sleep; false lets them back off to yield/sleep.
     void set_hot(bool on);
 
-private:
     struct Impl;
+private:
     std::unique_ptr<Impl> impl_;
 };
 

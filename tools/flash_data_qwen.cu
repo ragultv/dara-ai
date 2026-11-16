@@ -7,6 +7,9 @@
 //                        feats.bin  per sequence: fp16 [n_total][hidden]
 //                        index.jsonl {"id", "n_total", "n_prompt", "feat_offset"} (feat_offset in fp16 elements)
 // Usage: flash_data_qwen --gguf <model.gguf> --prompts <prompts.jsonl> --out-dir <dir> [--new 256] [--limit N] [--start K]
+//        flash_data_qwen --gguf <model.gguf> --from-seqs <dir> --out-dir <dir> [--limit N]
+//   --from-seqs: features only. Re-uses the token sequences of another model's data directory (e.g. the 4B's answers for a 9B drafter: prefill-speed
+//   instead of decode-speed data generation). Train with --self-targets: the token target is this model's own argmax, derived from the next feature.
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -31,7 +34,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
 #endif
-    std::string gguf_path, prompts_path, out_dir;
+    std::string gguf_path, prompts_path, out_dir, from_seqs;
     int n_new = 256, limit = 1 << 30, start = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -42,9 +45,10 @@ int main(int argc, char** argv) {
         else if (a == "--new") n_new = std::atoi(next().c_str());
         else if (a == "--limit") limit = std::atoi(next().c_str());
         else if (a == "--start") start = std::atoi(next().c_str());
+        else if (a == "--from-seqs") from_seqs = next();
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
     }
-    if (gguf_path.empty() || prompts_path.empty() || out_dir.empty()) {
+    if (gguf_path.empty() || (prompts_path.empty() && from_seqs.empty()) || out_dir.empty()) {
         std::fprintf(stderr, "usage: flash_data_qwen --gguf <model.gguf> --prompts <prompts.jsonl> --out-dir <dir> [--new 256] [--limit N] [--start K]\n");
         return 2;
     }
@@ -61,6 +65,38 @@ int main(int argc, char** argv) {
         const int32_t end_turn = im_end.size() == 1 ? im_end[0] : -1;
         const int32_t eos = tokenizer->eos_id();
 
+        if (!from_seqs.empty()) {   // features-only mode
+            std::ifstream sin(from_seqs + "/seqs.bin", std::ios::binary);
+            std::ifstream iin(from_seqs + "/index.jsonl");
+            std::ofstream seqs(out_dir + "/seqs.bin", std::ios::binary), feats(out_dir + "/feats.bin", std::ios::binary), index(out_dir + "/index.jsonl");
+            size_t feat_offset = 0;
+            int done = 0;
+            long total = 0;
+            std::string iline;
+            std::vector<int32_t> ids;
+            std::vector<float> f;
+            while (done < limit && std::getline(iin, iline)) {
+                int32_t hdr[2];
+                if (!sin.read(reinterpret_cast<char*>(hdr), 8)) break;
+                std::vector<int32_t> seq(static_cast<size_t>(hdr[0]));
+                sin.read(reinterpret_cast<char*>(seq.data()), static_cast<std::streamsize>(seq.size() * 4));
+                const auto j = nlohmann::json::parse(iline);
+                if (seq.size() > 2000) continue;
+                model.restore(empty);
+                model.forward(seq.data(), static_cast<int>(seq.size()), static_cast<int>(seq.size()), nullptr, nullptr, nullptr, &f, 0);   // features only: no head pass (the trainer derives targets from the next features)
+                std::vector<uint16_t> f16(f.size());
+                for (size_t i = 0; i < f.size(); ++i) f16[i] = dara::kernels::float_to_half(f[i]);
+                seqs.write(reinterpret_cast<const char*>(hdr), 8);
+                seqs.write(reinterpret_cast<const char*>(seq.data()), static_cast<std::streamsize>(seq.size() * 4));
+                feats.write(reinterpret_cast<const char*>(f16.data()), static_cast<std::streamsize>(f16.size() * 2));
+                index << nlohmann::json{{"id", j["id"]}, {"n_total", seq.size()}, {"n_prompt", hdr[1]}, {"feat_offset", feat_offset}}.dump() << "\n";
+                feat_offset += f16.size();
+                total += static_cast<long>(seq.size());
+                if (++done % 10 == 0) { seqs.flush(); feats.flush(); index.flush(); std::printf("%d sequences, %ld tokens\n", done, total); std::fflush(stdout); }
+            }
+            std::printf("done: %d sequences, %ld tokens -> %s\n", done, total, out_dir.c_str());
+            return 0;
+        }
         std::ifstream pin(prompts_path, std::ios::binary);
         const bool append = start > 0;
         std::ofstream seqs(out_dir + "/seqs.bin", std::ios::binary | (append ? std::ios::app : std::ios::trunc));

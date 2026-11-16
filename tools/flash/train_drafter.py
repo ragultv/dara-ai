@@ -27,12 +27,19 @@ def load_data(d, hidden):
         if off + 4 * n > len(raw): break          # a sequence still being written (data generation running)
         seqs.append((np.frombuffer(raw, np.int32, n, off).copy(), p)); off += 4 * n
     feats = np.memmap(os.path.join(d, "feats.bin"), dtype=np.float16, mode="r")
+    am_path = os.path.join(d, "argmax.bin")   # optional (--from-seqs data): the target's greedy next token at every position
+    amax = np.fromfile(am_path, dtype=np.int32) if os.path.exists(am_path) else None
+    am_off = 0
     out = []
     for (toks, p), ix in zip(seqs, index):
         n = len(toks)
         if ix["feat_offset"] + n * hidden > feats.shape[0]: break
         f = feats[ix["feat_offset"]: ix["feat_offset"] + n * hidden].reshape(n, hidden)
-        out.append((toks, p, f))
+        if amax is not None:
+            if am_off + n > len(amax): break
+            out.append((toks, p, f, amax[am_off: am_off + n])); am_off += n
+        else:
+            out.append((toks, p, f, None))
     return out
 
 
@@ -108,6 +115,7 @@ def main():
     ap.add_argument("--noise", type=float, default=0.2, help="uniform noise on input features (EAGLE): robustness to the drafter's own errors")
     ap.add_argument("--holdout", type=int, default=40)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--self-targets", action="store_true", help="token targets = the target model's argmax (head . next feature) instead of the stored text (features-only data from another model's text)")
     ap.add_argument("--max-seqs", type=int, default=0, help="use only the first N sequences (smoke tests)")
     ap.add_argument("--max-steps", type=int, default=0, help="stop after N optimizer steps (smoke tests)")
     a = ap.parse_args()
@@ -119,13 +127,15 @@ def main():
     H = a.hidden
     data = load_data(a.data, H)
     if a.max_seqs: data = data[: a.max_seqs]
-    print(f"{len(data)} sequences, {sum(len(t) for t, _, _ in data)} tokens")
+    print(f"{len(data)} sequences, {sum(len(t) for t, _, _, _ in data)} tokens")
     vocab_total = os.path.getsize(a.embd) // (2 * H)
     embd = np.memmap(a.embd, dtype=np.float16, mode="r").reshape(vocab_total, H)
     headm = embd if a.head is None else np.memmap(a.head, dtype=np.float16, mode="r").reshape(-1, H)
     # reduced vocabulary: the most frequent tokens of the target's own answers (and prompts)
     counts = np.zeros(vocab_total, np.int64)
-    for toks, p, _ in data: np.add.at(counts, toks, 1)
+    for toks, p, _, am in data:
+        np.add.at(counts, toks, 1)
+        if am is not None: np.add.at(counts, am, 1)
     keep = np.argsort(-counts)[: a.vocab_k]
     keep.sort()
     remap = np.full(vocab_total, -1, np.int64); remap[keep] = np.arange(len(keep))
@@ -146,18 +156,23 @@ def main():
     remap_t = torch.tensor(remap, device=dev)
 
     def batch_tensors(batch, noise):
-        T = max(len(t) for t, _, _ in batch) - 1
+        T = max(len(b[0]) for b in batch) - 1
         B = len(batch)
         f = torch.zeros(B, T, H, device=dev); e = torch.zeros(B, T, H, device=dev); ft = torch.zeros(B, T, H, device=dev)
         tgt = torch.full((B, T), -1, dtype=torch.long, device=dev); mask = torch.zeros(B, T, device=dev)
-        for i, (toks, p, feats) in enumerate(batch):
+        for i, (toks, p, feats, am) in enumerate(batch):
             n = len(toks) - 1                              # positions t = 0 .. n-1 predict feature t+1
             fe = torch.tensor(np.asarray(feats, np.float32), device=dev)
             f[i, :n] = fe[:n]
             ft[i, :n] = fe[1: n + 1]
             e[i, :n] = torch.tensor(np.asarray(embd[toks[1: n + 1]], np.float32), device=dev)
-            nxt = torch.tensor(toks[2: n + 1].astype(np.int64), device=dev)   # tok_{t+2} for t <= n-2
-            tgt[i, : n - 1] = remap_t[nxt]
+            # tok_{t+2} for t <= n-2: the stored text, or (features-only data) the target's own greedy choice after position t+1
+            if a.self_targets:   # the target's own greedy choice within the reduced vocabulary: argmax of head . f_{t+1}
+                tgt[i, : n - 1] = (fe[1:n] @ head_w.T).argmax(-1)
+            else:
+                src = toks[2: n + 1] if am is None else am[1: n]
+                nxt = torch.tensor(np.asarray(src).astype(np.int64), device=dev)
+                tgt[i, : n - 1] = remap_t[nxt]
             mask[i, max(p - 1, 0): n] = 1.0                 # loss on the answer region (the context still includes the prompt)
         if noise > 0:
             f = f + (torch.rand_like(f) - 0.5) * 2 * noise

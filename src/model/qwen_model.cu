@@ -340,24 +340,37 @@ void QwenModel::restore(const Checkpoint& c) {
 }
 
 void QwenModel::snapshot() {
-    if (cpu_current_) sync_hosted_to_gpu();   // the snapshot shadows the GPU states
-    if (shadow_conv_.empty()) {  // first use: allocate the in-VRAM shadow of every DeltaNet layer's state
+    // CPU decode mode: the verification step runs the hosted layers on the CPU, so their snapshot lives in host RAM
+    const bool cpu_side = cpu_ != nullptr && !cpu_s_.empty();
+    const size_t n_gpu = cpu_side ? static_cast<size_t>(resident_) : states_.size();
+    if (cpu_side) { if (!cpu_current_) sync_hosted_to_cpu(); }
+    else if (cpu_current_) sync_hosted_to_gpu();   // the snapshot shadows the GPU states
+    if (shadow_conv_.empty()) {  // first use: allocate the in-VRAM shadow of every GPU-side DeltaNet layer's state
         shadow_conv_.resize(states_.size());
         shadow_S_.resize(states_.size());
         shadow_len_.assign(states_.size(), 0);
-        for (size_t i = 0; i < states_.size(); ++i)
+        for (size_t i = 0; i < n_gpu; ++i)
             if (states_[i].kind == LayerKind::DeltaNet) { shadow_conv_[i] = DevBuf<float>(states_[i].conv_state.n); shadow_S_[i] = DevBuf<float>(states_[i].S.n); }
+    }
+    cpu_snap_ = cpu_side;
+    if (cpu_side) {
+        cpu_shadow_conv_.resize(cpu_s_.size()); cpu_shadow_S_.resize(cpu_s_.size());
+        if (cpu_tape_.size() != cpu_s_.size()) {
+            cpu_tape_.resize(cpu_s_.size());
+            for (size_t i = 0; i < cpu_s_.size(); ++i) cpu_tape_[i].resize(CpuDecoder::tape_floats(cpu_w_[i], kMaxSpecTokens));
+        }
+        for (size_t i = 0; i < cpu_s_.size(); ++i) { cpu_shadow_conv_[i] = cpu_s_[i].conv; cpu_shadow_S_[i] = cpu_s_[i].S; }
     }
     for (size_t i = 0; i < states_.size(); ++i) {
         shadow_len_[i] = states_[i].pos;
-        if (states_[i].kind != LayerKind::DeltaNet) continue;  // KV: rewinding the length is enough, entries past it are overwritten
+        if (states_[i].kind != LayerKind::DeltaNet || i >= n_gpu) continue;  // KV: rewinding the length is enough, entries past it are overwritten
         cuda_check(cudaMemcpyAsync(shadow_conv_[i].p, states_[i].conv_state.p, states_[i].conv_state.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "snapshot conv");
         cuda_check(cudaMemcpyAsync(shadow_S_[i].p, states_[i].S.p, states_[i].S.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "snapshot S");
     }
     shadow_pos_ = pos_;
     if (tape_.empty()) {
         tape_.resize(states_.size());
-        for (size_t i = 0; i < states_.size(); ++i)
+        for (size_t i = 0; i < n_gpu; ++i)
             if (states_[i].kind == LayerKind::DeltaNet) tape_[i] = DevBuf<float>(deltanet_tape_floats(layers_[i].weights, kMaxSpecTokens));
     }
     record_next_ = true;
@@ -367,9 +380,19 @@ void QwenModel::snapshot() {
 void QwenModel::rollback(int keep) {
     if (shadow_conv_.empty()) throw std::logic_error("rollback without a snapshot");
     if (keep < 0 || (keep > 0 && keep > tape_tokens_)) throw std::invalid_argument("rollback: cannot keep more tokens than the recorded forward");
+    const size_t n_gpu = cpu_snap_ ? static_cast<size_t>(resident_) : states_.size();
+    if (cpu_snap_) {   // hosted layers: restore the host shadow, then replay the kept tokens from the host tape (no weight read)
+        if (!cpu_current_) throw std::logic_error("rollback: CPU-side snapshot but the hosted states moved to the GPU");
+        for (size_t i = 0; i < cpu_s_.size(); ++i) {
+            if (cpu_w_[i].kind != LayerKind::DeltaNet) continue;
+            cpu_s_[i].conv = cpu_shadow_conv_[i];
+            cpu_s_[i].S = cpu_shadow_S_[i];
+            if (keep > 0) cpu_->replay(cpu_w_[i], cpu_s_[i], cpu_tape_[i].data(), tape_tokens_, keep);
+        }
+    }
     for (size_t i = 0; i < states_.size(); ++i) {
         states_[i].pos = shadow_len_[i] + static_cast<size_t>(keep);
-        if (states_[i].kind != LayerKind::DeltaNet) continue;
+        if (states_[i].kind != LayerKind::DeltaNet || i >= n_gpu) continue;
         cuda_check(cudaMemcpyAsync(states_[i].conv_state.p, shadow_conv_[i].p, states_[i].conv_state.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "rollback conv");
         cuda_check(cudaMemcpyAsync(states_[i].S.p, shadow_S_[i].p, states_[i].S.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "rollback S");
         if (keep > 0) gpu_deltanet_replay(layers_[i].weights, states_[i], tape_[i].p, tape_tokens_, keep, pool_);
@@ -401,7 +424,9 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     streamed_bytes_ = 0;
 
     // single-token decode with hosted layers: those layers run on the CPU (no weight streaming); everything else keeps the GPU path
-    const bool cpu_dec = cpu_ && T == 1 && !layer_outputs && !record_next_;
+    // ... and so do short verification steps (<= kMaxSpecTokens tokens): every hosted weight is read from RAM once for all of them (forward_multi)
+    static const bool cpu_multi = [] { const char* e = std::getenv("DARA_CPU_MULTI"); return !(e && e[0] == '0'); }();
+    const bool cpu_dec = cpu_ && !layer_outputs && (T == 1 ? !record_next_ || !cpu_s_.empty() : (cpu_multi && T <= kMaxSpecTokens));
     if (cpu_dec) { if (!cpu_current_) sync_hosted_to_cpu(); }
     else if (cpu_current_) sync_hosted_to_gpu();
     const int gpu_layers = cpu_dec ? resident_ : L;
@@ -495,8 +520,10 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
     if (cpu_dec) {   // the hosted layers, on the CPU, in place on the downloaded hidden state
         for (int l = resident_; l < L; ++l) {
             const size_t i = static_cast<size_t>(l - resident_);
-            cpu_->forward(cpu_w_[i], cpu_s_[i], hidden.data(), hidden.data(), static_cast<int64_t>(states_[l].pos));
-            states_[l].pos += 1;
+            float* tape = (record_next_ && cpu_snap_ && cpu_w_[i].kind == LayerKind::DeltaNet) ? cpu_tape_[i].data() : nullptr;
+            if (T == 1 && !tape) cpu_->forward(cpu_w_[i], cpu_s_[i], hidden.data(), hidden.data(), static_cast<int64_t>(states_[l].pos));
+            else cpu_->forward_multi(cpu_w_[i], cpu_s_[i], hidden.data(), hidden.data(), static_cast<int64_t>(states_[l].pos), T, tape);
+            states_[l].pos += static_cast<size_t>(T);
         }
     }
     layer_prof_flush();  // no-op unless DARA_LAYER_PROF=1; the copy above synchronised the stream
@@ -522,7 +549,8 @@ std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_f
             rmsnorm(&hidden[static_cast<size_t>(t + logits_from) * H], final_scale.data(), H, cfg_.eps, &normed[static_cast<size_t>(t) * H]);
         // One batched projection: the output head is read once per group of 8 rows instead of once per row.
         if (head_on_cpu_) {
-            for (int t = 0; t < n_out; ++t) cpu_->matvec(head_cpu_, &normed[static_cast<size_t>(t) * H], &logits[static_cast<size_t>(t) * cfg_.vocab]);
+            if (n_out == 1) cpu_->matvec(head_cpu_, normed.data(), logits.data());
+            else cpu_->matvec_multi(head_cpu_, normed.data(), n_out, logits.data());   // the head is read once for all rows
         } else {
         float* dx = pool_.get<float>(30, static_cast<size_t>(n_out) * H);
         float* dy = pool_.get<float>(31, static_cast<size_t>(n_out) * cfg_.vocab);
