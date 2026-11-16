@@ -40,6 +40,7 @@ int main(int argc, char** argv) {
     size_t kv = 2048;
     bool dump_layers = true, parse_special = false, stop_at_eos = false, think = false, profile = false, bench = false;
     int chunk_tokens = 0;
+    bool flash_ngram = true;    // --flash-no-ngram: Flash drafts only (default: prompt-lookup drafts first when the context repeats)
     float flash_min_p = 0.0f;   // --flash-min-p P: draft only while the drafter's cumulative probability stays >= P
     std::string flash_path;   // --flash <drafter.dflash>: Dara Flash speculative decoding, up to --spec K draft tokens (default 4)
     int spec_k = 0, ngram_max = 4, ngram_min = 3;   // --spec K: prompt-lookup speculative decoding (greedy-exact)
@@ -66,6 +67,7 @@ int main(int argc, char** argv) {
         else if (a == "--bench") { bench = true; dump_layers = false; }   // throughput mode: decode logits are not copied to the host or saved
         else if (a == "--spec") spec_k = std::atoi(next().c_str());
         else if (a == "--flash") flash_path = next();
+        else if (a == "--flash-no-ngram") flash_ngram = false;
         else if (a == "--flash-min-p") flash_min_p = static_cast<float>(std::atof(next().c_str()));
         else if (a == "--ngram") ngram_max = std::atoi(next().c_str());
         else if (a == "--ngram-min") ngram_min = std::atoi(next().c_str());
@@ -193,17 +195,37 @@ int main(int argc, char** argv) {
             std::printf("flash drafter: prompt pass %.3f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - tf0).count());
             std::vector<int32_t> draft, feed;
             std::vector<float> feats;
+            auto ngram_lookup = [&](std::vector<int32_t>& out, int limit) {   // prompt lookup (copy-heavy text: edits, transforms)
+                out.clear();
+                const int n_sz = static_cast<int>(seq.size());
+                for (int n = ngram_max; n >= ngram_min && out.empty(); --n) {
+                    if (n_sz <= n) continue;
+                    for (int j = n_sz - n - 1; j >= 0; --j) {
+                        bool eq = true;
+                        for (int q = 0; q < n && eq; ++q) eq = seq[j + q] == seq[n_sz - n + q];
+                        if (!eq) continue;
+                        for (int q = j + n; q < n_sz && static_cast<int>(out.size()) < limit; ++q) out.push_back(seq[q]);
+                        if (!out.empty()) break;
+                    }
+                }
+            };
+            int ng_cool = 0, ng_back = 0;
+            long ng_steps = 0, ng_acc = 0;
             while (static_cast<int>(seq.size()) - T0 < n_new && !hit_eos) {
                 const int budget = n_new - (static_cast<int>(seq.size()) - T0) - 1;
                 const int32_t cur = seq.back();
                 const size_t dpos = flash->position(), p0 = model.position();
                 draft.clear();
-                flash->draft(y, d1, p1, std::min(spec_k, budget), flash_min_p, draft);
+                bool from_ngram = false;
+                if (flash_ngram && ng_cool == 0) { ngram_lookup(draft, std::min(15, budget)); from_ngram = draft.size() >= 2; if (!from_ngram) draft.clear(); }
+                else if (ng_cool > 0) --ng_cool;
+                if (!from_ngram) flash->draft(y, d1, p1, std::min(spec_k, budget), flash_min_p, draft);
                 const int kd = static_cast<int>(draft.size());
                 feed.assign(1, cur); feed.insert(feed.end(), draft.begin(), draft.end());
                 const std::vector<int32_t> ids = model.forward_argmax(feed.data(), kd + 1, &st, &feats); ++passes;
                 int m = 0;
                 while (m < kd && ids[m] == draft[m]) ++m;
+                if (from_ngram) { ++ng_steps; ng_acc += m; if (m == 0) { ng_back = ng_back ? std::min(ng_back * 2, 32) : 2; ng_cool = ng_back; } else ng_back = 0; }
                 if (kd > 0) { ++spec_steps; drafted += kd; accepted += m; }
                 if (m < kd) model.rewind(p0 + static_cast<size_t>(m) + 1);
                 std::vector<int32_t> to_add(draft.begin(), draft.begin() + m);
@@ -217,6 +239,7 @@ int main(int argc, char** argv) {
                     if (is_eos(id)) { hit_eos = true; break; }
                 }
             }
+            if (flash_ngram) std::printf("flash n-gram: %ld steps, %ld accepted\n", ng_steps, ng_acc);
             spec_k = std::max(spec_k, 1);
         } else if (spec_k > 0 && teacher.empty()) {
             // Speculative decoding, greedy-exact (same scheme as qwen_generate): prompt lookup proposes up to spec_k tokens, ONE forward of cur + drafts
