@@ -136,9 +136,18 @@ FlashDrafter::FlashDrafter(const std::string& path, const dara::io::GgufCheckpoi
     }
     head_ = upload_quant_raw(hq, rows.data(), static_cast<size_t>(K_), hi.cols());
     d_argmax_ = DevBuf<unsigned char>(argmax_scratch_bytes() + 64);
+    // single-position drafting buffers (graph)
+    graph_.create_stream();
+    g_in_ = DevBuf<float>(2 * static_cast<size_t>(H_)); g_x_ = DevBuf<float>(static_cast<size_t>(H_)); g_y_ = DevBuf<float>(static_cast<size_t>(H_));
+    g_logits_ = DevBuf<float>(static_cast<size_t>(K_)); g_out_ = DevBuf<float>(2); g_pos_ = DevBuf<int64_t>(1);
+    void* hp = nullptr;
+    cuda_check(cudaHostAlloc(&hp, (static_cast<size_t>(H_) + 4) * sizeof(float) + sizeof(int64_t), cudaHostAllocDefault), "flash pinned");
+    h_buf_ = static_cast<float*>(hp);
+    h_pos_ = reinterpret_cast<int64_t*>(h_buf_ + H_ + 2);
+    if (const char* e = std::getenv("DARA_FLASH_GRAPH")) graphs_ = e[0] != '0';
 }
 
-FlashDrafter::~FlashDrafter() = default;
+FlashDrafter::~FlashDrafter() { if (h_buf_) cudaFreeHost(h_buf_); }
 size_t FlashDrafter::position() const { return state_.pos; }
 void FlashDrafter::rewind(size_t pos) { if (pos < state_.pos) state_.pos = pos; }
 
@@ -174,6 +183,7 @@ void FlashDrafter::extend(const float* feats, const int32_t* next, int n, std::v
     cuda_check(cudaMemcpy(d_in, in.data(), in.size() * sizeof(float), cudaMemcpyHostToDevice), "flash in");
     step(d_in, n, d_y);
     const float* last = d_y + static_cast<size_t>(n - 1) * H_;
+    cuda_check(cudaMemcpyAsync(g_y_.p, last, static_cast<size_t>(H_) * sizeof(float), cudaMemcpyDeviceToDevice, 0), "flash y keep");   // drafting starts here
     tok_last = pick(last);
     y_last.resize(H_);
     cuda_check(cudaMemcpy(y_last.data(), last, static_cast<size_t>(H_) * sizeof(float), cudaMemcpyDeviceToHost), "flash y");
@@ -184,14 +194,54 @@ void FlashDrafter::draft(std::vector<float> y, int32_t tok, float p_first, int k
     if (k <= 0 || p_first < min_prob) return;
     out.push_back(tok);
     float run = p_first;
+    (void)y;   // the predicted state stays on the device (g_y_)
     for (int i = 1; i < k; ++i) {
-        std::vector<float> f2(y);
-        std::vector<int32_t> nx{tok};
-        extend(f2.data(), nx.data(), 1, y, tok);   // the drafter's own predicted state stands in for the target's
+        tok = draft_step(tok);   // the drafter's own predicted state stands in for the target's
         run *= last_p_;
         if (run < min_prob) break;
         out.push_back(tok);
     }
+}
+
+void FlashDrafter::draft_body() {
+    cudaStream_t s = graph_.stream();
+    cuda_check(cudaMemcpyAsync(g_in_.p, g_y_.p, static_cast<size_t>(H_) * sizeof(float), cudaMemcpyDeviceToDevice, s), "flash y in");
+    cuda_check(matvec_multi_cuda(fc_, g_in_.p, 2 * static_cast<size_t>(H_), g_x_.p, static_cast<size_t>(H_), 1, s), "flash fc");
+    gpu_layer_forward_dev(layer_.weights, state_, g_x_.p, g_y_.p, 1, pool_, nullptr, s, g_pos_.p);
+    cuda_check(matvec_multi_cuda(head_, g_y_.p, static_cast<size_t>(H_), g_logits_.p, static_cast<size_t>(K_), 1, s), "flash head");
+    argmax_prob_kernel<<<1, 1024, 0, s>>>(g_logits_.p, K_, g_out_.p);
+    cuda_check(cudaGetLastError(), "flash argmax");
+}
+
+int32_t FlashDrafter::draft_step(int32_t tok) {
+    if (state_.pos + 1 > state_.kv_cap) throw std::length_error("drafter K/V capacity exceeded");
+    cudaStream_t s = graph_.stream();
+    const std::vector<float> e = embed_(tok);
+    std::memcpy(h_buf_, e.data(), static_cast<size_t>(H_) * sizeof(float));
+    *h_pos_ = static_cast<int64_t>(state_.pos);
+    cuda_check(cudaMemcpyAsync(g_in_.p + H_, h_buf_, static_cast<size_t>(H_) * sizeof(float), cudaMemcpyHostToDevice, s), "flash emb");
+    cuda_check(cudaMemcpyAsync(g_pos_.p, h_pos_, sizeof(int64_t), cudaMemcpyHostToDevice, s), "flash pos");
+    bool done = false;
+    if (graphs_) {
+        try {
+            std::vector<void*> key;
+            for (size_t slot = 1; slot <= 20; ++slot) key.push_back(pool_.get<unsigned char>(slot, 1));
+            if (!graph_.ready_for(key)) graph_.capture(key, [&] { draft_body(); });
+            graph_.launch();
+            done = true;
+        } catch (const GraphError&) {
+            graph_.invalidate();   // typically a scratch buffer that had to grow: the eager run below sizes it, the next step re-captures
+            if (++graph_failures_ >= 3) graphs_ = false;
+        }
+    }
+    if (!done) draft_body();
+    cuda_check(cudaMemcpyAsync(h_buf_ + H_, g_out_.p, 2 * sizeof(float), cudaMemcpyDeviceToHost, s), "flash id");
+    cuda_check(cudaStreamSynchronize(s), "flash step");
+    state_.pos += 1;   // the device-position path does not advance it
+    int id = 0;
+    std::memcpy(&id, &h_buf_[H_], sizeof id);
+    last_p_ = h_buf_[H_ + 1];
+    return keep_[static_cast<size_t>(id)];
 }
 
 }  // namespace dara::model

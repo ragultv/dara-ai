@@ -97,7 +97,7 @@ class Drafter(nn.Module):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True)
+    ap.add_argument("--data", required=True, nargs="+", help="one or more data directories (combined)")
     ap.add_argument("--embd", required=True, help="target token embedding / output head, fp16 [vocab][hidden] (tools/gguf_dump_tensor)")
     ap.add_argument("--head", default=None, help="separate output head fp16 (untied models); default: --embd")
     ap.add_argument("--out", required=True)
@@ -121,11 +121,11 @@ def main():
     a = ap.parse_args()
     if os.name == "nt":   # keep the system out of idle standby while training (the dGPU may not come back from Modern Standby)
         import ctypes
-        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)   # + display (Modern Standby)
     torch.manual_seed(0); random.seed(0)
     dev = a.device
     H = a.hidden
-    data = load_data(a.data, H)
+    data = [x for d in a.data for x in load_data(d, H)]
     if a.max_seqs: data = data[: a.max_seqs]
     print(f"{len(data)} sequences, {sum(len(t) for t, _, _, _ in data)} tokens")
     vocab_total = os.path.getsize(a.embd) // (2 * H)

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "io/gguf_checkpoint.h"
+#include "model/decode_graph.h"
 #include "model/device_buffer.h"
 #include "model/layer_cuda.h"
 #include "model/packed_layer.h"
@@ -40,6 +41,17 @@ public:
 private:
     void step(const float* d_in2h, int n, float* d_y);   // fc + layer for n positions (inputs on the device), d_y [n][hidden]
     int32_t pick(const float* d_y_row);                   // reduced-vocab argmax -> target token id
+    // One drafted position: input [g_y_ (the drafter's previous predicted state, on the device) ; emb(tok)], output g_y_. Replayed as a CUDA graph
+    // (DARA_FLASH_GRAPH=0: eager); only the embedding row goes up and the picked id + probability come back.
+    int32_t draft_step(int32_t tok);
+    void draft_body();
+    DecodeGraph graph_;
+    DevBuf<float> g_in_, g_x_, g_y_, g_logits_, g_out_;
+    DevBuf<int64_t> g_pos_;
+    float* h_buf_ = nullptr;     // pinned: embedding row [H] + {id bits, probability}
+    int64_t* h_pos_ = nullptr;   // pinned position
+    bool graphs_ = true;
+    int graph_failures_ = 0;
     int H_ = 0, K_ = 0;
     float last_p_ = 1.0f;
     std::vector<int32_t> keep_;
