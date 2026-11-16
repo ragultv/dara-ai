@@ -32,7 +32,7 @@ using namespace dara::model;
 
 int main(int argc, char** argv) {
 #ifdef _WIN32
-    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);   // display too: on Modern Standby laptops the display timeout alone triggers standby
 #endif
     std::string gguf_path, prompts_path, out_dir, from_seqs;
     int n_new = 256, limit = 1 << 30, start = 0;
