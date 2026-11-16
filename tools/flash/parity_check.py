@@ -31,7 +31,7 @@ def main():
     st = {k: (torch.tensor(deq(v.float().numpy())) if v.dim() == 2 else v.float()) for k, v in ck["state"].items()}
     m.load_state_dict(st)
     m.eval()
-    toks, p, feats = load_data(a.data, H)[a.seq]
+    toks, p, feats, _ = load_data(a.data, H)[a.seq]
     n = min(a.n, len(toks) - 1)
     embd = np.memmap(a.embd, dtype=np.float16, mode="r").reshape(-1, H)
     f = torch.tensor(np.asarray(feats[:n], np.float32))[None]

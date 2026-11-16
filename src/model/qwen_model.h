@@ -165,7 +165,10 @@ private:
     size_t shadow_pos_ = 0;
     std::vector<DevBuf<float>> tape_;   // per layer (DeltaNet): recorded recurrence inputs of the last snapshot-following forward
     bool record_next_ = false;
-    int tape_tokens_ = 0;               // tokens recorded (0 = none)
+    int tape_tokens_ = 0;
+    // CPU-hosted layers (CPU decode mode): speculative snapshot / tape on the host side, so verification steps stay on the CPU path
+    bool cpu_snap_ = false;
+    std::vector<std::vector<float>> cpu_shadow_conv_, cpu_shadow_S_, cpu_tape_;               // tokens recorded (0 = none)
     size_t streamed_bytes_ = 0;              // since the last forward() began
     PlacementReport report_;
     double load_seconds_ = 0;
