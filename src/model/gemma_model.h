@@ -15,6 +15,7 @@
 // double-buffered staging arena; the planner is fed the real free VRAM and the constructor throws if the model cannot be placed.
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -127,6 +128,11 @@ private:
     bool slot_used_[2] = {false, false};
     size_t streamed_bytes_ = 0;
     // work stream (blocking, so it orders against the legacy default stream used for uploads) and CUDA-graph state
+    static constexpr int kMaxGraphVerify = 8;   // verify steps of 2..8 tokens replay their own graphs (DARA_NO_VGRAPH=1: eager)
+    DecodeGraph graphs_v_[kMaxGraphVerify + 1];
+    int64_t* h_posv_ = nullptr;
+    bool vgraphs_on_ = [] { const char* e = std::getenv("DARA_NO_VGRAPH"); return !(e && e[0] == '1'); }();
+    int vgraph_failures_ = 0;
     DecodeGraph graph_;                // shared graph-decode engine (decode_graph.h); also owns the work stream
     std::vector<float> forward_impl(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
                                     bool copy_logits, int* next_token, std::vector<int32_t>* ids_out = nullptr, std::vector<float>* feats_out = nullptr);

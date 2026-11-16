@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
                     }
                 }
             };
-            int ng_cool = 0, ng_back = 0;
+            int ng_cool = 0, ng_back = 0, ng_len = 4;   // adaptive prompt-lookup draft length (long failed drafts are expensive verifies)
             long ng_steps = 0, ng_acc = 0;
             double fp_draft = 0, fp_verify = 0, fp_roll = 0, fp_ext = 0, fp_head = 0, fp_comp = 0, fp_emb = 0;
             while (static_cast<int>(seq.size() - prompt.size()) < n_new && !hit_eos) {
@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
                 draft.clear();
                 auto ft0 = std::chrono::steady_clock::now();
                 bool from_ngram = false;
-                if (flash_ngram && ng_cool == 0) { ngram_lookup(draft, std::min(7, budget)); from_ngram = draft.size() >= 2; if (!from_ngram) draft.clear(); }
+                if (flash_ngram && ng_cool == 0) { ngram_lookup(draft, std::min(ng_len, budget)); from_ngram = draft.size() >= 2; if (!from_ngram) draft.clear(); }
                 else if (ng_cool > 0) --ng_cool;
                 if (!from_ngram) flash->draft(y, d1, p1, std::min(spec_k, budget), flash_min_p, draft);
                 auto ft1 = std::chrono::steady_clock::now(); fp_draft += std::chrono::duration<double>(ft1 - ft0).count();
@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
                 auto ft2 = std::chrono::steady_clock::now(); fp_verify += std::chrono::duration<double>(ft2 - ft1).count(); fp_head += st.head_seconds; fp_comp += st.compute_seconds; fp_emb += st.embed_seconds;
                 int m = 0;
                 while (m < kd && ids[m] == draft[m]) ++m;
-                if (from_ngram) { ++ng_steps; ng_acc += m; if (m == 0) { ng_back = ng_back ? std::min(ng_back * 2, 32) : 2; ng_cool = ng_back; } else ng_back = 0; }
+                if (from_ngram) { ++ng_steps; ng_acc += m; ng_len = m == kd ? std::min(ng_len * 2, 7) : std::max(2, m + 1); if (m == 0) { ng_back = ng_back ? std::min(ng_back * 2, 32) : 2; ng_cool = ng_back; } else ng_back = 0; }
                 if (kd > 0) { ++spec_steps; drafted += kd; accepted += m; }
                 if (m < kd) { model.rollback(m + 1); ++rollbacks; }
                 std::vector<int32_t> to_add(draft.begin(), draft.begin() + m);

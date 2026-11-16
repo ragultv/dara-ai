@@ -379,12 +379,19 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     }
     {   // work stream, device-resident decode position, scratch pool sized for the largest chunk (so a captured graph never sees an allocation)
         graph_.create_stream();
-        d_pos_ = DevBuf<int64_t>(1);
+        for (int w = 2; w <= kMaxGraphVerify; ++w) graphs_v_[w].share_stream(graph_.stream());
+        d_pos_ = DevBuf<int64_t>(kMaxGraphVerify);
         d_argmax_ = DevBuf<unsigned char>(argmax_scratch_bytes() + 16);
         void* hp = nullptr;
-        if (cudaHostAlloc(&hp, 2 * sizeof(int64_t), cudaHostAllocDefault) != cudaSuccess) { cudaGetLastError(); hp = std::malloc(2 * sizeof(int64_t)); }
+        if (cudaHostAlloc(&hp, (2 + kMaxGraphVerify) * sizeof(int64_t), cudaHostAllocDefault) != cudaSuccess) { cudaGetLastError(); hp = std::malloc((2 + kMaxGraphVerify) * sizeof(int64_t)); }
         h_pos_ = static_cast<int64_t*>(hp);
         h_next_ = reinterpret_cast<int*>(h_pos_ + 1);  // shares the pinned allocation (freed with h_pos_)
+        h_posv_ = h_pos_ + 2;
+        if (int8_enabled()) {   // verify graphs: the multi-token int8 buffer must never grow inside a capture
+            size_t kmax = static_cast<size_t>(cfg_.hidden);
+            for (int l = 0; l < cfg_.layers; ++l) kmax = std::max<size_t>(kmax, std::max<size_t>(cfg_.inter[l], static_cast<size_t>(cfg_.heads) * cfg_.head_dim(l)));
+            int8_reserve_multi(kmax, kMaxGraphVerify);
+        }
         if (const char* e = std::getenv("DARA_NO_GRAPH")) use_graphs_ = !(e[0] == '1');
         reserve_pool();
     }
@@ -490,7 +497,7 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
 
     // Token positions as a device array: the decode token reads the one uploaded before the step (graph-friendly); chunked prefill fills it.
     const int64_t* dpos;
-    if (use_dev_pos && n == 1) {
+    if (use_dev_pos) {   // graph steps (1 token, or a short verification step): positions uploaded before the launch
         dpos = d_pos_.p;
     } else {
         int64_t* dp = pool_.get<int64_t>(11, static_cast<size_t>(n));
@@ -500,7 +507,7 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
     // Score slots per attention block: fixed by capacity for the decode step (a graph cannot change it), exact otherwise.
     const int win = c.sliding[l] ? c.window : 0;
     const int cap = static_cast<int>(capacity_);
-    const int smem_positions = (use_dev_pos && n == 1) ? (win > 0 ? std::min(win, cap) : cap)
+    const int smem_positions = use_dev_pos ? (win > 0 ? std::min(win, cap) : cap)
                                                        : (win > 0 ? std::min(win, static_cast<int>(pos0) + n) : static_cast<int>(pos0) + n);
 
     cuda_check(rmsnorm_cuda(x, s.input_norm.p, n, H, c.eps, h1, st), "input norm");
@@ -552,12 +559,12 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
             cuda_check(gemma_attention_cuda(q, kv_[src].K.p, kv_[src].V.p, dpos, n, heads, kvh, hd, win, smem_positions, att, st), "attention");
     } else {
         // positions any token can attend to: window-bounded for sliding layers; fixed by the capacity for the decode step (a graph cannot change the grid)
-        const int maxpos = (use_dev_pos && n == 1) ? (win > 0 ? std::min(win, cap) : cap) : (win > 0 ? std::min(win, static_cast<int>(pos0) + n) : static_cast<int>(pos0) + n);
+        const int maxpos = use_dev_pos ? (win > 0 ? std::min(win, cap) : cap) : (win > 0 ? std::min(win, static_cast<int>(pos0) + n) : static_cast<int>(pos0) + n);
         const AttnFmt afmt = opt_.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt_.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt_.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
         const size_t per = attn_splitkv_scratch_floats_per_token(afmt, heads, hd, maxpos);
         // decode (n == 1) uses the slot sized at construction; prefill batches up to 64 tokens per launch (the slot grows outside any graph capture)
         const size_t floats = per * static_cast<size_t>(std::min(n, 8));
-        if (afmt != AttnFmt::TQ4 && n >= kPrefillAttnMinTokens && !(use_dev_pos && n == 1)) {
+        if (afmt != AttnFmt::TQ4 && n >= kPrefillAttnMinTokens && !use_dev_pos) {
             // prefill chunk on an FP32 or INT8 cache: GEMM -> masked softmax -> GEMM (K/V tiles reused across 64 query rows)
             const size_t pf = attn_prefill_scratch_floats(n, static_cast<int>(pos0), win, heads);
             float* ps = pool_.get<float>(20, pf);
@@ -749,6 +756,32 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
     PM("start");
     t0 = Clock::now();
     bool graph_done = false;
+    // short verification step (speculative decoding): its own graph per width, positions in device memory like the decode step
+    const bool use_vgraph = use_graphs_ && T >= 2 && T <= kMaxGraphVerify && resident_ == L && !layer_outputs && !prof_on_ && vgraphs_on_;
+    if (use_vgraph) {
+        DecodeGraph& vg = graphs_v_[T];
+        try {
+            for (int t = 0; t < T; ++t) h_posv_[t] = static_cast<int64_t>(pos_) + t;
+            cuda_check(cudaMemcpyAsync(d_pos_.p, h_posv_, static_cast<size_t>(T) * sizeof(int64_t), cudaMemcpyHostToDevice, graph_.stream()), "upload positions");
+            const std::vector<void*> key = {hid[0], hid[1], d_pli, pool_.get<float>(14, 1), int8_multi_buffer()};
+            if (!vg.ready_for(key)) {
+                int8_capture_missed(true);
+                vg.capture(key, [&] {
+                    int c = 0;
+                    for (int l = 0; l < L; ++l) {
+                        run_layer(l, T, 0, T, hid[c], hid[1 - c], d_pli + static_cast<size_t>(l) * T * PD, pos_, true);
+                        c = 1 - c;
+                    }
+                });
+                if (int8_capture_missed(true)) { vg.invalidate(); throw GraphError("int8 buffer too small for a captured verify step"); }
+            }
+            vg.launch();
+            graph_done = true;
+        } catch (const GraphError&) {
+            vg.invalidate();
+            if (++vgraph_failures_ >= 3) vgraphs_on_ = false;
+        }
+    }
     if (use_graph) {
         try {
             const std::vector<void*> key = {hid[0], hid[1], d_pli, pool_.get<float>(14, 1)};

@@ -41,6 +41,11 @@ int int8_init();   // allocates the int8-activation scratch when DARA_INT8=1 (ca
 bool int8_enabled();
 // Declares that d_x stays unchanged for the scope's lifetime, so the int8 path quantises it once for all the matrices that read it (Q/K/V, gate/up, ...).
 // No effect on the FP32 paths. Scopes do not nest.
+// Multi-token int8 activations (verification steps): reserve the buffer for max_tokens x max_cols up front so CUDA-graph captures of small verify
+// steps never need to grow it; int8_multi_buffer() (part of a graph key) and int8_capture_missed() (a capture needed more: discard that graph).
+void int8_reserve_multi(size_t max_cols, int max_tokens);
+void* int8_multi_buffer();
+bool int8_capture_missed(bool reset);
 struct Int8SharedInput {
     explicit Int8SharedInput(const float* x);
     ~Int8SharedInput();
