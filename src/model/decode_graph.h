@@ -37,8 +37,10 @@ public:
     DecodeGraph& operator=(const DecodeGraph&) = delete;
 
     void create_stream() {
-        if (!stream_) cuda_check(cudaStreamCreate(&stream_), "create work stream");
+        if (!stream_) { cuda_check(cudaStreamCreate(&stream_), "create work stream"); owns_stream_ = true; }
     }
+    // Captures on (and replays on) another DecodeGraph's stream, which it does not own (several graphs of different shapes, one work stream).
+    void share_stream(cudaStream_t s) { stream_ = s; owns_stream_ = false; }
     cudaStream_t stream() const { return stream_; }
     void* stream_ptr() const { return stream_; }
 
@@ -126,9 +128,11 @@ private:
     }
     void reset() {
         invalidate();
-        if (stream_) { cudaStreamDestroy(stream_); stream_ = nullptr; }
+        if (stream_ && owns_stream_) cudaStreamDestroy(stream_);
+        stream_ = nullptr;
     }
     cudaStream_t stream_ = nullptr;
+    bool owns_stream_ = false;
     cudaGraphExec_t exec_ = nullptr;
     std::vector<void*> key_;
     long captures_ = 0, replays_ = 0, failures_ = 0;

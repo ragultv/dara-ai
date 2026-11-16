@@ -81,10 +81,26 @@ Int8SharedInput::~Int8SharedInput() { g_share_x = nullptr; g_share_cols = 0; g_s
 // skipped anyway so it can never allocate inside a graph.
 static void* g_q8_big = nullptr;
 static size_t g_q8_big_bytes = 0;
+static bool g_int8_capture_miss = false;
+bool int8_capture_missed(bool reset) { const bool m = g_int8_capture_miss; if (reset) g_int8_capture_miss = false; return m; }
+void int8_reserve_multi(size_t max_cols, int max_tokens) {
+    const size_t need = dara::kernels::q8act_bytes(max_cols, max_tokens);
+    if (need <= g_q8_big_bytes) return;
+    if (g_q8_big) { cudaDeviceSynchronize(); counted_free(g_q8_big, g_q8_big_bytes); g_q8_big = nullptr; g_q8_big_bytes = 0; }
+    const size_t bytes = std::max(need, static_cast<size_t>(8) << 20);
+    g_q8_big = counted_malloc(bytes);
+    g_q8_big_bytes = bytes;
+    g_share_big_key[0] = 0;
+}
+void* int8_multi_buffer() { return g_q8_big; }
+
 static int int8_gemm(const DeviceMatrix& m, const float* d_x, size_t ldx, float* d_y, size_t ldy, int nt, void* stream) {
-    cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
-    if (cudaStreamIsCapturing(static_cast<cudaStream_t>(stream), &cs) != cudaSuccess || cs != cudaStreamCaptureStatusNone) { cudaGetLastError(); return -1; }
     const size_t need = dara::kernels::q8act_bytes(m.cols, nt);
+    cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(static_cast<cudaStream_t>(stream), &cs) != cudaSuccess) { cudaGetLastError(); return -1; }
+    // inside a graph capture (multi-token verification graphs) the buffer must already be large enough: a capture never allocates. The caller then
+    // fails the capture (int8_capture_missed) instead of silently recording the FP32 path.
+    if (cs != cudaStreamCaptureStatusNone && need > g_q8_big_bytes) { g_int8_capture_miss = true; return -1; }
     if (need > g_q8_big_bytes) {
         if (g_q8_big) { cudaStreamSynchronize(static_cast<cudaStream_t>(stream)); counted_free(g_q8_big, g_q8_big_bytes); g_q8_big = nullptr; g_q8_big_bytes = 0; }
         const size_t bytes = std::max(need, static_cast<size_t>(8) << 20);

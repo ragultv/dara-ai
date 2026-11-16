@@ -209,30 +209,40 @@ int main(int argc, char** argv) {
                     }
                 }
             };
-            int ng_cool = 0, ng_back = 0;
+            int ng_cool = 0, ng_back = 0, ng_len = 7;   // adaptive prompt-lookup draft length (long failed drafts are expensive verifies)
             long ng_steps = 0, ng_acc = 0;
+            double tp_draft = 0, tp_ext = 0, tp_ver[17] = {0};
+            long np_ver[17] = {0};
+            using SC = std::chrono::steady_clock;
             while (static_cast<int>(seq.size()) - T0 < n_new && !hit_eos) {
                 const int budget = n_new - (static_cast<int>(seq.size()) - T0) - 1;
                 const int32_t cur = seq.back();
                 const size_t dpos = flash->position(), p0 = model.position();
                 draft.clear();
                 bool from_ngram = false;
-                if (flash_ngram && ng_cool == 0) { ngram_lookup(draft, std::min(15, budget)); from_ngram = draft.size() >= 2; if (!from_ngram) draft.clear(); }
+                if (flash_ngram && ng_cool == 0) { ngram_lookup(draft, std::min(ng_len, budget)); from_ngram = draft.size() >= 2; if (!from_ngram) draft.clear(); }
                 else if (ng_cool > 0) --ng_cool;
+                const auto q0 = SC::now();
                 if (!from_ngram) flash->draft(y, d1, p1, std::min(spec_k, budget), flash_min_p, draft);
                 const int kd = static_cast<int>(draft.size());
                 feed.assign(1, cur); feed.insert(feed.end(), draft.begin(), draft.end());
+                const auto q1 = SC::now();
                 const std::vector<int32_t> ids = model.forward_argmax(feed.data(), kd + 1, &st, &feats); ++passes;
+                const auto q2 = SC::now();
+                tp_draft += std::chrono::duration<double>(q1 - q0).count();
+                tp_ver[std::min(kd + 1, 16)] += std::chrono::duration<double>(q2 - q1).count(); ++np_ver[std::min(kd + 1, 16)];
                 int m = 0;
                 while (m < kd && ids[m] == draft[m]) ++m;
-                if (from_ngram) { ++ng_steps; ng_acc += m; if (m == 0) { ng_back = ng_back ? std::min(ng_back * 2, 32) : 2; ng_cool = ng_back; } else ng_back = 0; }
+                if (from_ngram) { ++ng_steps; ng_acc += m; ng_len = m == kd ? std::min(ng_len * 2, 7) : std::max(2, m + 1); if (m == 0) { ng_back = ng_back ? std::min(ng_back * 2, 32) : 2; ng_cool = ng_back; } else ng_back = 0; }
                 if (kd > 0) { ++spec_steps; drafted += kd; accepted += m; }
                 if (m < kd) model.rewind(p0 + static_cast<size_t>(m) + 1);
                 std::vector<int32_t> to_add(draft.begin(), draft.begin() + m);
                 to_add.push_back(ids[m]);
+                const auto q3 = SC::now();
                 flash->rewind(dpos);
                 flash->extend(feats.data(), to_add.data(), m + 1, y, d1);
                 p1 = flash->last_prob();
+                tp_ext += std::chrono::duration<double>(SC::now() - q3).count();
                 sum.seconds += st.seconds; sum.compute_seconds += st.compute_seconds; sum.head_seconds += st.head_seconds; sum.embed_seconds += st.embed_seconds;
                 for (int32_t id : to_add) {
                     seq.push_back(id); emit(id); ++steps;
@@ -240,6 +250,9 @@ int main(int argc, char** argv) {
                 }
             }
             if (flash_ngram) std::printf("flash n-gram: %ld steps, %ld accepted\n", ng_steps, ng_acc);
+            std::printf("flash time: draft %.3f s, drafter extend %.3f s; verify ms per call by width:", tp_draft, tp_ext);
+            for (int w = 1; w <= 16; ++w) if (np_ver[w]) std::printf(" T=%d %.2f (x%ld)", w, 1000.0 * tp_ver[w] / np_ver[w], np_ver[w]);
+            std::printf("\n");
             spec_k = std::max(spec_k, 1);
         } else if (spec_k > 0 && teacher.empty()) {
             // Speculative decoding, greedy-exact (same scheme as qwen_generate): prompt lookup proposes up to spec_k tokens, ONE forward of cur + drafts
