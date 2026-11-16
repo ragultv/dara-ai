@@ -9,7 +9,8 @@ namespace dara::model {
 constexpr int kPrefillAttnMinTokens = 48;
 
 // Scratch floats needed for a chunk of n tokens starting at absolute position pos0 (window 0 = full causal attention).
-size_t attn_prefill_scratch_floats(int n, int pos0, int window, int heads);
+// Scratch (floats) for attn_prefill_cuda. Bounded (64 MiB) at long contexts: the kernel then takes fewer query tokens per sub-chunk.
+size_t attn_prefill_scratch_floats(int n, int pos0, int window, int heads, int kv_heads = 1);
 
 // out[t][h][:] = softmax(scale * q_t,h . K[k] over keys k in [max(0, p - window + 1), p], p = pos0 + t) V   (no gate)
 // q: [n][heads][hd]; K, V: caches [position][kv_heads][hd] already holding positions < pos0 + n; out: [n][heads][hd]. hd % 128 == 0.

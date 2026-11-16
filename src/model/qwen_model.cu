@@ -9,6 +9,7 @@
 #include "core/placement.h"
 #include "core/system.h"
 #include "model/attention_cuda.h"
+#include "model/attn_prefill.h"
 #include "model/attn_splitkv.h"
 #include "model/tq_kv.h"
 #include "model/ops.h"
@@ -38,6 +39,7 @@ QwenConfig QwenConfig::from_gguf(const dara::io::GgufCheckpoint& g) {
     if (meta_int(g, a + "attention.value_length") != c.head_dim) throw std::runtime_error("key_length != value_length is not supported");
     c.eps = static_cast<float>(meta_num(g, a + "attention.layer_norm_rms_epsilon"));
     c.rope_theta = meta_num(g, a + "rope.freq_base");
+    for (const auto& kv : g.header().metadata) if (kv.first == a + "context_length") c.context_length = static_cast<size_t>(std::stoll(kv.second));
     c.partial_rotary = meta_num(g, a + "rope.dimension_count") / c.head_dim;
     c.conv_kernel = static_cast<int>(meta_int(g, a + "ssm.conv_kernel"));
     c.k_dim = static_cast<int>(meta_int(g, a + "ssm.state_size"));
@@ -79,14 +81,14 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     // ---- sizes ----------------------------------------------------------------------------------------------
     const int L = cfg.layers;
     std::vector<size_t> layer_bytes(L);
-    size_t max_layer = 0, state_bytes = 0, kv_bytes = 0;
+    size_t max_layer = 0, state_bytes = 0, kv_per_token = 0;
     for (int i = 0; i < L; ++i) {
         layer_bytes[i] = weights.layer_matrix_bytes(i) + kSmallParamsPerLayer;
         max_layer = std::max(max_layer, weights.layer_matrix_bytes(i));
         if (cfg.kinds[i] == LayerKind::DeltaNet) {
             state_bytes += (static_cast<size_t>(cfg.v_heads) * cfg.k_dim * cfg.v_dim + static_cast<size_t>(cfg.k_heads * cfg.k_dim * 2 + cfg.v_heads * cfg.v_dim) * (cfg.conv_kernel - 1)) * sizeof(float);
         } else {
-            kv_bytes += 2 * kv_capacity * static_cast<size_t>(cfg.kv_heads) * kv_bytes_per_head_vector(opt.kv_format, cfg.head_dim);
+            kv_per_token += 2 * static_cast<size_t>(cfg.kv_heads) * kv_bytes_per_head_vector(opt.kv_format, cfg.head_dim);
         }
     }
     const size_t head_bytes = weights.head_bytes();
@@ -95,6 +97,20 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     // reserve: max(128 MiB, VRAM/32) -- on a 4 GB GPU 128 MiB (measured: ~150 MiB stays free in use at 21+2 9B layers, enough for 8K-token prefill scratch)
     size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(128 * kMiB, total_b / 32);
     if (const char* e = std::getenv("DARA_VRAM_SAFETY_MB")) safety = static_cast<size_t>(std::atoll(e)) * kMiB;   // tuning / experiments
+    const bool auto_ctx = kv_capacity == 0;
+    const AttnFmt afmt = opt.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
+    // VRAM that grows with the context outside the K/V caches: the caller's per-position extra (drafter K/V) and, in auto mode, the
+    // scratch the pool grows into at long contexts (prefill attention scores, split-KV partials).
+    auto ctx_extra = [&](size_t ctx) -> size_t {
+        size_t x = opt.extra_vram_bytes + opt.extra_bytes_per_token * ctx;
+        if (auto_ctx) {
+            const int c = static_cast<int>(std::min<size_t>(ctx, size_t{1} << 30));
+            x += (attn_prefill_scratch_floats(static_cast<int>(std::min<size_t>(C, 64)), c, 0, cfg.heads, cfg.kv_heads) +
+                  8 * attn_splitkv_scratch_floats_per_token(afmt, cfg.heads, cfg.head_dim, c)) * sizeof(float);
+            x += static_cast<size_t>(C * std::max<size_t>(1, 1024 / C)) * 2 * static_cast<size_t>(cfg.hidden) * sizeof(float);   // one forward piece: two [T][hidden] buffers
+        }
+        return x;
+    };
 
     // ---- plan -----------------------------------------------------------------------------------------------
     dara::core::ModelManifest man;
@@ -110,44 +126,68 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         man.layers.push_back(ls);
     }
     const auto sys = dara::core::query_system_memory();
-    dara::core::PlacementRequest req;
-    req.model = man;
-    req.kv_mode = opt.kv_format == KvFormat::TQ4 ? dara::core::KvMode::TQ4 : kv_q8_values(opt.kv_format) ? dara::core::KvMode::Q8 : dara::core::KvMode::F32;
-    req.tq_overhead = opt.kv_format == KvFormat::K16V8 ? 0.5 + 2.0 / 32 : opt.kv_format == KvFormat::Q8 ? 4.0 / 32 : 4.0 / cfg.head_dim;   // K16V8: avg 1.5 B + V scales  // Q8: one float scale per 32 values; TQ4: the per-vector float norm
-    req.context_tokens = kv_capacity;
-    req.vision_resident = false;
-    req.budget.vram_total = total_b;
-    req.budget.vram_free = free_b;
-    req.budget.runtime_reserve = 0;  // the CUDA context already exists, so free_b is net of it
-    req.budget.safety_reserve = safety;
-    req.budget.workspace_bytes = workspace;
     const size_t ram_margin = 1536 * kMiB;
-    req.budget.ram_free = sys.available_bytes > ram_margin ? sys.available_bytes - ram_margin : 0;
-    dara::core::PlacementPlan plan = dara::core::plan_placement(req);
-    size_t staging = 0;
-    if (plan.host_layers > 0) {  // hosted layers need a double-buffered staging arena in VRAM: plan again with it counted
-        staging = 2 * align_up(max_layer);
-        req.budget.workspace_bytes = workspace + staging;
-        plan = dara::core::plan_placement(req);
-    }
-    {   // CPU decode of hosted layers: re-plan with the head in host RAM and a single staging arena (more layers fit in VRAM)
-        const char* ce = std::getenv("DARA_CPU_DECODE");
-        const bool cpu_mode = !(ce && ce[0] == '0') && cpu_decode_available() && cpu_decode_supports(opt.kv_format);
+    const char* ce = std::getenv("DARA_CPU_DECODE");
+    const bool cpu_mode = !(ce && ce[0] == '0') && cpu_decode_available() && cpu_decode_supports(opt.kv_format);
+    struct Planned { dara::core::PlacementPlan plan; size_t staging = 0; bool head_cpu = false; };
+    auto make_plan = [&](size_t ctx) {
+        Planned r;
+        dara::core::PlacementRequest req;
+        req.model = man;
+        req.kv_mode = opt.kv_format == KvFormat::TQ4 ? dara::core::KvMode::TQ4 : kv_q8_values(opt.kv_format) ? dara::core::KvMode::Q8 : dara::core::KvMode::F32;
+        req.tq_overhead = opt.kv_format == KvFormat::K16V8 ? 0.5 + 2.0 / 32 : opt.kv_format == KvFormat::Q8 ? 4.0 / 32 : 4.0 / cfg.head_dim;   // K16V8: avg 1.5 B + V scales  // Q8: one float scale per 32 values; TQ4: the per-vector float norm
+        req.context_tokens = ctx;
+        req.vision_resident = false;
+        req.budget.vram_total = total_b;
+        req.budget.vram_free = free_b;
+        req.budget.runtime_reserve = 0;  // the CUDA context already exists, so free_b is net of it
+        req.budget.safety_reserve = safety;
+        const size_t ws = workspace + ctx_extra(ctx);
+        req.budget.workspace_bytes = ws;
+        req.budget.ram_free = sys.available_bytes > ram_margin ? sys.available_bytes - ram_margin : 0;
+        r.plan = dara::core::plan_placement(req);
+        if (r.plan.host_layers > 0) {  // hosted layers need a double-buffered staging arena in VRAM: plan again with it counted
+            r.staging = 2 * align_up(max_layer);
+            req.budget.workspace_bytes = ws + r.staging;
+            r.plan = dara::core::plan_placement(req);
+        }
+        // CPU decode of hosted layers: re-plan with the head in host RAM and a single staging arena (more layers fit in VRAM)
         size_t hosted_bytes = 0;
-        for (int i = static_cast<int>(plan.gpu_layers); i < L; ++i) hosted_bytes += layer_bytes[i];
-        if (cpu_mode && plan.host_layers > 0 && opt.force_resident_layers < 0 && sys.available_bytes > hosted_bytes + head_bytes + ram_margin) {
+        for (int i = static_cast<int>(r.plan.gpu_layers); i < L; ++i) hosted_bytes += layer_bytes[i];
+        if (cpu_mode && r.plan.host_layers > 0 && opt.force_resident_layers < 0 && sys.available_bytes > hosted_bytes + head_bytes + ram_margin) {
             dara::core::PlacementRequest r2 = req;
             r2.model.embed_output_bytes = 0;
-            r2.budget.workspace_bytes = workspace + align_up(max_layer);
+            r2.budget.workspace_bytes = ws + align_up(max_layer);
             const dara::core::PlacementPlan p2 = dara::core::plan_placement(r2);
-            if (p2.kind != dara::core::Placement::DoesNotFit && p2.kind != dara::core::Placement::StorageBacked && p2.gpu_layers > plan.gpu_layers) {
-                plan = p2;
-                head_on_cpu_ = true;
-                nslots_ = 1;
-                staging = align_up(max_layer);
+            if (p2.kind != dara::core::Placement::DoesNotFit && p2.kind != dara::core::Placement::StorageBacked && p2.gpu_layers > r.plan.gpu_layers) {
+                r.plan = p2;
+                r.head_cpu = true;
+                r.staging = align_up(max_layer);
             }
         }
+        return r;
+    };
+    if (auto_ctx) {   // largest context with every layer and the head in VRAM; otherwise the partial-model default
+        const size_t native = cfg.context_length ? cfg.context_length : 32768, step = 1024;
+        auto fully_resident = [&](size_t ctx) {
+            const Planned p = make_plan(ctx);
+            return p.plan.kind != dara::core::Placement::DoesNotFit && p.plan.kind != dara::core::Placement::StorageBacked && p.plan.host_layers == 0 && !p.head_cpu;
+        };
+        const size_t lo = std::min<size_t>(4096, native);
+        if (fully_resident(lo)) {
+            size_t a = lo / step, b = native / step;
+            while (a < b) { const size_t m = (a + b + 1) / 2; if (fully_resident(m * step)) a = m; else b = m - 1; }
+            kv_capacity = a * step;
+        } else {
+            kv_capacity = std::min(native, opt.auto_partial_context);
+        }
     }
+    kv_capacity_ = kv_capacity;
+    const size_t kv_bytes = kv_per_token * kv_capacity;
+    const Planned planned = make_plan(kv_capacity);
+    dara::core::PlacementPlan plan = planned.plan;
+    size_t staging = planned.staging;
+    if (planned.head_cpu) { head_on_cpu_ = true; nslots_ = 1; }
     int resident = static_cast<int>(plan.gpu_layers);
     if (opt.force_resident_layers >= 0) resident = std::min(L, opt.force_resident_layers);
     report_.plan = plan.describe();
@@ -412,6 +452,40 @@ void QwenModel::start_copy(int layer) {
 }
 
 std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
+                                      std::vector<int32_t>* argmax_out, std::vector<float>* features_out, int feat_from) {
+    // A forward call keeps two [T][hidden] device buffers (and host copies) for the whole call, so long prompts go through in pieces.
+    // Pieces are multiples of the prefill chunk, so the chunking (and the arithmetic) is unchanged.
+    const int C = std::max(1, opt_.max_chunk_tokens);
+    const int piece = C * std::max(1, 1024 / C);
+    if (T <= piece || layer_outputs) return forward_one(tokens, T, logits_from, layer_outputs, stats, argmax_out, features_out, feat_from);
+    if (logits_from < 0 || logits_from > T) throw std::invalid_argument("bad forward arguments");
+    const int f0 = feat_from < 0 ? logits_from : std::min(feat_from, T);
+    std::vector<float> logits, f_all;
+    std::vector<int32_t> ids_all;
+    RunStats acc;
+    acc.device_free_min_bytes = ~size_t(0);
+    for (int off = 0; off < T; off += piece) {
+        const int n = std::min(piece, T - off);
+        const int lf = std::clamp(logits_from - off, 0, n), ff = std::clamp(f0 - off, 0, n);
+        std::vector<float> f;
+        std::vector<int32_t> ids;
+        RunStats rs;
+        std::vector<float> lg = forward_one(tokens + off, n, lf, nullptr, &rs, argmax_out ? &ids : nullptr, features_out ? &f : nullptr, ff);
+        logits.insert(logits.end(), lg.begin(), lg.end());
+        if (argmax_out) ids_all.insert(ids_all.end(), ids.begin(), ids.end());
+        if (features_out) f_all.insert(f_all.end(), f.begin(), f.end());
+        acc.seconds += rs.seconds; acc.embed_seconds += rs.embed_seconds; acc.compute_seconds += rs.compute_seconds;
+        acc.copy_wait_seconds += rs.copy_wait_seconds; acc.head_seconds += rs.head_seconds; acc.streamed_bytes += rs.streamed_bytes;
+        acc.device_peak_bytes = std::max(acc.device_peak_bytes, rs.device_peak_bytes);
+        acc.device_free_min_bytes = std::min(acc.device_free_min_bytes, rs.device_free_min_bytes);
+    }
+    if (argmax_out) *argmax_out = std::move(ids_all);
+    if (features_out) *features_out = std::move(f_all);
+    if (stats) *stats = acc;
+    return logits;
+}
+
+std::vector<float> QwenModel::forward_one(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
                                       std::vector<int32_t>* argmax_out, std::vector<float>* features_out, int feat_from) {
     if (T <= 0 || logits_from < 0 || logits_from > T) throw std::invalid_argument("bad forward arguments");
     const auto t_call = Clock::now();

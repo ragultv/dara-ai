@@ -35,6 +35,7 @@ struct GemmaConfig {
     int window = 0;                            // sliding-window size
     int per_layer_dim = 0;                     // width of the per-layer input embedding
     int shared_kv_layers = 0;
+    size_t context_length = 0;                 // native maximum context (GGUF gemma4.context_length; 0 = not stated)
     float eps = 1e-6f, softcap = 0.0f;
     double theta_swa = 1e4, theta_full = 1e6;
     int rotated_pairs_full = 0;                // global layers rotate this many (leading) frequency pairs; the rest are position-independent
@@ -72,6 +73,9 @@ public:
     const GemmaConfig& config() const { return cfg_; }
     const PlacementReport& placement() const { return report_; }
     double load_seconds() const { return load_seconds_; }
+    size_t kv_capacity() const { return capacity_; }   // positions the caches hold (the auto choice when constructed with 0)
+    // long forward calls run in pieces of this many tokens (multiple of the prefill chunk): bounds the per-call device buffers
+    int forward_piece_tokens() const { const int c = opt_.max_chunk_tokens > 0 ? opt_.max_chunk_tokens : 1; return c * (256 / c > 0 ? 256 / c : 1); }
 
     // Built-in profiler (no Nsight needed): when enabled, GPU timestamps are recorded between operations of every single-token forward
     // and summed per operation. profile_report() prints time per operation class, kernel-launch counts and the host enqueue time.

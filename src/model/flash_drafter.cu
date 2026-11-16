@@ -79,6 +79,23 @@ __global__ void argmax_prob_kernel(const float* __restrict__ x, int n, float* __
 // File layout (tools/flash/export_drafter.py): "DFLASH01", int32 hidden heads kv_heads head_dim rot inter K, float32 theta eps, int32 keep[K],
 // then Q8_0 matrices fc [H][2H], q [2*heads*hd][H], k [kv*hd][H], v [kv*hd][H], o [H][heads*hd], gate [inter][H], up [inter][H], down [H][inter],
 // then float32 in_norm[H], q_norm[hd], k_norm[hd], post_norm[H].
+void FlashDrafter::vram_estimate(const std::string& path, const dara::io::GgufCheckpoint& g, size_t& fixed_bytes, size_t& per_token_bytes) {
+    Reader r(path);
+    char magic[8];
+    r.f.read(magic, 8);
+    if (std::memcmp(magic, "DFLASH01", 8) != 0) throw std::runtime_error("not a Dara Flash drafter file: " + path);
+    const int H = r.get<int32_t>(), heads = r.get<int32_t>(), kvh = r.get<int32_t>(), hd = r.get<int32_t>();
+    (void)r.get<int32_t>(); (void)r.get<int32_t>();   // rot, inter
+    const int K = r.get<int32_t>();
+    r.f.seekg(0, std::ios::end);
+    const size_t file_bytes = static_cast<size_t>(r.f.tellg());   // Q8_0 weights: the runtime re-quantisation is never larger
+    const auto& hi = g.info(g.has("output.weight") ? "output.weight" : "token_embd.weight");
+    const size_t head_row = hi.bytes / std::max<uint64_t>(1, hi.rows());
+    // weights + head rows + activations of one prompt piece (128 tokens) + scratch
+    fixed_bytes = file_bytes + static_cast<size_t>(K) * head_row + 128 * (16 * static_cast<size_t>(H) + 4 * static_cast<size_t>(heads) * hd) * 4 + 32ull * 1024 * 1024;
+    per_token_bytes = 2 * static_cast<size_t>(kvh) * kv_bytes_per_head_vector(KvFormat::Q8, hd);
+}
+
 FlashDrafter::FlashDrafter(const std::string& path, const dara::io::GgufCheckpoint& g, EmbedFn embed, size_t kv_capacity) : embed_(std::move(embed)) {
     Reader r(path);
     char magic[8];
@@ -117,7 +134,7 @@ FlashDrafter::FlashDrafter(const std::string& path, const dara::io::GgufCheckpoi
     layer_.host = HostBuffer(off);
     for (size_t i = 0; i < ms.size(); ++i) std::memcpy(layer_.host.data() + layer_.slots[i].offset, ms[i].bytes.data(), ms[i].bytes.size());
     make_resident(layer_);
-    state_ = make_gpu_layer_state(w, kv_capacity, KvFormat::F32);
+    state_ = make_gpu_layer_state(w, kv_capacity, KvFormat::Q8);   // INT8 K/V: 3.6x less VRAM per context position than FP32 (drafts only steer speed)
     fc_ = upload_quant_raw(rq, requant(fc, static_cast<size_t>(H_), 2 * static_cast<size_t>(H_), rq).data(), static_cast<size_t>(H_), 2 * static_cast<size_t>(H_));
 
     // reduced-vocabulary head: the target's own output-head rows (raw GGUF blocks, so the int8 kernels apply)
@@ -172,17 +189,25 @@ int32_t FlashDrafter::pick(const float* d_y_row) {
 }
 
 void FlashDrafter::extend(const float* feats, const int32_t* next, int n, std::vector<float>& y_last, int32_t& tok_last) {
-    std::vector<float> in(static_cast<size_t>(n) * 2 * H_);
-    for (int t = 0; t < n; ++t) {
-        std::memcpy(&in[static_cast<size_t>(t) * 2 * H_], feats + static_cast<size_t>(t) * H_, static_cast<size_t>(H_) * sizeof(float));
-        const std::vector<float> e = embed_(next[t]);
-        std::memcpy(&in[static_cast<size_t>(t) * 2 * H_ + H_], e.data(), static_cast<size_t>(H_) * sizeof(float));
+    // long prompts go through in pieces (the layer's buffers scale with the tokens of one call)
+    constexpr int kPiece = 128;
+    float* d_y = nullptr;
+    int last_n = 0;
+    for (int off = 0; off < n; off += kPiece) {
+        const int m = std::min(kPiece, n - off);
+        std::vector<float> in(static_cast<size_t>(m) * 2 * H_);
+        for (int t = 0; t < m; ++t) {
+            std::memcpy(&in[static_cast<size_t>(t) * 2 * H_], feats + static_cast<size_t>(off + t) * H_, static_cast<size_t>(H_) * sizeof(float));
+            const std::vector<float> e = embed_(next[off + t]);
+            std::memcpy(&in[static_cast<size_t>(t) * 2 * H_ + H_], e.data(), static_cast<size_t>(H_) * sizeof(float));
+        }
+        float* d_in = pool_.get<float>(52, in.size());
+        d_y = pool_.get<float>(53, static_cast<size_t>(m) * H_);
+        cuda_check(cudaMemcpy(d_in, in.data(), in.size() * sizeof(float), cudaMemcpyHostToDevice), "flash in");
+        step(d_in, m, d_y);
+        last_n = m;
     }
-    float* d_in = pool_.get<float>(52, in.size());
-    float* d_y = pool_.get<float>(53, static_cast<size_t>(n) * H_);
-    cuda_check(cudaMemcpy(d_in, in.data(), in.size() * sizeof(float), cudaMemcpyHostToDevice), "flash in");
-    step(d_in, n, d_y);
-    const float* last = d_y + static_cast<size_t>(n - 1) * H_;
+    const float* last = d_y + static_cast<size_t>(last_n - 1) * H_;
     cuda_check(cudaMemcpyAsync(g_y_.p, last, static_cast<size_t>(H_) * sizeof(float), cudaMemcpyDeviceToDevice, 0), "flash y keep");   // drafting starts here
     tok_last = pick(last);
     y_last.resize(H_);

@@ -22,6 +22,8 @@ namespace {
 constexpr int BM = 128, BN = 64, BK = 32, TM = 8, TN = 4, kThreads = 256;
 constexpr int WS = BM + 4, XS = BN + 4;
 constexpr int kSub = 64;   // query tokens per sub-chunk (bounds the score scratch)
+constexpr size_t kScratchBudgetFloats = size_t{16} << 20;   // 64 MiB: beyond it (long contexts) a sub-chunk takes fewer query tokens
+constexpr int kDrainPositions = 16384;   // key ranges longer than this synchronise after each sub-chunk (Windows TDR, see attn_prefill_cuda)
 
 // Weight element (row r, column k) of a row-major matrix with leading dimension ldw: FP32, or an int8 code times the scale of its 32-value group
 // (Q8 cache: element offset e -> scale index e / 32; the base pointers passed in are at an offset that is a multiple of 32).
@@ -178,10 +180,13 @@ void launch_pair(const void* Kh, const float* Ksc, const void* Vh, const float* 
 
 }  // namespace
 
-size_t attn_prefill_scratch_floats(int n, int pos0, int window, int heads) {
+size_t attn_prefill_scratch_floats(int n, int pos0, int window, int heads, int kv_heads) {
     const int kstart = window > 0 ? std::max(0, pos0 - window + 1) : 0;
     const int P = pos0 + n - kstart;   // the widest key range of any sub-chunk
-    return static_cast<size_t>(std::min(n, kSub)) * heads * round_up(static_cast<size_t>(P), BK);
+    // score rows per query token: all heads at once with one K/V head, else one head at a time (the per-head GEMM pairs reuse the scratch)
+    const size_t per_token = static_cast<size_t>(kv_heads == 1 ? heads : 1) * round_up(static_cast<size_t>(P), BK);
+    const size_t full = static_cast<size_t>(std::min(n, kSub)) * per_token;
+    return std::max(per_token, std::min(full, kScratchBudgetFloats));
 }
 
 int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void* K, const float* Ksc, const void* V, const float* Vsc, int n, int pos0, int heads,
@@ -191,7 +196,7 @@ int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void
     if (fmt == AttnFmt::TQ4) return static_cast<int>(cudaErrorNotSupported);
     const int kf = fmt == AttnFmt::Q8 ? 1 : fmt == AttnFmt::K16V8 ? 2 : 0, vf = fmt == AttnFmt::F32 ? 0 : 1;
     if ((kf == 1 && !Ksc) || (vf == 1 && !Vsc)) return static_cast<int>(cudaErrorInvalidValue);
-    if (scratch_floats < attn_prefill_scratch_floats(n, pos0, window, heads)) return static_cast<int>(cudaErrorInvalidValue);
+    if (scratch_floats < attn_prefill_scratch_floats(n, pos0, window, heads, kv_heads)) return static_cast<int>(cudaErrorInvalidValue);
     auto s = static_cast<cudaStream_t>(stream);
     const size_t kvw = static_cast<size_t>(kv_heads) * hd;
     const int group = heads / kv_heads;
@@ -202,9 +207,13 @@ int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void
         else if (kf == 1) launch_pair<1, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s);
         else launch_pair<2, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s);
     };
-    for (int t0 = 0; t0 < n; t0 += kSub) {
-        const int m = std::min(kSub, n - t0), p0 = pos0 + t0;
+    const size_t rows_per_token = kv_heads == 1 ? static_cast<size_t>(heads) : 1;
+    for (int t0 = 0, m = 0; t0 < n; t0 += m) {
+        const int p0 = pos0 + t0;
         const int kstart = window > 0 ? std::max(0, p0 - window + 1) : 0;
+        m = std::min(kSub, n - t0);
+        const size_t fit = scratch_floats / (rows_per_token * round_up(static_cast<size_t>(p0 + m - kstart), BK));   // long key range: fewer query tokens
+        m = std::max(1, std::min(m, static_cast<int>(std::min<size_t>(fit, static_cast<size_t>(kSub)))));
         const int P = p0 + m - kstart;
         const size_t ldS = round_up(static_cast<size_t>(P), BK);
         const float* qs = q + static_cast<size_t>(t0) * heads * hd;
@@ -226,6 +235,15 @@ int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void
         }
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) return static_cast<int>(e);
+        // Long key ranges: let the GPU drain after each sub-chunk. On Windows (WDDM) a long run of queued work at 100K+ positions trips the
+        // driver's timeout detection (TDR: the GPU is reset, the process sees "illegal memory access"). Costs ~4% at 111K, nothing below 16K.
+        if (P > kDrainPositions) {
+            cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
+            if (cudaStreamIsCapturing(s, &cs) == cudaSuccess && cs == cudaStreamCaptureStatusNone) {
+                const cudaError_t se = cudaStreamSynchronize(s);
+                if (se != cudaSuccess) return static_cast<int>(se);
+            }
+        }
     }
     if (gate) {
         const size_t total = static_cast<size_t>(n) * heads * hd;

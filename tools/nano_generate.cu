@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
         else if (a == "--stop-at-eos") stop_at_eos = true;
         else if (a == "--new") n_new = std::atoi(next().c_str());
         else if (a == "--out") out = next();
-        else if (a == "--kv") kv = static_cast<size_t>(std::atoll(next().c_str()));
+        else if (a == "--kv") { const std::string v = next(); kv = v == "auto" ? 0 : static_cast<size_t>(std::atoll(v.c_str())); }   // auto (0): the largest context that keeps the model in VRAM
         else if (a == "--resident") force_resident = std::atoi(next().c_str());
         else if (a == "--no-layers") dump_layers = false;
         else if (a == "--bench") { bench = true; dump_layers = false; }   // throughput mode: decode logits are not copied to the host or saved
@@ -126,7 +126,12 @@ int main(int argc, char** argv) {
         ropt.force_resident_layers = force_resident;
         ropt.kv_format = kv_format;
         if (chunk_tokens > 0) ropt.max_chunk_tokens = chunk_tokens;
+        if (!flash_path.empty()) {   // leave room for the drafter (loaded after the model): its weights and its K/V per context position
+            FlashDrafter::vram_estimate(flash_path, gguf, ropt.extra_vram_bytes, ropt.extra_bytes_per_token);
+        }
         GemmaModel model(gguf, kv, ropt);
+        if (kv == 0) std::printf("context: %zu tokens (auto: the most that keeps the model in VRAM)\n", model.kv_capacity());
+        kv = model.kv_capacity();
         const GemmaConfig& cfg = model.config();
         const PlacementReport& pr = model.placement();
         const int V = cfg.vocab, T0 = static_cast<int>(prompt.size());

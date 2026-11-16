@@ -121,6 +121,7 @@ GemmaConfig GemmaConfig::from_gguf(const dara::io::GgufCheckpoint& g) {
     if (meta_int(g, a + "attention.value_length") != c.head_dim_full || meta_int(g, a + "attention.value_length_swa") != c.head_dim_swa)
         throw std::runtime_error("key_length != value_length is not supported");
     c.window = static_cast<int>(meta_int(g, a + "attention.sliding_window"));
+    for (const auto& kv : g.header().metadata) if (kv.first == a + "context_length") c.context_length = static_cast<size_t>(std::stoll(kv.second));
     c.per_layer_dim = static_cast<int>(meta_int(g, a + "embedding_length_per_layer_input"));
     c.shared_kv_layers = static_cast<int>(meta_int(g, a + "attention.shared_kv_layers"));
     c.eps = static_cast<float>(meta_num(g, a + "attention.layer_norm_rms_epsilon"));
@@ -176,25 +177,27 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     report_.gpu = require_supported_gpu();
     size_t free_b = 0, total_b = 0;
     cuda_check(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
-    if (kv_capacity == 0 || kv_capacity > static_cast<size_t>(kGemmaMaxContext)) throw std::invalid_argument("kv_capacity must be in [1, kGemmaMaxContext]");
+    // Longest context: the model's native one, except where a kernel keeps one score per position in shared memory (the TurboQuant
+    // and FP32 reference attention kernels). The default split-KV / prefill attention path has no such bound.
+    size_t max_ctx = cfg_.context_length ? cfg_.context_length : static_cast<size_t>(kGemmaMaxContext);
+    if (opt.kv_format == KvFormat::TQ4) max_ctx = std::min(max_ctx, static_cast<size_t>(kTqMaxPositions));
+    else if (!kv_q8_values(opt.kv_format) && attention_reference_mode()) max_ctx = std::min(max_ctx, static_cast<size_t>(kGemmaMaxContext));
+    if (kv_capacity > max_ctx) throw std::invalid_argument("kv_capacity " + std::to_string(kv_capacity) + " is above this configuration's maximum context " + std::to_string(max_ctx));
     cuda_check(int8_init(), "int8_init");
     cuda_check(tq_init(), "tq_init");  // codebook (also read by the split-KV TurboQuant kernels)
     cuda_check(attn_splitkv_init(), "attn_splitkv_init");
-    if (opt.kv_format == KvFormat::TQ4) {
-        if (kv_capacity > static_cast<size_t>(kTqMaxPositions)) throw std::invalid_argument("TurboQuant KV: kv_capacity above kTqMaxPositions");
-        cuda_check(tq_init(), "tq_init");  // codebook to the device, outside any graph capture
-    }
+    if (opt.kv_format == KvFormat::TQ4) cuda_check(tq_init(), "tq_init");  // codebook to the device, outside any graph capture
 
     const int L = cfg_.layers;
     // ---- sizes --------------------------------------------------------------------------------------------------------------
     std::vector<size_t> mat_bytes(L, 0);
-    size_t max_layer = 0, kv_bytes = 0, small_bytes = 0;
+    size_t max_layer = 0, kv_per_token = 0, small_bytes = 0;
     for (int l = 0; l < L; ++l) {
         size_t off = 0;
         for (const MatDesc& d : layer_matrices(cfg_, l)) off = align_up(off + g.info(d.tensor).bytes);
         mat_bytes[l] = off;
         max_layer = std::max(max_layer, off);
-        if (cfg_.owns_kv(l)) kv_bytes += 2 * kv_capacity * static_cast<size_t>(cfg_.kv_heads) * kv_bytes_per_head_vector(opt.kv_format, cfg_.head_dim(l));
+        if (cfg_.owns_kv(l)) kv_per_token += 2 * static_cast<size_t>(cfg_.kv_heads) * kv_bytes_per_head_vector(opt.kv_format, cfg_.head_dim(l));
         // norms, rope table, two small BF16 matrices
         small_bytes += (5 * static_cast<size_t>(cfg_.hidden) + 2 * cfg_.head_dim(l) + cfg_.head_dim(l) / 2) * sizeof(float) +
                        2 * static_cast<size_t>(cfg_.hidden) * cfg_.per_layer_dim * 2;
@@ -209,43 +212,83 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
                                   3 * pli_floats_per_token + 4 * static_cast<size_t>(cfg_.per_layer_dim)) * sizeof(float) + 32 * kMiB +
                                  static_cast<size_t>(kGemmaMaxContext) * sizeof(float) * 0;
     const size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(256 * kMiB, total_b / 16);
+    const bool auto_ctx = kv_capacity == 0;
+    const AttnFmt afmt = opt.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
+    // VRAM that grows with the context outside the K/V caches: the caller's per-position extra (drafter K/V) and, in auto mode, the
+    // scratch the pool grows into at long contexts (prefill attention scores of the global layers, split-KV partials).
+    auto ctx_extra = [&](size_t ctx) -> size_t {
+        size_t x = opt.extra_vram_bytes + opt.extra_bytes_per_token * ctx;
+        if (auto_ctx) {
+            const int c = static_cast<int>(std::min<size_t>(ctx, size_t{1} << 30));
+            x += (attn_prefill_scratch_floats(static_cast<int>(std::min<size_t>(C, 64)), c, 0, cfg_.heads, cfg_.kv_heads) +
+                  8 * attn_splitkv_scratch_floats_per_token(afmt, cfg_.heads, cfg_.head_dim_full, c)) * sizeof(float);
+            // one forward piece's per-token buffers (hidden x2, embeddings, features, per-layer inputs x3)
+            x += static_cast<size_t>(forward_piece_tokens()) * (4 * static_cast<size_t>(cfg_.hidden) + 3 * pli_floats_per_token) * sizeof(float);
+        }
+        return x;
+    };
 
     // ---- plan ---------------------------------------------------------------------------------------------------------------
     dara::core::ModelManifest man;
     man.family = "gemma4";
-    man.recurrent_state_bytes = kv_bytes;  // the exact K/V bytes of the layers that own K/V (the planner needs no per-layer model of them)
     man.embed_output_bytes = head_bytes + small_bytes;
     man.host_resident_bytes = 0;  // the per-layer embedding table is accounted for below, against the RAM budget
     for (int l = 0; l < L; ++l) {
         dara::core::LayerSpec ls;
-        ls.kind = dara::core::LayerKind::DeltaNet;  // "no per-token KV in the planner's formula": KV is already counted exactly above
+        ls.kind = dara::core::LayerKind::DeltaNet;  // "no per-token KV in the planner's formula": KV is counted exactly (recurrent_state_bytes)
         ls.stored_bytes = ls.weight_bytes = mat_bytes[l];
         man.layers.push_back(ls);
     }
     const auto sys = dara::core::query_system_memory();
-    dara::core::PlacementRequest req;
-    req.model = man;
-    req.kv_mode = dara::core::KvMode::F32;
-    req.context_tokens = kv_capacity;
-    req.vision_resident = false;
-    req.budget.vram_total = total_b;
-    req.budget.vram_free = free_b;
-    req.budget.runtime_reserve = 0;
-    req.budget.safety_reserve = safety;
-    req.budget.workspace_bytes = workspace;
     const size_t ram_margin = 1536 * kMiB;
     // The per-layer embedding table lives in host RAM when it fits next to the margin; otherwise its rows are read from the file.
     const bool table_in_ram = sys.available_bytes > ram_margin + pli_table_bytes + 2 * head_bytes;
     const size_t ram_for_layers_base = sys.available_bytes > ram_margin ? sys.available_bytes - ram_margin : 0;
     const size_t reserved_host = (table_in_ram ? pli_table_bytes : 0) + head_bytes;  // token_embd copy for row gathers
-    req.budget.ram_free = ram_for_layers_base > reserved_host ? ram_for_layers_base - reserved_host : 0;
-    dara::core::PlacementPlan plan = dara::core::plan_placement(req);
-    size_t staging = 0;
-    if (plan.host_layers > 0) {
-        staging = 2 * align_up(max_layer);
-        req.budget.workspace_bytes = workspace + staging;
-        plan = dara::core::plan_placement(req);
+    auto make_plan = [&](size_t ctx, size_t& staging_out) {
+        dara::core::PlacementRequest req;
+        req.model = man;
+        req.model.recurrent_state_bytes = kv_per_token * ctx;  // the exact K/V bytes of the layers that own K/V (the planner needs no per-layer model of them)
+        req.kv_mode = dara::core::KvMode::F32;
+        req.context_tokens = ctx;
+        req.vision_resident = false;
+        req.budget.vram_total = total_b;
+        req.budget.vram_free = free_b;
+        req.budget.runtime_reserve = 0;
+        req.budget.safety_reserve = safety;
+        const size_t ws = workspace + ctx_extra(ctx);
+        req.budget.workspace_bytes = ws;
+        req.budget.ram_free = ram_for_layers_base > reserved_host ? ram_for_layers_base - reserved_host : 0;
+        dara::core::PlacementPlan p = dara::core::plan_placement(req);
+        staging_out = 0;
+        if (p.host_layers > 0) {
+            staging_out = 2 * align_up(max_layer);
+            req.budget.workspace_bytes = ws + staging_out;
+            p = dara::core::plan_placement(req);
+        }
+        return p;
+    };
+    if (auto_ctx) {   // largest context with every layer in VRAM; otherwise the partial-model default
+        const size_t step = 1024;
+        auto fully_resident = [&](size_t ctx) {
+            size_t st = 0;
+            const dara::core::PlacementPlan p = make_plan(ctx, st);
+            return p.kind != dara::core::Placement::DoesNotFit && p.kind != dara::core::Placement::StorageBacked && p.host_layers == 0;
+        };
+        const size_t lo = std::min<size_t>(4096, max_ctx);
+        if (fully_resident(lo)) {
+            size_t a = lo / step, b = max_ctx / step;
+            while (a < b) { const size_t m = (a + b + 1) / 2; if (fully_resident(m * step)) a = m; else b = m - 1; }
+            kv_capacity = std::max(lo, a * step);
+        } else {
+            kv_capacity = std::min(max_ctx, opt.auto_partial_context);
+        }
+        capacity_ = kv_capacity;
     }
+    if (kv_capacity == 0) throw std::invalid_argument("kv_capacity must be at least 1");
+    const size_t kv_bytes = kv_per_token * kv_capacity;
+    size_t staging = 0;
+    dara::core::PlacementPlan plan = make_plan(kv_capacity, staging);
     int resident = static_cast<int>(plan.gpu_layers);
     if (opt.force_resident_layers >= 0) resident = std::min(L, opt.force_resident_layers);
     report_.plan = plan.describe();
@@ -566,7 +609,7 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
         const size_t floats = per * static_cast<size_t>(std::min(n, 8));
         if (afmt != AttnFmt::TQ4 && n >= kPrefillAttnMinTokens && !use_dev_pos) {
             // prefill chunk on an FP32 or INT8 cache: GEMM -> masked softmax -> GEMM (K/V tiles reused across 64 query rows)
-            const size_t pf = attn_prefill_scratch_floats(n, static_cast<int>(pos0), win, heads);
+            const size_t pf = attn_prefill_scratch_floats(n, static_cast<int>(pos0), win, heads, kvh);
             float* ps = pool_.get<float>(20, pf);
             const bool q8 = afmt != AttnFmt::F32;   // K/V in Kq/Vq (Q8 or K16V8)
             cuda_check(attn_prefill_cuda(afmt, q, nullptr, q8 ? static_cast<const void*>(kv_[src].Kq.p) : kv_[src].K.p, q8 ? kv_[src].Kn.p : nullptr,
@@ -627,7 +670,30 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
 // ---- forward --------------------------------------------------------------------------------------------------------------------
 std::vector<float> GemmaModel::forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
                                        std::vector<float>* features) {
-    return forward_impl(tokens, T, logits_from, layer_outputs, stats, true, nullptr, nullptr, features);
+    // A forward call keeps per-token buffers for all T tokens on the device (~130 KB per token: hidden states and per-layer inputs), so
+    // long prompts go through in pieces. Pieces are multiples of the prefill chunk, so the chunking (and the arithmetic) is unchanged.
+    const int piece = forward_piece_tokens();
+    if (T <= piece || layer_outputs) return forward_impl(tokens, T, logits_from, layer_outputs, stats, true, nullptr, nullptr, features);
+    if (logits_from < 0 || logits_from > T) throw std::invalid_argument("bad forward arguments");
+    std::vector<float> logits, f_all;
+    RunStats acc;
+    acc.device_free_min_bytes = SIZE_MAX;
+    for (int off = 0; off < T; off += piece) {
+        const int n = std::min(piece, T - off);
+        const int lf = std::clamp(logits_from - off, 0, n);
+        std::vector<float> f;
+        RunStats rs;
+        std::vector<float> lg = forward_impl(tokens + off, n, lf, nullptr, &rs, true, nullptr, nullptr, features ? &f : nullptr);
+        logits.insert(logits.end(), lg.begin(), lg.end());
+        if (features) f_all.insert(f_all.end(), f.begin(), f.end());
+        acc.seconds += rs.seconds; acc.embed_seconds += rs.embed_seconds; acc.compute_seconds += rs.compute_seconds;
+        acc.copy_wait_seconds += rs.copy_wait_seconds; acc.head_seconds += rs.head_seconds; acc.streamed_bytes += rs.streamed_bytes;
+        acc.device_peak_bytes = std::max(acc.device_peak_bytes, rs.device_peak_bytes);
+        acc.device_free_min_bytes = std::min(acc.device_free_min_bytes, rs.device_free_min_bytes);
+    }
+    if (features) *features = std::move(f_all);
+    if (stats) *stats = acc;
+    return logits;
 }
 
 std::vector<int32_t> GemmaModel::forward_argmax(const int32_t* tokens, int T, RunStats* stats, std::vector<float>* features) {
