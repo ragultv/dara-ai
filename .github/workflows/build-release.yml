@@ -28,6 +28,7 @@ concurrency:
 env:
   CUDA_VERSION: "13.1.1"
   CUDA_ROOT: C:\cuda
+  DRAFTER_TAG: flash-drafters-v2   # release whose assets are the Flash drafter files bundled into every build
 
 jobs:
   windows-cuda:
@@ -53,7 +54,7 @@ jobs:
         shell: pwsh
         run: python -I tools/install_cuda_redist.py --version $env:CUDA_VERSION --dest $env:CUDA_ROOT
 
-      - name: Build dara.exe (sm_75, sm_86, sm_89, sm_120 + PTX)
+      - name: "Build dara.exe (sm_75, sm_86, sm_89, sm_120 + PTX)"
         shell: cmd
         env:
           DARA_ARCH: all
@@ -61,7 +62,7 @@ jobs:
           set DARA_CUDA=%CUDA_ROOT%\%CUDA_VERSION%
           call tools\build_dara.bat
 
-      - name: Smoke test (no GPU on the runner: argument handling only)
+      - name: "Smoke test (no GPU on the runner, so argument handling only)"
         shell: pwsh
         run: |
           $out = & .\build\cuda\dara.exe 2>&1 | Out-String
@@ -69,19 +70,27 @@ jobs:
           if ($out -notmatch "usage: dara") { throw "dara.exe did not start" }
           $global:LASTEXITCODE = 0   # usage exits with 2 by design
 
+      # dara.exe + the Flash drafters (trained offline, kept as assets of the release named in DRAFTER_TAG) + the benchmarking guide
       - name: Package
         id: pkg
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "b${{ github.run_number }}"
           $name = "dara-$tag-bin-win-cuda-$env:CUDA_VERSION-x64"
-          New-Item -ItemType Directory -Force -Path "release\$name" | Out-Null
+          New-Item -ItemType Directory -Force -Path "release\$name\flash" | Out-Null
           Copy-Item build\cuda\dara.exe "release\$name\"
           Copy-Item docs\BENCHMARKING.md "release\$name\"
+          gh release download $env:DRAFTER_TAG --repo $env:GITHUB_REPOSITORY --pattern "*.dflash" --dir "release\$name\flash"
+          foreach ($f in "drafter_4b_v2.dflash", "drafter_nano_v2.dflash") {
+            if (-not (Test-Path "release\$name\flash\$f")) { throw "Flash drafter $f missing: attach it to the $env:DRAFTER_TAG release" }
+          }
           @(
             "Dara $tag ($env:GITHUB_SHA)",
             "Windows x64, CUDA $env:CUDA_VERSION (runtime linked statically). GPU code for sm_75 sm_86 sm_89 sm_120 + PTX.",
             "Needs an NVIDIA GPU (Turing / GTX 16xx or newer) and a driver that supports CUDA 13 (R580 or newer).",
+            "flash\drafter_4b_v2.dflash, flash\drafter_nano_v2.dflash: Flash speculative decoding for Core 4B and Nano (--flash <file> --spec 4 --flash-min-p 0.6).",
             "Usage: dara.exe --gguf <model.gguf> --chat ""Hello""   |   see BENCHMARKING.md"
           ) | Set-Content "release\$name\README.txt"
           Compress-Archive -Path "release\$name\*" -DestinationPath "release\$name.zip" -Force
@@ -105,5 +114,5 @@ jobs:
         run: |
           $tag = "${{ steps.pkg.outputs.tag }}"
           $name = "${{ steps.pkg.outputs.name }}"
-          $notes = "Automated build of $env:GITHUB_SHA.`n`nDownload **$name.zip**, unzip, and follow BENCHMARKING.md inside it. Requires an NVIDIA GPU (GTX 16xx / RTX 20xx or newer) and an NVIDIA driver with CUDA 13 support (R580+)."
+          $notes = "Automated build of $env:GITHUB_SHA.`n`nDownload **$name.zip** (dara.exe + Flash drafters for Core 4B and Nano), unzip, and follow BENCHMARKING.md inside it. Requires an NVIDIA GPU (GTX 16xx / RTX 20xx or newer) and an NVIDIA driver with CUDA 13 support (R580+)."
           gh release create $tag "release/$name.zip" "release/$name.zip.sha256" --target $env:GITHUB_SHA --title "Dara $tag" --notes $notes
