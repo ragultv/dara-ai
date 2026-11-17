@@ -1,0 +1,109 @@
+# Builds dara.exe (Windows x64, CUDA 13.1, statically linked CUDA runtime) for every supported NVIDIA architecture and publishes it as a
+# GitHub release, the way llama.cpp publishes its b<number> builds.
+#   pull requests       -> build only (the zip is attached to the workflow run as an artifact)
+#   push to main        -> build + release tagged b<run number>
+#   manual (Actions tab) -> build, and release when "release" is ticked
+name: build-release
+
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "tools/**", "third_party/**", "docs/BENCHMARKING.md", ".github/workflows/build-release.yml"]
+  pull_request:
+    paths: ["src/**", "tools/**", "third_party/**", "docs/BENCHMARKING.md", ".github/workflows/build-release.yml"]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release (tag b<run number>)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # creating releases
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_VERSION: "13.1.1"
+  CUDA_ROOT: C:\cuda
+
+jobs:
+  windows-cuda:
+    runs-on: windows-2022
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Minimal CUDA toolkit from NVIDIA's redistributable archives (SHA-256 verified by the script), cached between runs.
+      - name: Cache CUDA toolkit
+        id: cuda-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CUDA_ROOT }}\${{ env.CUDA_VERSION }}
+          key: cuda-redist-${{ env.CUDA_VERSION }}-${{ hashFiles('tools/install_cuda_redist.py') }}
+
+      - name: Install CUDA toolkit
+        if: steps.cuda-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: python -I tools/install_cuda_redist.py --version $env:CUDA_VERSION --dest $env:CUDA_ROOT
+
+      - name: Build dara.exe (sm_75, sm_86, sm_89, sm_120 + PTX)
+        shell: cmd
+        env:
+          DARA_ARCH: all
+        run: |
+          set DARA_CUDA=%CUDA_ROOT%\%CUDA_VERSION%
+          call tools\build_dara.bat
+
+      - name: Smoke test (no GPU on the runner: argument handling only)
+        shell: pwsh
+        run: |
+          $out = & .\build\cuda\dara.exe 2>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch "usage: dara") { throw "dara.exe did not start" }
+          $global:LASTEXITCODE = 0   # usage exits with 2 by design
+
+      - name: Package
+        id: pkg
+        shell: pwsh
+        run: |
+          $tag = "b${{ github.run_number }}"
+          $name = "dara-$tag-bin-win-cuda-$env:CUDA_VERSION-x64"
+          New-Item -ItemType Directory -Force -Path "release\$name" | Out-Null
+          Copy-Item build\cuda\dara.exe "release\$name\"
+          Copy-Item docs\BENCHMARKING.md "release\$name\"
+          @(
+            "Dara $tag ($env:GITHUB_SHA)",
+            "Windows x64, CUDA $env:CUDA_VERSION (runtime linked statically). GPU code for sm_75 sm_86 sm_89 sm_120 + PTX.",
+            "Needs an NVIDIA GPU (Turing / GTX 16xx or newer) and a driver that supports CUDA 13 (R580 or newer).",
+            "Usage: dara.exe --gguf <model.gguf> --chat ""Hello""   |   see BENCHMARKING.md"
+          ) | Set-Content "release\$name\README.txt"
+          Compress-Archive -Path "release\$name\*" -DestinationPath "release\$name.zip" -Force
+          $hash = (Get-FileHash "release\$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Set-Content "release\$name.zip.sha256"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            release/${{ steps.pkg.outputs.name }}.zip
+            release/${{ steps.pkg.outputs.name }}.zip.sha256
+
+      - name: Release
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.release)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.pkg.outputs.tag }}"
+          $name = "${{ steps.pkg.outputs.name }}"
+          $notes = "Automated build of $env:GITHUB_SHA.`n`nDownload **$name.zip**, unzip, and follow BENCHMARKING.md inside it. Requires an NVIDIA GPU (GTX 16xx / RTX 20xx or newer) and an NVIDIA driver with CUDA 13 support (R580+)."
+          gh release create $tag "release/$name.zip" "release/$name.zip.sha256" --target $env:GITHUB_SHA --title "Dara $tag" --notes $notes
