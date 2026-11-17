@@ -418,8 +418,13 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
             cuda_check(cudaGetLastError(), "fill positions");
             pos_dev = dpos;
         }
+        if (s.rope3) {   // image prompt: 3D rotary positions (the K/V slots and the causal bound stay the token positions)
+            cuda_check(rope3_cuda(q, T, d.heads, d.head_dim, d.rot_dim, s.rope3, w.inv_freq.p, s.mrope_h, s.mrope_w, stream), "mrope q");
+            cuda_check(rope3_cuda(k, T, d.kv_heads, d.head_dim, d.rot_dim, s.rope3, w.inv_freq.p, s.mrope_h, s.mrope_w, stream), "mrope k");
+        } else {
         cuda_check(rope_cuda(q, T, d.heads, d.head_dim, d.rot_dim, pos_dev, w.inv_freq.p, stream), "rope q");
         cuda_check(rope_cuda(k, T, d.kv_heads, d.head_dim, d.rot_dim, pos_dev, w.inv_freq.p, stream), "rope k");
+        }
         LP("attn split/norm/rope");
         const bool ref = attention_reference_mode();
         const int maxpos = dev_pos ? static_cast<int>(s.kv_cap) : static_cast<int>(s.pos) + T;  // grid bound: fixed for a captured graph

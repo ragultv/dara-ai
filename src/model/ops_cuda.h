@@ -13,6 +13,11 @@ int rmsnorm_cuda(const float* d_x, const float* d_scale, int rows, int n, float 
 // angle = float32(pos[t]) * inv_freq[i], cos/sin in float32 (the reference's arithmetic). d_pos: [tokens] int64.
 int rope_cuda(float* d_x, int tokens, int heads, int head_dim, int rot_dim, const int64_t* d_pos, const float* d_inv_freq,
               void* stream = nullptr);
+// Interleaved multimodal RoPE (Qwen3.5 M-RoPE): as rope_cuda, but frequency pair i takes its position from d_pos3[t*3 + s] with
+// s = 1 (height) when i % 3 == 1 and i < 3 * sec_h, s = 2 (width) when i % 3 == 2 and i < 3 * sec_w, else s = 0 (temporal). With all three
+// positions equal this is exactly rope_cuda.
+int rope3_cuda(float* d_x, int tokens, int heads, int head_dim, int rot_dim, const int64_t* d_pos3, const float* d_inv_freq, int sec_h, int sec_w,
+               void* stream = nullptr);
 
 // out[i] = a[i] + b[i]  (residual connection). out may alias a or b.
 int add_cuda(const float* d_a, const float* d_b, float* d_out, size_t n, void* stream = nullptr);

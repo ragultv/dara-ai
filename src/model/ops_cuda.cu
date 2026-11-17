@@ -47,6 +47,21 @@ __global__ void rope_kernel(float* __restrict__ x, int heads, int head_dim, int 
     p[i + half] = b * c + a * s;
 }
 
+__global__ void rope3_kernel(float* __restrict__ x, int heads, int head_dim, int rot_dim, const int64_t* __restrict__ pos3,
+                             const float* __restrict__ inv_freq, int sec_h, int sec_w) {
+    const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
+    const int half = rot_dim / 2;
+    if (i >= half) return;
+    const int s = (i % 3 == 1 && i < 3 * sec_h) ? 1 : (i % 3 == 2 && i < 3 * sec_w) ? 2 : 0;
+    const float angle = static_cast<float>(pos3[static_cast<size_t>(t) * 3 + s]) * inv_freq[i];  // same arithmetic as rope_kernel
+    float sn, c;
+    sincosf(angle, &sn, &c);
+    float* p = x + (static_cast<size_t>(t) * heads + h) * head_dim;
+    const float a = p[i], b = p[i + half];
+    p[i] = a * c - b * sn;
+    p[i + half] = b * c + a * sn;
+}
+
 __global__ void add_kernel(const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ out, size_t n) {
     for (size_t i = blockIdx.x * static_cast<size_t>(blockDim.x) + threadIdx.x; i < n; i += static_cast<size_t>(gridDim.x) * blockDim.x)
         out[i] = a[i] + b[i];
@@ -92,6 +107,15 @@ int rope_cuda(float* d_x, int tokens, int heads, int head_dim, int rot_dim, cons
         return static_cast<int>(cudaErrorInvalidValue);
     if (tokens == 0) return 0;
     rope_kernel<<<dim3(tokens, heads), rot_dim / 2, 0, static_cast<cudaStream_t>(stream)>>>(d_x, heads, head_dim, rot_dim, d_pos, d_inv_freq);
+    return static_cast<int>(cudaGetLastError());
+}
+
+int rope3_cuda(float* d_x, int tokens, int heads, int head_dim, int rot_dim, const int64_t* d_pos3, const float* d_inv_freq, int sec_h, int sec_w,
+               void* stream) {
+    if (tokens < 0 || heads <= 0 || rot_dim <= 0 || rot_dim % 2 != 0 || rot_dim > head_dim || rot_dim / 2 > 1024 || !d_x || !d_pos3 || !d_inv_freq)
+        return static_cast<int>(cudaErrorInvalidValue);
+    if (tokens == 0) return 0;
+    rope3_kernel<<<dim3(tokens, heads), rot_dim / 2, 0, static_cast<cudaStream_t>(stream)>>>(d_x, heads, head_dim, rot_dim, d_pos3, d_inv_freq, sec_h, sec_w);
     return static_cast<int>(cudaGetLastError());
 }
 

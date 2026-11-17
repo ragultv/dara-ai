@@ -21,7 +21,9 @@
 #include "core/system.h"
 #include "io/gguf_checkpoint.h"
 #include "model/flash_drafter.h"
+#include "io/image.h"
 #include "model/qwen_model.h"
+#include "model/qwen_vision.h"
 #include "tokenizer/tokenizer.h"
 
 using namespace dara::model;
@@ -42,6 +44,9 @@ int main(int argc, char** argv) {
     int logits_last = 0;  // --logits-last N: logits only for the last N prompt positions (long-context quality runs), no layer dump
     bool bench = false;  // --bench: throughput measurement mode (last-position logits only, no layer dumps, no logits file, no restore test)
     std::string teacher_file;
+    std::string chat_user, mmproj_path;      // --chat <text>: Qwen chat template (no thinking); --mmproj <vision GGUF> + --image <file> (repeatable)
+    std::vector<std::string> image_paths;
+    int image_max_tokens = 1024;             // --image-max-tokens N: images are resized to at most N image tokens (N * 32 * 32 pixels)
     int spec_k = 0, ngram_max = 4, ngram_min = 3;  // --spec K: prompt-lookup speculative decoding with up to K draft tokens
     bool flash_ngram = true;    // --flash-no-ngram: Flash drafts only (default: prompt-lookup drafts first when the context repeats)
     float flash_min_p = 0.0f;   // --flash-min-p P: draft only while the drafter's cumulative probability stays >= P
@@ -54,6 +59,10 @@ int main(int argc, char** argv) {
         else if (a == "--tokens") tokens_file = next();
         else if (a == "--prompt") prompt_text = next();
         else if (a == "--prompt-file") prompt_file = next();
+        else if (a == "--chat") chat_user = next();
+        else if (a == "--mmproj") mmproj_path = next();
+        else if (a == "--image") image_paths.push_back(next());
+        else if (a == "--image-max-tokens") image_max_tokens = std::atoi(next().c_str());
         else if (a == "--special") parse_special = true;
         else if (a == "--stop-at-eos") stop_at_eos = true;
         else if (a == "--resident") force_resident = std::atoi(next().c_str());
@@ -74,7 +83,8 @@ int main(int argc, char** argv) {
         else if (a == "--kv-mode") { const std::string m = next(); if (m == "tq4") kv_format = KvFormat::TQ4; else if (m == "q8") kv_format = KvFormat::Q8; else if (m == "k16v8") kv_format = KvFormat::K16V8; else if (m == "f32") kv_format = KvFormat::F32; else { std::fprintf(stderr, "--kv-mode must be f32, q8 or tq4\n"); return 2; } }
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
     }
-    const bool text_mode = !prompt_text.empty() || !prompt_file.empty();
+    const bool chat_mode = !chat_user.empty();
+    const bool text_mode = !prompt_text.empty() || !prompt_file.empty() || chat_mode;
     if (gguf_path.empty() || (tokens_file.empty() && !text_mode)) {
         std::fprintf(stderr, "usage: qwen_generate --gguf <model.gguf> (--prompt <text> | --prompt-file <utf8 file> | --tokens <ids file>) [--special] [--stop-at-eos] --new N --out <prefix>\n");
         return 2;
@@ -89,7 +99,36 @@ int main(int argc, char** argv) {
         catch (const std::exception& e) { if (text_mode) throw; std::fprintf(stderr, "note: no text output (%s)\n", e.what()); }
 
         std::vector<int32_t> prompt;
-        if (text_mode) {
+        struct EncodedImage { int mh, mw; std::vector<float> rows; };
+        std::vector<EncodedImage> images;
+        if (!image_paths.empty()) {   // encode before the text model loads: the encoder's VRAM is free again when the text model sizes its context
+            if (!chat_mode) throw std::runtime_error("--image needs --chat <text> (the image goes into the user turn)");
+            if (mmproj_path.empty()) throw std::runtime_error("--image needs --mmproj <vision GGUF>");
+            dara::io::GgufCheckpoint mm(mmproj_path);
+            const auto tv0 = std::chrono::steady_clock::now();
+            dara::model::QwenVision vision(mm, image_max_tokens);
+            const double vload = std::chrono::duration<double>(std::chrono::steady_clock::now() - tv0).count();
+            if (vision.out_dim() != cfg.hidden) throw std::runtime_error("the mmproj does not match this model (projection width differs)");
+            for (const std::string& ip : image_paths) {
+                const auto img = dara::io::load_image_rgb(ip);
+                const auto in = vision.preprocess(img);
+                images.push_back({in.merged_h(), in.merged_w(), vision.encode(in)});
+                std::printf("image %s: %dx%d -> %dx%d px, %dx%d patches -> %d tokens, encoded in %.3f s (encoder load %.1f s)\n", ip.c_str(), img.width,
+                            img.height, in.grid_w * 16, in.grid_h * 16, in.grid_w, in.grid_h, in.tokens(), vision.last_seconds(), vload);
+            }
+        }
+        if (chat_mode) {   // Qwen3.5 chat template, thinking off; images (if any) before the text: <|vision_start|> n x <|image_pad|> <|vision_end|>
+            std::string content;
+            for (const auto& im : images) {
+                content += "<|vision_start|>";
+                for (int i = 0; i < im.mh * im.mw; ++i) content += "<|image_pad|>";
+                content += "<|vision_end|>";
+            }
+            content += chat_user;
+            prompt_text = "<|im_start|>user\n" + content + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+            prompt = tokenizer->encode(prompt_text, /*parse_special=*/true);
+            std::printf("chat prompt%s -> %zu tokens\n", images.empty() ? "" : " with image(s)", prompt.size());
+        } else if (text_mode) {
             if (!prompt_file.empty()) { std::ifstream f(prompt_file, std::ios::binary); prompt_text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()); }
             prompt = tokenizer->encode(prompt_text, parse_special);
             std::printf("prompt text (%zu bytes) -> %zu tokens by Dara's own tokenizer:", prompt_text.size(), prompt.size());
@@ -126,6 +165,20 @@ int main(int argc, char** argv) {
         QwenModel model(cfg, *weights, kv, ropt);  // cold load: disk -> host images -> VRAM slabs, once
         if (kv == 0) std::printf("context: %zu tokens (auto: the most that keeps the model in VRAM)\n", model.kv_capacity());
         kv = model.kv_capacity();
+        if (!images.empty()) {   // each run of <|image_pad|> takes one image's tokens (embeddings + 3D rotary positions)
+            const int32_t pad_id = tokenizer->encode("<|image_pad|>", true).at(0);
+            size_t k = 0;
+            for (size_t p = 0; p < prompt.size() && k < images.size();) {
+                if (prompt[p] != pad_id) { ++p; continue; }
+                const size_t n = static_cast<size_t>(images[k].mh) * images[k].mw;
+                for (size_t j = 0; j < n; ++j)
+                    if (p + j >= prompt.size() || prompt[p + j] != pad_id) throw std::runtime_error("image placeholder run shorter than the image's tokens");
+                model.add_image(p, images[k].mh, images[k].mw, std::move(images[k].rows));
+                p += n;
+                ++k;
+            }
+            if (k != images.size()) throw std::runtime_error("image placeholders missing from the prompt");
+        }
         {
             const PlacementReport& pr = model.placement();
             std::printf("GPU: %s\n", pr.gpu.c_str());

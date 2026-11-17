@@ -20,3 +20,5 @@ set V=src\model\gemma_vision.cu src\model\vision_ops_cuda.cu src\model\gemma_ops
 
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% tests\vision_parity.cu %V% %M% %C% %K% -o build\cuda\vision_parity.exe -lcudart || exit /b 1
 echo built build\cuda\vision_parity.exe
+"%CUDA%\bin\nvcc.exe" %NVFLAGS% tests\qwen_vision_parity.cu src\model\qwen_vision.cu %V% %M% %C% %K% -o build\cuda\qwen_vision_parity.exe -lcudart || exit /b 1
+echo built build\cuda\qwen_vision_parity.exe
