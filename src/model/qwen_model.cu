@@ -305,6 +305,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         h_pos_ = static_cast<int64_t*>(hp);
     }
     if (const char* e = std::getenv("DARA_NO_GRAPH")) use_graphs_ = !(e[0] == '1');
+    if (const char* e = std::getenv("DARA_LAYER_PROF")) if (e[0] == '1' || e[0] == '2') use_graphs_ = false;   // profiling times every operation: eager steps
     reserve_pool();  // size every scratch slot for the largest chunk now, so a captured graph never sees an allocation or a moved buffer
     {   // CPU decode of hosted layers (DARA_CPU_DECODE=0 disables; DARA_CPU_THREADS overrides the thread count)
         const char* e = std::getenv("DARA_CPU_DECODE");

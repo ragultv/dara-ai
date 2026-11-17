@@ -159,6 +159,19 @@ All answers should be `INVOICE 7731`.
 
 `context:` is the largest context Dara chose automatically for this GPU; `VRAM-resident layers` shows how many layers are on the GPU.
 
+### 7.6 Quick decode check (about 5 minutes; needs release b6 or newer)
+
+Plain decoding is limited by how fast the GPU can read the model weights from VRAM. This check measures that ceiling on this GPU, then shows how
+much of it Dara and llama.cpp use:
+
+```powershell
+.\bin\dara.exe --probe                                                    # this GPU's memory bandwidth (last line: PROBE ...)
+python -I bench\decode_quick.py --models 4b nano --out build\bench\decode_quick
+```
+
+It prints, per model and prompt: llama.cpp and Dara tokens/s, the bytes read per token, and the share of the measured bandwidth each runtime
+achieves. It also saves a per-operation GPU profile of one Dara run (`*_profile.txt`). Send the whole `build\bench\decode_quick` folder.
+
 ## 8. What to send back
 
 Zip the `build\bench` folder and send it. The important files are:
