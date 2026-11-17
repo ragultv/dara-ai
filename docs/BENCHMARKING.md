@@ -185,6 +185,22 @@ GTX 1650 4 GB (sm_75), Ryzen 5 5600H, on AC power, Dara vs llama.cpp b12189:
 
 A faster GPU raises both runtimes. The **ratios** are what to compare between laptops.
 
+### RTX 4050 Laptop results (2026-11-17)
+
+Windows 11, GeForce RTX 4050 Laptop GPU (6 GB, driver 581.86), Core i5-13450HX, 15.7 GB RAM, on AC power. Text ratios are geometric means over 16 tasks versus llama.cpp b12189; 9B was run without Flash.
+
+| | 4B | Nano | 9B |
+|---|---:|---:|---:|
+| Plain text decode | 0.98x | 0.95x | 1.47x |
+| Flash text decode | 1.79x | 1.47x | not run |
+| Full image TTFT, Dara vs llama.cpp | 3.13 s vs 2.04 s (1.23 s with `--image-max-tokens 400`) | 0.99 s vs 1.04 s | not run |
+| Oprel-preprocessed image TTFT, Dara vs llama.cpp | 1.25 s vs 0.39 s | 0.94 s vs 0.23 s | not run |
+| Auto context | 112,640; 32/32 layers on GPU | 131,072; 35/35 on GPU | 32,768; 24/32 on GPU |
+
+The 9B run used 8 host-resident layers. Its `write_function` task was an outlier (2.4 tok/s Dara vs 8.7 tok/s llama.cpp); the aggregate includes all 16 tasks. Image answers were `INVOICE 7731`.
+
+Results: [plain](../RTX-4050-6GB-bench/tasks_plain/task_bench.json), [4B Flash](../RTX-4050-6GB-bench/tasks_flash_4b/task_bench.json), [Nano Flash](../RTX-4050-6GB-bench/tasks_flash_nano/task_bench.json), [9B](../RTX-4050-6GB-bench/tasks_9b/task_bench.json), [image TTFT](../RTX-4050-6GB-bench/image_ttft.json).
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
