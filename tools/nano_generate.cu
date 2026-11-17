@@ -109,12 +109,14 @@ int main(int argc, char** argv) {
             dara::model::GemmaVision vision(mm);
             const double vload = std::chrono::duration<double>(std::chrono::steady_clock::now() - tv0).count();
             for (const std::string& ip : image_paths) {
+                const auto tp0 = std::chrono::steady_clock::now();
                 const auto img = dara::io::load_image_rgb(ip);
                 const auto in = vision.preprocess(img);
+                const double prep = std::chrono::duration<double>(std::chrono::steady_clock::now() - tp0).count();
                 image_tokens.push_back(vision.encode(in));
                 image_counts.push_back(in.soft_tokens());
-                std::printf("image %s: %dx%d -> %dx%d patches -> %d tokens, encoded in %.3f s (encoder load %.1f s)\n", ip.c_str(), img.width, img.height,
-                            in.grid_w, in.grid_h, in.soft_tokens(), vision.last_seconds(), vload);
+                std::printf("image %s: %dx%d -> %dx%d patches -> %d tokens, preprocessed in %.3f s, encoded in %.3f s (encoder load %.1f s)\n", ip.c_str(),
+                            img.width, img.height, in.grid_w, in.grid_h, in.soft_tokens(), prep, vision.last_seconds(), vload);
             }
         }
         if (chat_mode && !image_tokens.empty()) {   // reference layout: <|image> + n x <|image|> + <image|> before the text, in the user turn
