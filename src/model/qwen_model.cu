@@ -248,7 +248,15 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         const size_t rb = head_host_.size() / static_cast<size_t>(cfg_.vocab);
         head_cpu_ = HostMatrix{head_host_.data(), hq, static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden), rb};
     } else {
-        head_ = weights.load_output_head();
+        // Q6_K head (the largest single matrix: 521 MB per token on the 4B): planar copy for the aligned int8 kernel. DARA_Q6_PLANAR=0 or the FP32
+        // reference path (DARA_INT8=0) keep the GGUF layout.
+        static const bool planar = [] { const char* e = std::getenv("DARA_Q6_PLANAR"); return !(e && e[0] == '0'); }();
+        dara::kernels::QuantType hq = dara::kernels::QuantType::Q4_K;
+        std::vector<uint8_t> raw;
+        if (planar && int8_enabled()) raw = weights.read_output_head(&hq);
+        if (!raw.empty() && hq == dara::kernels::QuantType::Q6_K) head_ = upload_q6k_planar(raw.data(), static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden));
+        else if (!raw.empty()) head_ = upload_quant_raw(hq, raw.data(), static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden));
+        else head_ = weights.load_output_head();
     }
     layers_.reserve(L);
     report_.hosted_pinned = true;

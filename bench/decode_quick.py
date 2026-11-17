@@ -63,8 +63,12 @@ def main():
     ap.add_argument("--models", nargs="+", default=["4b", "nano"])
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "bench", "decode_quick"))
+    ap.add_argument("--flash-dir", default=None, help="folder with drafter_4b_v2.dflash (default: <dara.exe folder>\\flash, else build\\flash)")
     benchenv.add_args(ap)
     a = ap.parse_args()
+    if not a.flash_dir:
+        cand = os.path.join(os.path.dirname(os.path.abspath(a.dara_exe)), "flash")
+        a.flash_dir = cand if os.path.isdir(cand) else os.path.join(ROOT, "build", "flash")
     global A
     A = a
     benchenv.check_paths(a, a.models)
@@ -107,6 +111,21 @@ def main():
         prof = dara(model, pf, os.path.join(a.out, f"{model}_profile"), extra_env={"DARA_LAYER_PROF": "1"}, extra_args=(["--profile"] if model == "nano" else []))
         open(os.path.join(a.out, f"{model}_profile.txt"), "w", encoding="utf-8").write(prof["log"])
         res["results"][model] = rows
+        # A/B of the planar Q6_K output head (4B / 9B): plain decode above uses the default (planar); here Flash with planar on and off
+        drafter = os.path.join(a.flash_dir, "drafter_4b_v2.dflash")
+        if model == "4b" and os.path.exists(drafter):
+            pf = os.path.join(a.out, "4b_function_edit.prompt.txt")
+            ab = {}
+            for planar in ("1", "0"):
+                runs = [dara(model, pf, os.path.join(a.out, f"4b_flash_planar{planar}"), extra_env={"DARA_Q6_PLANAR": planar},
+                             extra_args=("--flash", drafter, "--spec", "4", "--flash-min-p", "0.6")) for _ in range(a.reps)]
+                vals = [r["wall_tps"] for r in runs if "wall_tps" in r]
+                pl = [dara(model, os.path.join(a.out, "4b_write_function.prompt.txt"), os.path.join(a.out, f"4b_plain_planar{planar}"),
+                           extra_env={"DARA_Q6_PLANAR": planar}) for _ in range(a.reps)]
+                pv = [r["tps"] for r in pl if "tps" in r]
+                ab[f"planar={planar}"] = {"flash_tps": statistics.median(vals) if vals else None, "plain_tps": statistics.median(pv) if pv else None}
+            res["planar_head_ab"] = ab
+            print(f"4b output head A/B (planar Q6_K on / off): {ab}", flush=True)
     json.dump(res, open(os.path.join(a.out, "decode_quick.json"), "w"), indent=1)
     print(f"\nresults: {a.out}  (send this folder back: decode_quick.json, probe.txt, *_profile.txt)")
 
