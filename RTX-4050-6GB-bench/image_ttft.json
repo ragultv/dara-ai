@@ -1,0 +1,91 @@
+{
+ "machine": {
+  "os": "Windows-11-10.0.26200-SP0",
+  "cpu": "13th Gen Intel(R) Core(TM) i5-13450HX",
+  "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+  "driver": "581.86",
+  "vram": "6141 MiB",
+  "gpu_power_limit": "[N/A]",
+  "ram_gb": 15.7,
+  "power": "AC"
+ },
+ "llama_ngl": {
+  "4b": "99",
+  "nano": "99"
+ },
+ "results": {
+  "4b": {
+   "dara": {
+    "full 1920x1080 (cap 1024)": {
+     "image_tokens": 1008,
+     "prompt_tokens": 1034,
+     "preprocess_s": 0.053,
+     "encode_s": 1.534,
+     "prefill_s": 1.543,
+     "ttft_s": 3.13,
+     "answer": "INVOICE 7731"
+    },
+    "full 1920x1080 (cap 400)": {
+     "image_tokens": 390,
+     "prompt_tokens": 416,
+     "preprocess_s": 0.038,
+     "encode_s": 0.365,
+     "prefill_s": 0.83,
+     "ttft_s": 1.233,
+     "answer": "INVOICE 7731"
+    },
+    "oprel-preprocessed 853x480 (cap 1024)": {
+     "image_tokens": 405,
+     "prompt_tokens": 431,
+     "preprocess_s": 0.02,
+     "encode_s": 0.413,
+     "prefill_s": 0.82,
+     "ttft_s": 1.253,
+     "answer": "INVOICE 7731"
+    }
+   },
+   "llama.cpp": {
+    "full 1920x1080": {
+     "ttft_s": 2.042,
+     "answer": "INVOICE 7731"
+    },
+    "oprel-preprocessed 853x480": {
+     "ttft_s": 0.387,
+     "answer": "INVOICE 7731"
+    }
+   }
+  },
+  "nano": {
+   "dara": {
+    "full 1920x1080": {
+     "image_tokens": 264,
+     "prompt_tokens": 287,
+     "preprocess_s": 0.058,
+     "encode_s": 0.397,
+     "prefill_s": 0.53,
+     "ttft_s": 0.985,
+     "answer": "INVOICE 7731"
+    },
+    "oprel-preprocessed 853x480": {
+     "image_tokens": 264,
+     "prompt_tokens": 287,
+     "preprocess_s": 0.021,
+     "encode_s": 0.377,
+     "prefill_s": 0.54,
+     "ttft_s": 0.938,
+     "answer": "INVOICE 7731"
+    }
+   },
+   "llama.cpp": {
+    "full 1920x1080": {
+     "ttft_s": 1.037,
+     "answer": "INVOICE 7731"
+    },
+    "oprel-preprocessed 853x480": {
+     "ttft_s": 0.225,
+     "answer": "INVOICE 7731"
+    }
+   }
+  }
+ }
+}
