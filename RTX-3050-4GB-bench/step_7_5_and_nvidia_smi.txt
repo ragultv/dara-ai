@@ -1,0 +1,19 @@
+﻿=== Step 7.5: Context & VRAM Residence Check ===
+
+--- Core 4B ---
+context: 22528 tokens (auto: the most that keeps the model in VRAM)
+  VRAM-resident layers 32 (2106 MiB), host-resident layers 0 (0 MiB, n/a), output head 497 MiB in VRAM, embedding table 497 MiB in host RAM
+
+--- Nano (2B) ---
+context: 131072 tokens (auto: the most that keeps the model in VRAM)
+  VRAM-resident layers 35 (1048 MiB), host-resident layers 0 (0 MiB), output head 216 MiB in VRAM, embedding tables 1756 MiB in host RAM
+
+--- Pro 9B ---
+context: 32768 tokens (auto: the most that keeps the model in VRAM)
+  VRAM-resident layers 17 (2158 MiB), host-resident layers 15 (1906 MiB, pinned), output head 0 MiB in VRAM, embedding table 546 MiB in host RAM
+
+=== nvidia-smi ===
+NVIDIA-SMI 621.24   KMD Version: 621.24   CUDA UMD Version: 13.5
+GPU: NVIDIA GeForce RTX 3050 Laptop GPU (4096 MiB VRAM, 95W Power Cap)
+CPU: AMD Ryzen 7 6800HS with Radeon Graphics (15.3 GB RAM)
+OS: Windows 11 Build 26300

@@ -1,0 +1,295 @@
+{
+ "started": "2026-11-17 21:11:36",
+ "machine": {
+  "os": "Windows-11-10.0.26300-SP0",
+  "cpu": "AMD Ryzen 7 6800HS with Radeon Graphics",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "driver": "621.24",
+  "vram": "4096 MiB",
+  "gpu_power_limit": "[N/A]",
+  "ram_gb": 15.3,
+  "power": "AC"
+ },
+ "max_new": 256,
+ "dara_env": {},
+ "dara_args": [],
+ "llama_ngl": {
+  "9b": "auto"
+ },
+ "results": {
+  "9b": [
+   {
+    "task": "function_edit",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 1.72967,
+     "prompt_tokens": 286,
+     "gen_tokens": 250,
+     "decode_tps": 7.6400405627856385
+    },
+    "dara": {
+     "prompt_tokens": 286,
+     "prompt_s": 1.081,
+     "gen_tokens": 250,
+     "decode_tps": 12.04
+    },
+    "decode_ratio": 1.575907863453815
+   },
+   {
+    "task": "json_add_field",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 1.8112000000000001,
+     "prompt_tokens": 349,
+     "gen_tokens": 256,
+     "decode_tps": 7.654508505509746
+    },
+    "dara": {
+     "prompt_tokens": 349,
+     "prompt_s": 1.272,
+     "gen_tokens": 256,
+     "decode_tps": 11.79
+    },
+    "decode_ratio": 1.5402687176470586
+   },
+   {
+    "task": "sql_rename",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 1.81283,
+     "prompt_tokens": 271,
+     "gen_tokens": 234,
+     "decode_tps": 7.67360628537516
+    },
+    "dara": {
+     "prompt_tokens": 271,
+     "prompt_s": 0.962,
+     "gen_tokens": 234,
+     "decode_tps": 12.08
+    },
+    "decode_ratio": 1.5742272343347639
+   },
+   {
+    "task": "fix_typos",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 1.5461099999999999,
+     "prompt_tokens": 120,
+     "gen_tokens": 84,
+     "decode_tps": 8.035394460418422
+    },
+    "dara": {
+     "prompt_tokens": 120,
+     "prompt_s": 0.688,
+     "gen_tokens": 84,
+     "decode_tps": 12.63
+    },
+    "decode_ratio": 1.571795891566265
+   },
+   {
+    "task": "csv_to_table",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 1.6238800000000002,
+     "prompt_tokens": 229,
+     "gen_tokens": 241,
+     "decode_tps": 7.802906387556705
+    },
+    "dara": {
+     "prompt_tokens": 229,
+     "prompt_s": 0.856,
+     "gen_tokens": 241,
+     "decode_tps": 12.1
+    },
+    "decode_ratio": 1.5507042375
+   },
+   {
+    "task": "invoice_to_json",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 2.2050799999999997,
+     "prompt_tokens": 255,
+     "gen_tokens": 256,
+     "decode_tps": 7.628874121781961
+    },
+    "dara": {
+     "prompt_tokens": 255,
+     "prompt_s": 0.966,
+     "gen_tokens": 256,
+     "decode_tps": 12.07
+    },
+    "decode_ratio": 1.58214696
+   },
+   {
+    "task": "data_to_table",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 1.57494,
+     "prompt_tokens": 154,
+     "gen_tokens": 165,
+     "decode_tps": 7.796852068519116
+    },
+    "dara": {
+     "prompt_tokens": 154,
+     "prompt_s": 0.635,
+     "gen_tokens": 146,
+     "decode_tps": 12.22
+    },
+    "decode_ratio": 1.5672991987804878
+   },
+   {
+    "task": "repeated_transcript",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 1.73082,
+     "prompt_tokens": 177,
+     "gen_tokens": 82,
+     "decode_tps": 8.064556275170625
+    },
+    "dara": {
+     "prompt_tokens": 177,
+     "prompt_s": 0.843,
+     "gen_tokens": 82,
+     "decode_tps": 12.45
+    },
+    "decode_ratio": 1.5437923148148147
+   },
+   {
+    "task": "write_function",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 1.4395799999999999,
+     "prompt_tokens": 55,
+     "gen_tokens": 256,
+     "decode_tps": 7.728375777270028
+    },
+    "dara": {
+     "prompt_tokens": 55,
+     "prompt_s": 0.342,
+     "gen_tokens": 256,
+     "decode_tps": 12.14
+    },
+    "decode_ratio": 1.5708345905882355
+   },
+   {
+    "task": "short_email",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 1.61899,
+     "prompt_tokens": 56,
+     "gen_tokens": 175,
+     "decode_tps": 7.729678054466688
+    },
+    "dara": {
+     "prompt_tokens": 56,
+     "prompt_s": 0.449,
+     "gen_tokens": 170,
+     "decode_tps": 12.25
+    },
+    "decode_ratio": 1.5848008045977011
+   },
+   {
+    "task": "tone_rewrite",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 1.49759,
+     "prompt_tokens": 55,
+     "gen_tokens": 146,
+     "decode_tps": 8.046972118629018
+    },
+    "dara": {
+     "prompt_tokens": 55,
+     "prompt_s": 0.365,
+     "gen_tokens": 121,
+     "decode_tps": 11.94
+    },
+    "decode_ratio": 1.4837879172413793
+   },
+   {
+    "task": "project_plan",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 1.48275,
+     "prompt_tokens": 46,
+     "gen_tokens": 256,
+     "decode_tps": 7.6398245177248425
+    },
+    "dara": {
+     "prompt_tokens": 46,
+     "prompt_s": 0.681,
+     "gen_tokens": 256,
+     "decode_tps": 11.86
+    },
+    "decode_ratio": 1.5523916776470588
+   },
+   {
+    "task": "notes_to_todos",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 1.51953,
+     "prompt_tokens": 93,
+     "gen_tokens": 166,
+     "decode_tps": 7.743410592234815
+    },
+    "dara": {
+     "prompt_tokens": 93,
+     "prompt_s": 0.481,
+     "gen_tokens": 166,
+     "decode_tps": 12.2
+    },
+    "decode_ratio": 1.5755331393939391
+   },
+   {
+    "task": "summary",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 1.7545,
+     "prompt_tokens": 141,
+     "gen_tokens": 111,
+     "decode_tps": 8.011915904017247
+    },
+    "dara": {
+     "prompt_tokens": 141,
+     "prompt_s": 0.732,
+     "gen_tokens": 154,
+     "decode_tps": 12.23
+    },
+    "decode_ratio": 1.526476331818182
+   },
+   {
+    "task": "tamil_summary",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 1.68093,
+     "prompt_tokens": 259,
+     "gen_tokens": 162,
+     "decode_tps": 7.8485244530285305
+    },
+    "dara": {
+     "prompt_tokens": 259,
+     "prompt_s": 0.961,
+     "gen_tokens": 133,
+     "decode_tps": 12.22
+    },
+    "decode_ratio": 1.5569805602484474
+   },
+   {
+    "task": "tamil_email",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 1.73665,
+     "prompt_tokens": 104,
+     "gen_tokens": 256,
+     "decode_tps": 7.676865960114014
+    },
+    "dara": {
+     "prompt_tokens": 104,
+     "prompt_s": 0.583,
+     "gen_tokens": 256,
+     "decode_tps": 12.04
+    },
+    "decode_ratio": 1.5683483419607844
+   }
+  ]
+ }
+}

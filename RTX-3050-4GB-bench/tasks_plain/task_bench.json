@@ -1,0 +1,570 @@
+{
+ "started": "2026-11-17 19:48:55",
+ "machine": {
+  "os": "Windows-11-10.0.26300-SP0",
+  "cpu": "AMD Ryzen 7 6800HS with Radeon Graphics",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "driver": "621.24",
+  "vram": "4096 MiB",
+  "gpu_power_limit": "[N/A]",
+  "ram_gb": 15.3,
+  "power": "AC"
+ },
+ "max_new": 256,
+ "dara_env": {},
+ "dara_args": [],
+ "llama_ngl": {
+  "4b": "99",
+  "nano": "99"
+ },
+ "results": {
+  "4b": [
+   {
+    "task": "function_edit",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 0.31816,
+     "prompt_tokens": 286,
+     "gen_tokens": 250,
+     "decode_tps": 53.297601821964605
+    },
+    "dara": {
+     "prompt_tokens": 286,
+     "prompt_s": 0.489,
+     "gen_tokens": 250,
+     "decode_tps": 53.98
+    },
+    "decode_ratio": 1.0128035437751004
+   },
+   {
+    "task": "json_add_field",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 0.26193,
+     "prompt_tokens": 349,
+     "gen_tokens": 256,
+     "decode_tps": 53.41511082064463
+    },
+    "dara": {
+     "prompt_tokens": 349,
+     "prompt_s": 0.564,
+     "gen_tokens": 256,
+     "decode_tps": 54.01
+    },
+    "decode_ratio": 1.0111370952941177
+   },
+   {
+    "task": "sql_rename",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 0.19646,
+     "prompt_tokens": 271,
+     "gen_tokens": 234,
+     "decode_tps": 53.33516458361946
+    },
+    "dara": {
+     "prompt_tokens": 271,
+     "prompt_s": 0.47,
+     "gen_tokens": 234,
+     "decode_tps": 53.85
+    },
+    "decode_ratio": 1.0096528326180259
+   },
+   {
+    "task": "fix_typos",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 0.12017,
+     "prompt_tokens": 120,
+     "gen_tokens": 84,
+     "decode_tps": 53.36556699307533
+    },
+    "dara": {
+     "prompt_tokens": 120,
+     "prompt_s": 0.239,
+     "gen_tokens": 84,
+     "decode_tps": 53.93
+    },
+    "decode_ratio": 1.0105767265060241
+   },
+   {
+    "task": "csv_to_table",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 0.20732,
+     "prompt_tokens": 229,
+     "gen_tokens": 246,
+     "decode_tps": 53.13277337896246
+    },
+    "dara": {
+     "prompt_tokens": 229,
+     "prompt_s": 0.383,
+     "gen_tokens": 246,
+     "decode_tps": 53.92
+    },
+    "decode_ratio": 1.014816215510204
+   },
+   {
+    "task": "invoice_to_json",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 0.17784,
+     "prompt_tokens": 255,
+     "gen_tokens": 256,
+     "decode_tps": 53.18927036836177
+    },
+    "dara": {
+     "prompt_tokens": 255,
+     "prompt_s": 0.424,
+     "gen_tokens": 256,
+     "decode_tps": 53.83
+    },
+    "decode_ratio": 1.0120462196078432
+   },
+   {
+    "task": "data_to_table",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 0.13872,
+     "prompt_tokens": 154,
+     "gen_tokens": 147,
+     "decode_tps": 53.19400875150746
+    },
+    "dara": {
+     "prompt_tokens": 154,
+     "prompt_s": 0.312,
+     "gen_tokens": 147,
+     "decode_tps": 53.82
+    },
+    "decode_ratio": 1.0117680780821918
+   },
+   {
+    "task": "repeated_transcript",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 0.1734,
+     "prompt_tokens": 177,
+     "gen_tokens": 83,
+     "decode_tps": 52.84049902051758
+    },
+    "dara": {
+     "prompt_tokens": 177,
+     "prompt_s": 0.301,
+     "gen_tokens": 83,
+     "decode_tps": 53.79
+    },
+    "decode_ratio": 1.0179691902439023
+   },
+   {
+    "task": "write_function",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.11467000000000001,
+     "prompt_tokens": 55,
+     "gen_tokens": 256,
+     "decode_tps": 53.173631717341486
+    },
+    "dara": {
+     "prompt_tokens": 55,
+     "prompt_s": 0.136,
+     "gen_tokens": 256,
+     "decode_tps": 54.06
+    },
+    "decode_ratio": 1.01666932
+   },
+   {
+    "task": "short_email",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.10934,
+     "prompt_tokens": 56,
+     "gen_tokens": 191,
+     "decode_tps": 53.36194282408252
+    },
+    "dara": {
+     "prompt_tokens": 56,
+     "prompt_s": 0.137,
+     "gen_tokens": 187,
+     "decode_tps": 54.15
+    },
+    "decode_ratio": 1.01476815
+   },
+   {
+    "task": "tone_rewrite",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.10809999999999999,
+     "prompt_tokens": 55,
+     "gen_tokens": 112,
+     "decode_tps": 53.02505553299735
+    },
+    "dara": {
+     "prompt_tokens": 55,
+     "prompt_s": 0.137,
+     "gen_tokens": 112,
+     "decode_tps": 54.21
+    },
+    "decode_ratio": 1.0223468783783785
+   },
+   {
+    "task": "project_plan",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.09093000000000001,
+     "prompt_tokens": 46,
+     "gen_tokens": 256,
+     "decode_tps": 53.35152166908667
+    },
+    "dara": {
+     "prompt_tokens": 46,
+     "prompt_s": 0.228,
+     "gen_tokens": 256,
+     "decode_tps": 54.24
+    },
+    "decode_ratio": 1.0166532894117646
+   },
+   {
+    "task": "notes_to_todos",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.12239,
+     "prompt_tokens": 93,
+     "gen_tokens": 114,
+     "decode_tps": 53.0698314445796
+    },
+    "dara": {
+     "prompt_tokens": 93,
+     "prompt_s": 0.208,
+     "gen_tokens": 114,
+     "decode_tps": 54.2
+    },
+    "decode_ratio": 1.0212958761061948
+   },
+   {
+    "task": "summary",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.15672999999999998,
+     "prompt_tokens": 141,
+     "gen_tokens": 127,
+     "decode_tps": 53.21530235583299
+    },
+    "dara": {
+     "prompt_tokens": 141,
+     "prompt_s": 0.282,
+     "gen_tokens": 111,
+     "decode_tps": 54.0
+    },
+    "decode_ratio": 1.0147457142857144
+   },
+   {
+    "task": "tamil_summary",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.19438999999999998,
+     "prompt_tokens": 259,
+     "gen_tokens": 212,
+     "decode_tps": 53.10741288874123
+    },
+    "dara": {
+     "prompt_tokens": 259,
+     "prompt_s": 0.478,
+     "gen_tokens": 178,
+     "decode_tps": 53.79
+    },
+    "decode_ratio": 1.0128529535545023
+   },
+   {
+    "task": "tamil_email",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.11170000000000001,
+     "prompt_tokens": 104,
+     "gen_tokens": 256,
+     "decode_tps": 53.213578435771204
+    },
+    "dara": {
+     "prompt_tokens": 104,
+     "prompt_s": 0.212,
+     "gen_tokens": 256,
+     "decode_tps": 53.96
+    },
+    "decode_ratio": 1.014026900392157
+   }
+  ],
+  "nano": [
+   {
+    "task": "function_edit",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 0.33569,
+     "prompt_tokens": 319,
+     "gen_tokens": 256,
+     "decode_tps": 89.54877950281113
+    },
+    "dara": {
+     "prompt_tokens": 320,
+     "prompt_s": 0.25,
+     "gen_tokens": 256,
+     "decode_tps": 79.87
+    },
+    "decode_ratio": 0.891916120392157
+   },
+   {
+    "task": "json_add_field",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 0.21963999999999997,
+     "prompt_tokens": 350,
+     "gen_tokens": 256,
+     "decode_tps": 89.3648785513778
+    },
+    "dara": {
+     "prompt_tokens": 351,
+     "prompt_s": 0.29,
+     "gen_tokens": 256,
+     "decode_tps": 80.21
+    },
+    "decode_ratio": 0.8975561909803921
+   },
+   {
+    "task": "sql_rename",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 0.20788,
+     "prompt_tokens": 284,
+     "gen_tokens": 254,
+     "decode_tps": 89.51442845214339
+    },
+    "dara": {
+     "prompt_tokens": 285,
+     "prompt_s": 0.22,
+     "gen_tokens": 254,
+     "decode_tps": 80.14
+    },
+    "decode_ratio": 0.8952746656126482
+   },
+   {
+    "task": "fix_typos",
+    "category": "edit",
+    "llama": {
+     "prompt_s": 0.19088,
+     "prompt_tokens": 115,
+     "gen_tokens": 85,
+     "decode_tps": 87.95074758135443
+    },
+    "dara": {
+     "prompt_tokens": 116,
+     "prompt_s": 0.11,
+     "gen_tokens": 85,
+     "decode_tps": 81.38
+    },
+    "decode_ratio": 0.9252906000000001
+   },
+   {
+    "task": "csv_to_table",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 0.19516,
+     "prompt_tokens": 217,
+     "gen_tokens": 227,
+     "decode_tps": 89.27901271633371
+    },
+    "dara": {
+     "prompt_tokens": 218,
+     "prompt_s": 0.19,
+     "gen_tokens": 227,
+     "decode_tps": 80.21
+    },
+    "decode_ratio": 0.8984194331858407
+   },
+   {
+    "task": "invoice_to_json",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 0.19999,
+     "prompt_tokens": 254,
+     "gen_tokens": 256,
+     "decode_tps": 89.38398659590726
+    },
+    "dara": {
+     "prompt_tokens": 255,
+     "prompt_s": 0.19,
+     "gen_tokens": 256,
+     "decode_tps": 80.19
+    },
+    "decode_ratio": 0.8971405623529412
+   },
+   {
+    "task": "data_to_table",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 0.20463,
+     "prompt_tokens": 142,
+     "gen_tokens": 137,
+     "decode_tps": 89.28571428571428
+    },
+    "dara": {
+     "prompt_tokens": 143,
+     "prompt_s": 0.16,
+     "gen_tokens": 137,
+     "decode_tps": 80.74
+    },
+    "decode_ratio": 0.904288
+   },
+   {
+    "task": "repeated_transcript",
+    "category": "transform",
+    "llama": {
+     "prompt_s": 0.19575,
+     "prompt_tokens": 175,
+     "gen_tokens": 79,
+     "decode_tps": 88.9010462969295
+    },
+    "dara": {
+     "prompt_tokens": 176,
+     "prompt_s": 0.15,
+     "gen_tokens": 78,
+     "decode_tps": 80.76
+    },
+    "decode_ratio": 0.9084257538461539
+   },
+   {
+    "task": "write_function",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.2005,
+     "prompt_tokens": 52,
+     "gen_tokens": 256,
+     "decode_tps": 89.78778393185988
+    },
+    "dara": {
+     "prompt_tokens": 53,
+     "prompt_s": 0.07,
+     "gen_tokens": 256,
+     "decode_tps": 82.2
+    },
+    "decode_ratio": 0.9154920235294117
+   },
+   {
+    "task": "short_email",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.18591999999999997,
+     "prompt_tokens": 50,
+     "gen_tokens": 169,
+     "decode_tps": 89.55367090092058
+    },
+    "dara": {
+     "prompt_tokens": 51,
+     "prompt_s": 0.07,
+     "gen_tokens": 171,
+     "decode_tps": 83.03
+    },
+    "decode_ratio": 0.9271535065476192
+   },
+   {
+    "task": "tone_rewrite",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.18772,
+     "prompt_tokens": 50,
+     "gen_tokens": 256,
+     "decode_tps": 89.7887323943662
+    },
+    "dara": {
+     "prompt_tokens": 51,
+     "prompt_s": 0.07,
+     "gen_tokens": 256,
+     "decode_tps": 82.03
+    },
+    "decode_ratio": 0.913589019607843
+   },
+   {
+    "task": "project_plan",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.18666,
+     "prompt_tokens": 42,
+     "gen_tokens": 256,
+     "decode_tps": 89.58055223775732
+    },
+    "dara": {
+     "prompt_tokens": 43,
+     "prompt_s": 0.16,
+     "gen_tokens": 256,
+     "decode_tps": 82.86
+    },
+    "decode_ratio": 0.9249775529411766
+   },
+   {
+    "task": "notes_to_todos",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.17747,
+     "prompt_tokens": 86,
+     "gen_tokens": 123,
+     "decode_tps": 89.8657905979758
+    },
+    "dara": {
+     "prompt_tokens": 87,
+     "prompt_s": 0.11,
+     "gen_tokens": 125,
+     "decode_tps": 82.13
+    },
+    "decode_ratio": 0.9139184049180328
+   },
+   {
+    "task": "summary",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.19382,
+     "prompt_tokens": 133,
+     "gen_tokens": 133,
+     "decode_tps": 89.28269471405864
+    },
+    "dara": {
+     "prompt_tokens": 134,
+     "prompt_s": 0.16,
+     "gen_tokens": 131,
+     "decode_tps": 80.83
+    },
+    "decode_ratio": 0.9053266174242425
+   },
+   {
+    "task": "tamil_summary",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.18884,
+     "prompt_tokens": 134,
+     "gen_tokens": 96,
+     "decode_tps": 88.5384629722828
+    },
+    "dara": {
+     "prompt_tokens": 135,
+     "prompt_s": 0.15,
+     "gen_tokens": 93,
+     "decode_tps": 81.11
+    },
+    "decode_ratio": 0.9160990294736842
+   },
+   {
+    "task": "tamil_email",
+    "category": "generate",
+    "llama": {
+     "prompt_s": 0.19433,
+     "prompt_tokens": 58,
+     "gen_tokens": 256,
+     "decode_tps": 89.99724714302856
+    },
+    "dara": {
+     "prompt_tokens": 59,
+     "prompt_s": 0.07,
+     "gen_tokens": 256,
+     "decode_tps": 81.82
+    },
+    "decode_ratio": 0.9091389192156862
+   }
+  ]
+ }
+}
