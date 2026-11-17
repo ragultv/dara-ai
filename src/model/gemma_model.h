@@ -73,6 +73,10 @@ public:
     const GemmaConfig& config() const { return cfg_; }
     const PlacementReport& placement() const { return report_; }
     double load_seconds() const { return load_seconds_; }
+    // Multimodal soft tokens (image encoder output): positions [start, start + n) take `rows` ([n][hidden]) as their input embedding. The
+    // token ids there must be the pad id (the per-layer token table reads it); the soft tokens also feed the per-layer projection.
+    void add_soft_tokens(size_t start, int n, std::vector<float> rows);
+    void clear_soft_tokens() { soft_.clear(); }
     size_t kv_capacity() const { return capacity_; }   // positions the caches hold (the auto choice when constructed with 0)
     // long forward calls run in pieces of this many tokens (multiple of the prefill chunk): bounds the per-call device buffers
     int forward_piece_tokens() const { const int c = opt_.max_chunk_tokens > 0 ? opt_.max_chunk_tokens : 1; return c * (256 / c > 0 ? 256 / c : 1); }
@@ -113,6 +117,8 @@ private:
     GemmaConfig cfg_;
     ResidencyOptions opt_;
     size_t capacity_;
+    struct SoftSpan { size_t start; int n; std::vector<float> rows; };
+    std::vector<SoftSpan> soft_;
     std::vector<PackedLayer> layers_;
     std::vector<Small> small_;
     std::vector<KV> kv_;

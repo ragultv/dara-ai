@@ -21,7 +21,9 @@
 
 #include "io/gguf_checkpoint.h"
 #include "model/flash_drafter.h"
+#include "io/image.h"
 #include "model/gemma_model.h"
+#include "model/gemma_vision.h"
 #include "tokenizer/gemma_chat.h"
 #include "tokenizer/gemma_tokenizer.h"
 
@@ -46,6 +48,8 @@ int main(int argc, char** argv) {
     int spec_k = 0, ngram_max = 4, ngram_min = 3;   // --spec K: prompt-lookup speculative decoding (greedy-exact)
     KvFormat kv_format = KvFormat::Q8;   // default INT8 K/V (near-lossless; --kv-mode f32 for the reference path)  // --kv-mode f32|tq4
     std::string chat_user, chat_system, teacher_file;  // --chat renders the model's chat template around the user message
+    std::string mmproj_path;                // --mmproj <vision GGUF> with --image <file> (repeatable): images go before the --chat text
+    std::vector<std::string> image_paths;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { if (i + 1 >= argc) { std::fprintf(stderr, "missing value for %s\n", a.c_str()); std::exit(2); } return argv[++i]; };
@@ -54,6 +58,8 @@ int main(int argc, char** argv) {
         else if (a == "--prompt") prompt_text = next();
         else if (a == "--prompt-file") prompt_file = next();
         else if (a == "--chat") chat_user = next();
+        else if (a == "--mmproj") mmproj_path = next();
+        else if (a == "--image") image_paths.push_back(next());
         else if (a == "--system") chat_system = next();
         else if (a == "--think") think = true;
         else if (a == "--profile") profile = true;
@@ -92,7 +98,40 @@ int main(int argc, char** argv) {
         catch (const std::exception& e) { if (text_mode) throw; std::fprintf(stderr, "note: no text output (%s)\n", e.what()); }
 
         std::vector<int32_t> prompt;
-        if (chat_mode) {
+        std::vector<std::vector<float>> image_tokens;   // per image: soft tokens [n][hidden] for the text model
+        std::vector<int> image_counts;
+        if (!image_paths.empty()) {
+            if (!chat_mode) throw std::runtime_error("--image needs --chat <text> (the image goes into the user turn)");
+            if (mmproj_path.empty()) throw std::runtime_error("--image needs --mmproj <vision GGUF>");
+            // encode before the text model loads: the encoder's VRAM is free again when the text model sizes its context
+            dara::io::GgufCheckpoint mm(mmproj_path);
+            const auto tv0 = std::chrono::steady_clock::now();
+            dara::model::GemmaVision vision(mm);
+            const double vload = std::chrono::duration<double>(std::chrono::steady_clock::now() - tv0).count();
+            for (const std::string& ip : image_paths) {
+                const auto img = dara::io::load_image_rgb(ip);
+                const auto in = vision.preprocess(img);
+                image_tokens.push_back(vision.encode(in));
+                image_counts.push_back(in.soft_tokens());
+                std::printf("image %s: %dx%d -> %dx%d patches -> %d tokens, encoded in %.3f s (encoder load %.1f s)\n", ip.c_str(), img.width, img.height,
+                            in.grid_w, in.grid_h, in.soft_tokens(), vision.last_seconds(), vload);
+            }
+        }
+        if (chat_mode && !image_tokens.empty()) {   // reference layout: <|image> + n x <|image|> + <image|> before the text, in the user turn
+            std::vector<dara::tokenizer::ChatMessage> msgs;
+            if (!chat_system.empty()) msgs.push_back({"system", chat_system});
+            std::string block;
+            for (const int n : image_counts) {
+                block += "<|image>";
+                for (int i = 0; i < n; ++i) block += "<|image|>";
+                block += "<image|>";
+            }
+            msgs.push_back({"user", block + chat_user});
+            prompt_text = dara::tokenizer::render_gemma_chat(msgs, true, think);
+            prompt = tokenizer->encode(prompt_text, /*parse_special=*/true, /*add_bos=*/false);
+            if (prompt.empty() || prompt[0] != 2) prompt.insert(prompt.begin(), 2);   // <bos>
+            std::printf("chat prompt with %zu image(s) -> %zu tokens\n", image_tokens.size(), prompt.size());
+        } else if (chat_mode) {
             std::vector<dara::tokenizer::ChatMessage> msgs;
             if (!chat_system.empty()) msgs.push_back({"system", chat_system});
             msgs.push_back({"user", chat_user});
@@ -133,6 +172,22 @@ int main(int argc, char** argv) {
         if (kv == 0) std::printf("context: %zu tokens (auto: the most that keeps the model in VRAM)\n", model.kv_capacity());
         kv = model.kv_capacity();
         const GemmaConfig& cfg = model.config();
+        if (!image_tokens.empty()) {   // image token positions: pad id in the sequence, soft tokens as their embeddings
+            const int32_t img_id = tokenizer->encode("<|image|>", true, false).at(0);
+            size_t k = 0;
+            for (size_t p = 0; p < prompt.size() && k < image_tokens.size();) {
+                if (prompt[p] != img_id) { ++p; continue; }
+                const int n = static_cast<int>(image_tokens[k].size() / static_cast<size_t>(cfg.hidden));
+                for (int j = 0; j < n; ++j) {
+                    if (p + j >= prompt.size() || prompt[p + j] != img_id) throw std::runtime_error("image placeholder run shorter than the image's tokens");
+                    prompt[p + j] = 0;   // <pad>
+                }
+                model.add_soft_tokens(p, n, std::move(image_tokens[k]));
+                p += static_cast<size_t>(n);
+                ++k;
+            }
+            if (k != image_tokens.size()) throw std::runtime_error("image placeholders missing from the prompt");
+        }
         const PlacementReport& pr = model.placement();
         const int V = cfg.vocab, T0 = static_cast<int>(prompt.size());
         std::printf("GPU: %s\n", pr.gpu.c_str());

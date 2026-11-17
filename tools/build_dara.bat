@@ -18,7 +18,7 @@ set K=src\kernels\gemv.cu src\kernels\gemv_cpu.cpp src\kernels\q4k_gemv.cu src\k
 set M=src\model\layer_cuda.cu src\model\tq_kv.cu src\model\attn_splitkv.cu src\model\attn_prefill.cu src\model\attention_cuda.cu src\model\deltanet_cuda.cu src\model\ops_cuda.cu src\model\ops.cpp src\model\deltanet.cpp src\model\attention.cpp src\model\layer.cpp src\model\packed_layer.cu
 set C=src\io\gguf_checkpoint.cpp src\io\gguf.cpp src\core\system.cpp src\core\placement.cpp src\core\budget.cpp src\core\manifest.cpp
 set Q=src\model\qwen_model.cu src\model\cpu_decode.cpp src\model\qwen_weights.cu src\tokenizer\tokenizer.cpp
-set G=src\model\gemma_model.cu src\model\gemma_ops_cuda.cu src\tokenizer\gemma_tokenizer.cpp src\tokenizer\gemma_chat.cpp
+set G=src\model\gemma_model.cu src\model\gemma_ops_cuda.cu src\tokenizer\gemma_tokenizer.cpp src\tokenizer\gemma_chat.cpp src\model\gemma_vision.cu src\model\vision_ops_cuda.cu src\io\image.cpp
 
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% -c tools\qwen_generate.cu -Dmain=dara_qwen_main -o build\cuda\dara_obj\qwen_driver.obj || exit /b 1
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% -c tools\nano_generate.cu -Dmain=dara_nano_main -o build\cuda\dara_obj\nano_driver.obj || exit /b 1

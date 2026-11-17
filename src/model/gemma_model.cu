@@ -696,6 +696,11 @@ std::vector<float> GemmaModel::forward(const int32_t* tokens, int T, int logits_
     return logits;
 }
 
+void GemmaModel::add_soft_tokens(size_t start, int n, std::vector<float> rows) {
+    if (n <= 0 || rows.size() != static_cast<size_t>(n) * cfg_.hidden) throw std::invalid_argument("soft tokens: rows must be [n][hidden]");
+    soft_.push_back({start, n, std::move(rows)});
+}
+
 std::vector<int32_t> GemmaModel::forward_argmax(const int32_t* tokens, int T, RunStats* stats, std::vector<float>* features) {
     std::vector<int32_t> ids;
     forward_impl(tokens, T, 0, nullptr, stats, false, nullptr, &ids, features);
@@ -786,6 +791,12 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
             for (size_t i = 0; i < PL; ++i) pt[i] *= ps;
         }
         }
+    }
+    // soft-token positions (image encoder output): the merged input embedding is the soft token itself (unscaled). As in the reference it
+    // also feeds the per-layer projection; the per-layer token table reads the pad id that sits in the sequence there.
+    for (const SoftSpan& sp : soft_) {
+        const size_t a = std::max(sp.start, pos_), b = std::min(sp.start + static_cast<size_t>(sp.n), pos_ + static_cast<size_t>(T));
+        if (a < b) std::memcpy(&emb[(a - pos_) * H], sp.rows.data() + (a - sp.start) * H, (b - a) * H * sizeof(float));
     }
     rs.embed_seconds = since(t0);
 
