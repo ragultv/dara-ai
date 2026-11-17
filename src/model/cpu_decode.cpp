@@ -642,7 +642,7 @@ static void dn_core(CpuDecoder::Impl& I, const CpuLayerWeights& w, CpuLayerState
 
 // Attention for ONE token at absolute position pos: qg [q_rows] (query|gate per head), k/v [kv_width] projections; appends K/V; writes att [out_width].
 static void attn_core(CpuDecoder::Impl& I, const CpuLayerWeights& w, CpuLayerState& s, const float* qg, const float* kin, const float* vin, int64_t pos,
-                      float* att) {
+                      float* att, const int64_t* pos3 = nullptr) {
     const AttentionDims& d = w.at;
     const int hd = d.head_dim, NH = d.heads, KH = d.kv_heads, OW = d.out_width(), KW = d.kv_width();
     I.q.resize(static_cast<size_t>(NH) * hd); I.gate.resize(OW); I.k.assign(kin, kin + KW); I.v.assign(vin, vin + KW);
@@ -653,7 +653,18 @@ static void attn_core(CpuDecoder::Impl& I, const CpuLayerWeights& w, CpuLayerSta
     for (int h = 0; h < NH; ++h) rms(&I.q[static_cast<size_t>(h) * hd], w.q_norm.data(), hd, d.eps, &I.q[static_cast<size_t>(h) * hd]);
     for (int h = 0; h < KH; ++h) rms(&I.k[static_cast<size_t>(h) * hd], w.k_norm.data(), hd, d.eps, &I.k[static_cast<size_t>(h) * hd]);
     I.cs.resize(d.rot_dim / 2); I.sn.resize(d.rot_dim / 2);
+    if (pos3) {   // multimodal RoPE: per frequency pair, the temporal / height / width position (interleaved sections)
+        std::vector<float> one(1);
+        for (int i = 0; i < d.rot_dim / 2; ++i) {
+            const int sct = (i % 3 == 1 && i < 3 * s.mrope_h) ? 1 : (i % 3 == 2 && i < 3 * s.mrope_w) ? 2 : 0;
+            float c1, s1;
+            one[0] = w.inv_freq[static_cast<size_t>(i)];
+            rope_cos_sin(pos3[sct], one, &c1, &s1);
+            I.cs[static_cast<size_t>(i)] = c1; I.sn[static_cast<size_t>(i)] = s1;
+        }
+    } else {
     rope_cos_sin(pos, w.inv_freq, I.cs.data(), I.sn.data());
+    }
     rope_apply(I.q.data(), NH, hd, d.rot_dim, I.cs.data(), I.sn.data());
     rope_apply(I.k.data(), KH, hd, d.rot_dim, I.cs.data(), I.sn.data());
     if (static_cast<size_t>(pos) >= s.kv_cap) throw std::length_error("K/V cache capacity exceeded");
@@ -763,7 +774,8 @@ void CpuDecoder::forward_multi(const CpuLayerWeights& w, CpuLayerState& s, const
         const size_t qr = static_cast<size_t>(d.q_rows()), kw = static_cast<size_t>(d.kv_width()), ow = static_cast<size_t>(d.out_width());
         I.qgT.resize(T * qr); I.kT.resize(T * kw); I.vT.resize(T * kw); I.attT.resize(T * ow);
         I.matvecs_multi({{&w.q_proj, I.qgT.data()}, {&w.k_proj, I.kT.data()}, {&w.v_proj, I.vT.data()}}, T);
-        for (int t = 0; t < T; ++t) attn_core(I, w, s, &I.qgT[t * qr], &I.kT[t * kw], &I.vT[t * kw], pos0 + t, &I.attT[t * ow]);
+        for (int t = 0; t < T; ++t)
+            attn_core(I, w, s, &I.qgT[t * qr], &I.kT[t * kw], &I.vT[t * kw], pos0 + t, &I.attT[t * ow], s.rope3 ? s.rope3 + 3 * static_cast<size_t>(t) : nullptr);
         for (int t = 0; t < T; ++t) I.acts[t].quantize(&I.attT[t * ow], ow);
         I.matvecs_multi({{&w.o_proj, I.mT.data()}}, T);
     }

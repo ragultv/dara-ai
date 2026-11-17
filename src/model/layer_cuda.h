@@ -89,6 +89,10 @@ inline size_t kv_bytes_per_head_vector(KvFormat f, int head_dim) {
 struct GpuLayerState {
     LayerKind kind = LayerKind::DeltaNet;
     size_t pos = 0;             // tokens processed (KV length for attention layers)
+    // Multimodal RoPE (Qwen image prompts): device [T][3] (temporal, height, width) rotary positions for the next call; null = the token
+    // positions (text only: the unchanged path). Interleaved sections as Qwen3.5's mrope_section [t, h, w].
+    const int64_t* rope3 = nullptr;
+    int mrope_h = 11, mrope_w = 10;
     DevBuf<float> conv_state, S;  // DeltaNet
     DevBuf<float> Kc, Vc;         // attention (KvFormat::F32), [position][kv_heads][head_dim]
     KvFormat kv_format = KvFormat::F32;

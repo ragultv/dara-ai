@@ -35,6 +35,7 @@ struct QwenConfig {
     float eps = 1e-6f;
     bool tied_embeddings = true;
     size_t context_length = 0;   // the model's native maximum context (GGUF <arch>.context_length; 0 = not stated)
+    int mrope_t = 11, mrope_h = 11, mrope_w = 10;   // M-RoPE sections (GGUF <arch>.rope.dimension_sections) for image prompts
     std::vector<LayerKind> kinds;
     int rot_dim() const { return static_cast<int>(head_dim * partial_rotary); }
     // Derives the configuration from the GGUF metadata and tensor shapes. Throws on an unsupported architecture or any
@@ -102,6 +103,11 @@ public:
     const PlacementReport& placement() const { return report_; }
     double load_seconds() const { return load_seconds_; }   // cold load: disk -> host images -> VRAM slabs
     size_t kv_capacity() const { return kv_capacity_; }      // positions the caches hold (the auto choice when constructed with 0)
+    // Image soft tokens (vision encoder output, [grid_h * grid_w][hidden], merged-grid row-major) at token positions [start, start + n): their
+    // embeddings replace the placeholder tokens' and they get 3D rotary positions (t, t + row, t + col); text after the image continues at
+    // t + max(grid_h, grid_w) (the reference get_rope_index). Without images every path is unchanged.
+    void add_image(size_t start, int grid_h, int grid_w, std::vector<float> rows);
+    void clear_images() { images_.clear(); }
     // CUDA Graphs (see decode_graph.h): a resident single-token decode step is captured once and replayed with one launch. Results are
     // bitwise identical to the eager path. Not used while layers are streamed from host RAM, when per-layer outputs are requested, or
     // right after snapshot() (the verification forward records recurrence inputs). DARA_NO_GRAPH=1 or set_graphs(false) disables.
@@ -128,6 +134,10 @@ public:
     void rollback(int keep = 0);
 
 private:
+    struct ImageSpan { size_t start; int gh, gw; std::vector<float> rows; };
+    std::vector<ImageSpan> images_;
+    void rope_position(size_t slot, int64_t out[3]) const;
+    DevBuf<int64_t> d_rope3_;
     std::vector<float> forward_one(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
                                    std::vector<int32_t>* argmax_out, std::vector<float>* features_out, int feat_from);
     void start_copy(int layer);

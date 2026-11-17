@@ -40,6 +40,12 @@ QwenConfig QwenConfig::from_gguf(const dara::io::GgufCheckpoint& g) {
     c.eps = static_cast<float>(meta_num(g, a + "attention.layer_norm_rms_epsilon"));
     c.rope_theta = meta_num(g, a + "rope.freq_base");
     for (const auto& kv : g.header().metadata) if (kv.first == a + "context_length") c.context_length = static_cast<size_t>(std::stoll(kv.second));
+    {
+        const auto it = g.header().int_arrays.find(a + "rope.dimension_sections");
+        if (it != g.header().int_arrays.end() && it->second.size() >= 3) {
+            c.mrope_t = static_cast<int>(it->second[0]); c.mrope_h = static_cast<int>(it->second[1]); c.mrope_w = static_cast<int>(it->second[2]);
+        }
+    }
     c.partial_rotary = meta_num(g, a + "rope.dimension_count") / c.head_dim;
     c.conv_kernel = static_cast<int>(meta_int(g, a + "ssm.conv_kernel"));
     c.k_dim = static_cast<int>(meta_int(g, a + "ssm.state_size"));
@@ -451,6 +457,31 @@ void QwenModel::start_copy(int layer) {
     streamed_bytes_ += p.matrix_bytes;
 }
 
+void QwenModel::add_image(size_t start, int grid_h, int grid_w, std::vector<float> rows) {
+    if (grid_h <= 0 || grid_w <= 0 || rows.size() != static_cast<size_t>(grid_h) * grid_w * cfg_.hidden)
+        throw std::invalid_argument("image soft tokens must be [grid_h * grid_w][hidden]");
+    if (!images_.empty() && start < images_.back().start + static_cast<size_t>(images_.back().gh) * images_.back().gw)
+        throw std::invalid_argument("images must be added in order and must not overlap");
+    images_.push_back({start, grid_h, grid_w, std::move(rows)});
+}
+
+void QwenModel::rope_position(size_t slot, int64_t out[3]) const {
+    int64_t delta = 0;   // rotary position minus token position for text after the images seen so far
+    for (const ImageSpan& sp : images_) {
+        if (slot < sp.start) break;
+        const int64_t c = static_cast<int64_t>(sp.start) + delta;
+        const size_t n = static_cast<size_t>(sp.gh) * sp.gw;
+        if (slot < sp.start + n) {
+            const int64_t i = static_cast<int64_t>(slot - sp.start);
+            out[0] = c; out[1] = c + i / sp.gw; out[2] = c + i % sp.gw;
+            return;
+        }
+        delta = c + std::max(sp.gh, sp.gw) - static_cast<int64_t>(sp.start + n);
+    }
+    const int64_t p = static_cast<int64_t>(slot) + delta;
+    out[0] = out[1] = out[2] = p;
+}
+
 std::vector<float> QwenModel::forward(const int32_t* tokens, int T, int logits_from, std::vector<std::vector<float>>* layer_outputs, RunStats* stats,
                                       std::vector<int32_t>* argmax_out, std::vector<float>* features_out, int feat_from) {
     // A forward call keeps two [T][hidden] device buffers (and host copies) for the whole call, so long prompts go through in pieces.
@@ -514,6 +545,20 @@ std::vector<float> QwenModel::forward_one(const int32_t* tokens, int T, int logi
         const auto row = weights_.embed_row(tokens[t]);
         std::copy(row.begin(), row.end(), hidden.begin() + static_cast<long>(t) * H);
     }
+    // image prompt: soft tokens replace the placeholder embeddings; 3D rotary positions for every token of this call
+    std::vector<int64_t> rope3_host;
+    if (!images_.empty()) {
+        for (const ImageSpan& sp : images_) {
+            const size_t n = static_cast<size_t>(sp.gh) * sp.gw;
+            const size_t a = std::max(sp.start, pos_), b = std::min(sp.start + n, pos_ + static_cast<size_t>(T));
+            if (a < b) std::copy(sp.rows.begin() + static_cast<long>((a - sp.start) * H), sp.rows.begin() + static_cast<long>((b - sp.start) * H),
+                                 hidden.begin() + static_cast<long>((a - pos_) * H));
+        }
+        rope3_host.resize(static_cast<size_t>(T) * 3);
+        for (int t = 0; t < T; ++t) rope_position(pos_ + static_cast<size_t>(t), &rope3_host[static_cast<size_t>(t) * 3]);
+        if (d_rope3_.n < rope3_host.size()) d_rope3_ = DevBuf<int64_t>(std::max<size_t>(rope3_host.size(), 3 * 1024));
+        cuda_check(cudaMemcpy(d_rope3_.p, rope3_host.data(), rope3_host.size() * sizeof(int64_t), cudaMemcpyHostToDevice), "rope positions");
+    }
     rs.embed_seconds = since(t0);
 
     if (layer_outputs) layer_outputs->clear();
@@ -527,7 +572,7 @@ std::vector<float> QwenModel::forward_one(const int32_t* tokens, int T, int logi
     t0 = Clock::now();
     // CUDA-graph decode: one captured launch for all layers (resident weights, single token, nothing recording or reading per-layer data).
     // With CPU decode of hosted layers, the graph covers the VRAM-resident prefix [0, gpu_layers) and the CPU runs the rest.
-    const bool use_graph = use_graphs_ && T == 1 && (resident_ == L || cpu_dec) && !layer_outputs && !record_next_ &&
+    const bool use_graph = use_graphs_ && images_.empty() && T == 1 && (resident_ == L || cpu_dec) && !layer_outputs && !record_next_ &&
                            pos_ + 1 <= static_cast<size_t>(kAttentionMaxKvLen);
     bool graph_done = false;
     if (use_graph) {
@@ -574,7 +619,9 @@ std::vector<float> QwenModel::forward_one(const int32_t* tokens, int T, int logi
         float* tape = (record_next_ && T <= kMaxSpecTokens && T <= C && states_[l].kind == LayerKind::DeltaNet) ? tape_[l].p : nullptr;
         for (int c0 = 0; c0 < T; c0 += C) {
             const int n = std::min(C, T - c0);
+            if (!rope3_host.empty()) { states_[l].rope3 = d_rope3_.p + static_cast<size_t>(c0) * 3; states_[l].mrope_h = cfg_.mrope_h; states_[l].mrope_w = cfg_.mrope_w; }
             gpu_layer_forward_dev(p.weights, states_[l], hid_dev[cur] + static_cast<size_t>(c0) * H, hid_dev[1 - cur] + static_cast<size_t>(c0) * H, n, pool_, tape);
+            states_[l].rope3 = nullptr;
         }
         if (l >= resident_) {  // this layer's weights stay in use until its compute drains; tell the copy stream when that happens
             const int slot = (l - resident_) % nslots_;
@@ -595,9 +642,12 @@ std::vector<float> QwenModel::forward_one(const int32_t* tokens, int T, int logi
         for (int l = resident_; l < L; ++l) {
             const size_t i = static_cast<size_t>(l - resident_);
             float* tape = (record_next_ && cpu_snap_ && cpu_w_[i].kind == LayerKind::DeltaNet) ? cpu_tape_[i].data() : nullptr;
+            cpu_s_[i].rope3 = rope3_host.empty() ? nullptr : rope3_host.data();
+            cpu_s_[i].mrope_h = cfg_.mrope_h; cpu_s_[i].mrope_w = cfg_.mrope_w;
             if (T == 1 && !tape) cpu_->forward(cpu_w_[i], cpu_s_[i], hidden.data(), hidden.data(), static_cast<int64_t>(states_[l].pos));
             else cpu_->forward_multi(cpu_w_[i], cpu_s_[i], hidden.data(), hidden.data(), static_cast<int64_t>(states_[l].pos), T, tape);
             states_[l].pos += static_cast<size_t>(T);
+            cpu_s_[i].rope3 = nullptr;
         }
     }
     layer_prof_flush();  // no-op unless DARA_LAYER_PROF=1; the copy above synchronised the stream

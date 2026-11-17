@@ -52,6 +52,8 @@ struct CpuLayerState {
     std::vector<int8_t> Kq, Vq;      // Q8 cache codes, same layout
     std::vector<float> Kn, Vn;       // Q8 scales [position][kv_heads][head_dim/32]
     size_t kv_cap = 0;
+    const int64_t* rope3 = nullptr;   // multimodal RoPE: host [T][3] rotary positions for the next call (null: token positions)
+    int mrope_h = 11, mrope_w = 10;
 };
 
 // True when this machine and build can run the CPU decode path (AVX2 + F16C), and the format/layer is supported.
