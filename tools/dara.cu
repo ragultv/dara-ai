@@ -18,8 +18,10 @@
 
 int dara_qwen_main(int argc, char** argv);
 int dara_nano_main(int argc, char** argv);
+int dara_probe_main();   // tests/bw_probe.cu: GPU memory-bandwidth probe (dara --probe)
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "--probe") == 0) return dara_probe_main();   // memory-bandwidth ceiling of this GPU
     std::string gguf;
     bool info = false;
     for (int i = 1; i < argc; ++i) {
@@ -31,7 +33,8 @@ int main(int argc, char** argv) {
                      "usage: dara --gguf <model.gguf> [options]\n"
                      "  the model family is detected from the GGUF (qwen35: Core 4B / Pro 9B, gemma4: Nano);\n"
                      "  all options of the matching driver apply (--prompt, --prompt-file, --new, --flash, --spec, ...)\n"
-                     "  dara --info --gguf <model.gguf> prints the detected architecture\n");
+                     "  dara --info --gguf <model.gguf> prints the detected architecture\n"
+                     "  dara --probe measures this GPU's memory bandwidth (the ceiling for decode speed)\n");
         return 2;
     }
     std::string arch;

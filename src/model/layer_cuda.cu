@@ -225,6 +225,8 @@ struct LayerProf {
     LayerProf() { const char* e = std::getenv("DARA_LAYER_PROF"); on = e && (e[0] == '1' || e[0] == '2'); decode_only = e && e[0] == '2'; }
     void mark(const char* l, void* stream, int T) {
         if (!on || (decode_only && T != 1)) return;
+        cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;   // no event records inside a graph capture (that would fail the capture)
+        if (cudaStreamIsCapturing(static_cast<cudaStream_t>(stream), &cs) != cudaSuccess || cs != cudaStreamCaptureStatusNone) return;
         if (used >= ev.size()) { cudaEvent_t e; cudaEventCreate(&e); ev.push_back(e); }
         cudaEventRecord(ev[used], static_cast<cudaStream_t>(stream));
         if (label.size() <= used) label.resize(used + 1);

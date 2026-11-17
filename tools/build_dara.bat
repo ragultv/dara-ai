@@ -29,5 +29,6 @@ set G=src\model\gemma_model.cu src\model\gemma_ops_cuda.cu src\tokenizer\gemma_t
 
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% -c tools\qwen_generate.cu -Dmain=dara_qwen_main -o build\cuda\dara_obj\qwen_driver.obj || exit /b 1
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% -c tools\nano_generate.cu -Dmain=dara_nano_main -o build\cuda\dara_obj\nano_driver.obj || exit /b 1
-"%CUDA%\bin\nvcc.exe" %NVFLAGS% tools\dara.cu build\cuda\dara_obj\qwen_driver.obj build\cuda\dara_obj\nano_driver.obj src\model\flash_drafter.cu src\tokenizer\unicode.cpp %Q% %G% %M% %C% %K% -o build\cuda\dara.exe -cudart static || exit /b 1
+"%CUDA%\bin\nvcc.exe" %NVFLAGS% -c tests\bw_probe.cu -Dmain=dara_probe_main -o build\cuda\dara_obj\bw_probe.obj || exit /b 1
+"%CUDA%\bin\nvcc.exe" %NVFLAGS% tools\dara.cu build\cuda\dara_obj\qwen_driver.obj build\cuda\dara_obj\nano_driver.obj build\cuda\dara_obj\bw_probe.obj src\model\flash_drafter.cu src\tokenizer\unicode.cpp %Q% %G% %M% %C% %K% -o build\cuda\dara.exe -cudart static || exit /b 1
 echo built build\cuda\dara.exe
