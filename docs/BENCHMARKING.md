@@ -40,7 +40,7 @@ Then download the prebuilt `dara.exe`:
 
 1. Open **https://github.com/ragultv/dara-ai/releases** and take the newest release (named `Dara bNNN`).
 2. Download `dara-bNNN-bin-win-cuda-13.1.1-x64.zip` (and optionally the `.sha256` file next to it).
-3. Unzip it into `C:\dara\bin\`, so that `C:\dara\bin\dara.exe` exists.
+3. Unzip it into `C:\dara\bin\`, so that `C:\dara\bin\dara.exe` and `C:\dara\bin\flash\` exist.
 
 Check that it starts:
 
@@ -72,17 +72,14 @@ python -I bench\get_models.py --models 9b               # optional: 9B, about 6.
 
 The files go to `C:\dara\models\...`. Downloads resume if interrupted; just run the same command again.
 
-## 4. Get the Flash drafters
+## 4. The Flash drafters (already in the zip)
 
-Flash (Dara's speculative decoding) needs one trained drafter file per model. They are not in the git repository:
+Flash (Dara's speculative decoding) needs one trained drafter file per model. Every release zip includes them, so after step 2 they are here:
 
 | File | Size | For |
 |---|---|---|
-| `drafter_4b_v2.dflash` | 83 MB | Core 4B |
-| `drafter_nano_v2.dflash` | 35 MB | Nano |
-
-Download both from the **`flash-drafters-v2`** release on the releases page into `C:\dara\flash\`. If that release does not exist yet,
-copy them from the development laptop (`D:\darap-ai\build\flash\`) with a USB stick.
+| `C:\dara\bin\flash\drafter_4b_v2.dflash` | 83 MB | Core 4B |
+| `C:\dara\bin\flash\drafter_nano_v2.dflash` | 35 MB | Nano |
 
 ## 5. Get llama.cpp (for the comparison)
 
@@ -128,8 +125,8 @@ About 20 minutes. Per task it prints the llama.cpp and Dara decode speeds, their
 The drafter is model-specific, so run each model on its own:
 
 ```powershell
-python -I bench\task_bench.py --models 4b   --out build\bench\tasks_flash_4b   --dara-args "--flash flash\drafter_4b_v2.dflash --spec 4 --flash-min-p 0.6"
-python -I bench\task_bench.py --models nano --out build\bench\tasks_flash_nano --dara-args "--flash flash\drafter_nano_v2.dflash --spec 4 --flash-min-p 0.6"
+python -I bench\task_bench.py --models 4b   --out build\bench\tasks_flash_4b   --dara-args "--flash bin\flash\drafter_4b_v2.dflash --spec 4 --flash-min-p 0.6"
+python -I bench\task_bench.py --models nano --out build\bench\tasks_flash_nano --dara-args "--flash bin\flash\drafter_nano_v2.dflash --spec 4 --flash-min-p 0.6"
 ```
 
 ### 7.3 The 9B (optional)
