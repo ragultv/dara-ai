@@ -5,19 +5,18 @@ tokens, stopping at end-of-sequence. Reported per task: prompt tokens, generated
 Dara / llama.cpp decode ratio; then the geometric mean per category. llama.cpp runs as llama-completion (plain decoding, no speculation); its timings
 come from its own perf printout, Dara's from its 'prefill' / 'warm decode' lines. The two runtimes alternate task by task.
 
-Usage: python -I bench/task_bench.py --models 4b nano [9b] [--max-new 256] [--dara-env KEY=VALUE ...] [--out build/bench/tasks]
+Usage: python -I bench/task_bench.py --models 4b nano [9b] [--max-new 256] [--dara-args "..."] [--dara-exe PATH] [--llama-dir DIR]
+                                     [--models-dir DIR] [--llama-ngl 9b=24] [--out build/bench/tasks]
+See docs/BENCHMARKING.md.
 """
 import argparse, json, math, os, re, subprocess, sys, time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import benchenv  # noqa: E402
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LLAMA = r"D:\oprel\bin\llama_cpp\b12189\cuda\llama-completion.exe"
-BIN = os.path.join(ROOT, "build", "cuda")
-MODELS = {
-    "4b": dict(exe="qwen_generate.exe", family="qwen", ngl=99, gguf=os.path.join(ROOT, "models", "qwen3.5-4b-gguf", "Qwen3.5-4B-Q4_K_M.gguf")),
-    "9b": dict(exe="qwen_generate.exe", family="qwen", ngl=24, gguf=os.path.join(ROOT, "models", "qwen3.5-9b-gguf", "Qwen3.5-9B-Q4_K_M.gguf")),
-    "nano": dict(exe="nano_generate.exe", family="gemma", ngl=99, gguf=os.path.join(ROOT, "models", "gemma4-e2b-gguf", "gemma-4-E2B-it-Q4_K_M.gguf")),
-}
+A = None   # parsed arguments (paths and llama.cpp layer counts: bench/benchenv.py)
 
 
 def chat_text(family, user):
@@ -32,8 +31,7 @@ def run(cmd, env=None, timeout=1800):
 
 
 def dara(model, prompt_file, max_new, out, extra_env, extra_args=()):
-    m = MODELS[model]
-    cmd = [os.path.join(BIN, m["exe"]), "--gguf", m["gguf"], "--bench", "--special", "--stop-at-eos", "--prompt-file", prompt_file, "--new", str(max_new),
+    cmd = [A.dara_exe, "--gguf", benchenv.gguf(A, model), "--bench", "--special", "--stop-at-eos", "--prompt-file", prompt_file, "--new", str(max_new),
            "--kv", "4096", "--chunk", "512", "--out", out, *extra_args]
     rc, o = run(cmd, env=dict(os.environ, **extra_env))
     if rc != 0:
@@ -59,8 +57,8 @@ def dara(model, prompt_file, max_new, out, extra_env, extra_args=()):
 
 
 def llama(model, prompt_file, max_new):
-    m = MODELS[model]
-    cmd = [LLAMA, "-m", m["gguf"], "-f", prompt_file, "-n", str(max_new), "--temp", "0", "-ngl", str(m["ngl"]), "-fa", "on", "--no-display-prompt",
+    cmd = [os.path.join(A.llama_dir, "llama-completion.exe"), "-m", benchenv.gguf(A, model), "-f", prompt_file, "-n", str(max_new), "--temp", "0",
+           *benchenv.ngl_args(A, model), "-fa", "on", "--no-display-prompt",
            "-c", "4096", "--no-warmup", "-no-cnv"]   # -no-cnv: llama-completion would otherwise enter interactive chat mode for models with a template
     rc, o = run(cmd)
     if rc != 0:
@@ -89,16 +87,23 @@ def main():
     ap.add_argument("--dara-env", nargs="*", default=[], help="KEY=VALUE pairs for Dara runs")
     ap.add_argument("--dara-args", default="", help="extra Dara command-line arguments, e.g. \"--spec 7\"")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "bench", "tasks"))
+    benchenv.add_args(ap)
     a = ap.parse_args()
+    global A
+    A = a
+    benchenv.check_paths(a, a.models)
+    machine = benchenv.machine_info()
+    benchenv.print_machine(machine)
     os.makedirs(a.out, exist_ok=True)
     extra_env = dict(kv.split("=", 1) for kv in a.dara_env)
     tasks = json.load(open(os.path.join(ROOT, "bench", "tasks", "tasks.json"), encoding="utf-8"))["tasks"]
     if a.tasks:
         tasks = [t for t in tasks if t["id"] in a.tasks]
     extra_args = a.dara_args.split()
-    report = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "max_new": a.max_new, "dara_env": extra_env, "dara_args": extra_args, "results": {}}
+    report = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "machine": machine, "max_new": a.max_new, "dara_env": extra_env, "dara_args": extra_args,
+              "llama_ngl": {m: benchenv.ngl_for(a, m) for m in a.models}, "results": {}}
     for model in a.models:
-        fam = MODELS[model]["family"]
+        fam = benchenv.FAMILY[model]
         print(f"\n=== {model} ===")
         print(f"{'task':22s} {'cat':9s} {'prompt':>6s} | {'llama tok/s':>11s} {'dara tok/s':>10s} {'ratio':>6s} | {'llama ttft':>10s} {'dara ttft':>9s} | gen L/D")
         rows = []

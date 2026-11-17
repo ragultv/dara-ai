@@ -4,38 +4,38 @@ llama.cpp: llama-server with the model + mmproj already loaded; time from the HT
 first streamed content token. Each configuration runs twice and the second (warm) run is reported.
 Dara:      warm time to first token = image decode + resize/preprocess + vision encode + prompt prefill (everything after both models are
            loaded), from Dara's own timing lines.
+Images:    bench/assets/photo1080.jpg (1920x1080) and photo1080_oprel.jpg (the same photo after oprel-SDK's preprocessing: <= 409,600 px).
 
-Usage: python -I bench/image_ttft.py [--models 4b 9b nano] [--out build/bench/image_ttft.json]
+Usage: python -I bench/image_ttft.py [--models 4b 9b nano] [--dara-exe PATH] [--llama-dir DIR] [--models-dir DIR] [--llama-ngl 9b=24]
+       [--out build/bench/image_ttft.json]
+See docs/BENCHMARKING.md.
 """
 import argparse, base64, json, os, re, subprocess, sys, time, urllib.request
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LLAMA_DIR = r"D:\oprel\bin\llama_cpp\b12189\cuda"
-DARA = os.path.join(ROOT, "build", "cuda", "dara.exe")
-M = {
-    "4b": dict(gguf="models/qwen3.5-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf", mmproj="models/qwen3.5-4b-gguf/mmproj-F16.gguf", ngl=99),
-    "9b": dict(gguf="models/qwen3.5-9b-gguf/Qwen3.5-9B-Q4_K_M.gguf", mmproj="models/qwen3.5-9b-gguf/mmproj-F16.gguf", ngl=24),
-    "nano": dict(gguf="models/gemma4-e2b-gguf/gemma-4-E2B-it-Q4_K_M.gguf", mmproj="models/gemma4-e2b-gguf/mmproj-F16.gguf", ngl=99),
-}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import benchenv  # noqa: E402
+
+ROOT = benchenv.ROOT
 QUESTION = "What text is written in the white box? Answer briefly."
-IMAGES = {"full 1920x1080": "build/vision/photo1080.jpg", "oprel-preprocessed 853x480": "build/vision/photo1080_oprel.jpg"}
+IMAGES = {"full 1920x1080": "bench/assets/photo1080.jpg", "oprel-preprocessed 853x480": "bench/assets/photo1080_oprel.jpg"}
 PORT = 8099
+A = None
 
 
 def p(rel): return os.path.join(ROOT, rel)
 
 
 def llama_server_ttft(model):
-    m = M[model]
-    cmd = [os.path.join(LLAMA_DIR, "llama-server.exe"), "-m", p(m["gguf"]), "--mmproj", p(m["mmproj"]), "-ngl", str(m["ngl"]), "-fa", "on",
-           "-c", "8192", "--port", str(PORT), "--no-webui"]
-    log = open(p(f"build/bench/llama_server_{model}.log"), "w", encoding="utf-8")
-    srv = subprocess.Popen(cmd, cwd=LLAMA_DIR, stdout=log, stderr=subprocess.STDOUT)
+    cmd = [os.path.join(A.llama_dir, "llama-server.exe"), "-m", benchenv.gguf(A, model), "--mmproj", benchenv.mmproj(A, model), *benchenv.ngl_args(A, model),
+           "-fa", "on", "-c", "8192", "--port", str(PORT), "--no-webui"]
+    logp = p(f"build/bench/llama_server_{model}.log")
+    log = open(logp, "w", encoding="utf-8")
+    srv = subprocess.Popen(cmd, cwd=A.llama_dir, stdout=log, stderr=subprocess.STDOUT)
     out = {}
     try:
         t0 = time.time()
         while True:
-            if srv.poll() is not None: return {"error": f"llama-server exited with {srv.returncode} (see build/bench/llama_server_{model}.log)"}
+            if srv.poll() is not None: return {"error": f"llama-server exited with {srv.returncode} (see {logp})"}
             try:
                 if json.load(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=2)).get("status") == "ok": break
             except Exception: pass
@@ -70,9 +70,8 @@ def llama_server_ttft(model):
 
 
 def dara_ttft(model, img, max_tokens):
-    m = M[model]
-    cmd = [DARA, "--gguf", p(m["gguf"]), "--mmproj", p(m["mmproj"]), "--image", p(img), "--chat", QUESTION, "--stop-at-eos", "--new", "24",
-           "--out", p("build/bench/_dara_img")]
+    cmd = [A.dara_exe, "--gguf", benchenv.gguf(A, model), "--mmproj", benchenv.mmproj(A, model), "--image", p(img), "--chat", QUESTION, "--stop-at-eos",
+           "--new", "24", "--out", p("build/bench/_dara_img")]
     if model == "nano": cmd += ["--no-layers"]
     else: cmd += ["--bench", "--image-max-tokens", str(max_tokens)]
     o = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT).stdout
@@ -90,11 +89,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", nargs="+", default=["4b", "9b", "nano"])
     ap.add_argument("--out", default=p("build/bench/image_ttft.json"))
+    ap.add_argument("--no-llama", action="store_true", help="Dara only")
+    benchenv.add_args(ap)
     a = ap.parse_args()
+    global A
+    A = a
+    benchenv.check_paths(a, a.models, need_llama=not a.no_llama, need_mmproj=True)
+    machine = benchenv.machine_info()
+    benchenv.print_machine(machine)
     os.makedirs(p("build/bench"), exist_ok=True)
-    res = {}
+    res = {"machine": machine, "llama_ngl": {m: benchenv.ngl_for(a, m) for m in a.models}, "results": {}}
     for model in a.models:
-        r = res[model] = {"dara": {}}
+        r = res["results"][model] = {"dara": {}}
         for name, img in IMAGES.items():
             for cap in ([1024, 400] if model != "nano" and name.startswith("full") else [1024]):
                 key = f"{name}" + (f" (cap {cap})" if model != "nano" else "")
@@ -103,9 +109,9 @@ def main():
                 x = r["dara"][key]
                 print(f"  Dara {model} {key}: TTFT {x.get('ttft_s')} s (prep {x.get('preprocess_s')}, encode {x.get('encode_s')}, prefill {x.get('prefill_s')}, "
                       f"{x.get('image_tokens')} image tokens) | {x.get('answer')!r} {x.get('error', '')}", flush=True)
-        r["llama.cpp"] = llama_server_ttft(model)
+        if not a.no_llama: r["llama.cpp"] = llama_server_ttft(model)
         json.dump(res, open(a.out, "w"), indent=1)
-    print(json.dumps(res, indent=1))
+    print(f"results: {a.out}")
 
 
 if __name__ == "__main__":
