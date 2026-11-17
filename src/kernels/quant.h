@@ -59,6 +59,12 @@ int gemm_bf16_cuda(const void* dW, size_t ld, const float* dx, size_t ldx, float
 int gemm_q8_cuda(QuantType t, const void* dW, size_t ld_blocks, const void* scratch, size_t K, int T, float* dy, size_t ldy, size_t rows, void* stream = nullptr);
 int quantize_activations_cuda(const float* dx, size_t ldx, size_t K, int T, void* scratch, void* stream = nullptr);
 bool q8_supported(QuantType t);
+// Q6_K in PLANAR layout (repack_q6k_planar: all ql, then all qh, all scales, all block scales, each [row][block]; same 210 bytes per block, every
+// lane load 16-byte aligned): y[t*ldy + r] = W[r] . x_t for T vectors quantised by quantize_activations_cuda. Decode / verification of the output head.
+void repack_q6k_planar(const uint8_t* src, size_t rows, size_t nblk, uint8_t* dst);
+int gemv_q6kp_q8_cuda(const void* dW, size_t rows, size_t K, const void* scratch, int T, float* dy, size_t ldy, void* stream = nullptr);
+// The same planar Q6_K with FP32 activations: each weight decoded once per pass and multiplied into up to 8 vectors (speculative verification).
+int gemv_q6kp_f32_cuda(const void* dW, size_t rows, size_t K, const float* dx, size_t ldx, int T, float* dy, size_t ldy, void* stream = nullptr);
 int gemv_q8_cuda(QuantType t, const void* dW, size_t ld_blocks, const void* scratch, size_t K, int T, int vec, float* dy, size_t rows, void* stream = nullptr);
 
 // Multi-vector: y[t*ldy + r] = sum_c W[r][c] * x[t*ldx + c] for t < nt. Q4_K/Q6_K read each weight block once per group of up to 8

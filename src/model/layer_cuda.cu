@@ -50,8 +50,22 @@ DeviceMatrix upload_quant_raw(dara::kernels::QuantType t, const void* blocks, si
     return m;
 }
 
+DeviceMatrix upload_q6k_planar(const void* blocks, size_t rows, size_t cols) {
+    const auto& f = dara::kernels::quant_format(dara::kernels::QuantType::Q6_K);
+    if (cols % f.block_weights != 0) throw std::invalid_argument("quantized row is not a whole number of blocks");
+    const size_t nblk = cols / f.block_weights;
+    std::vector<uint8_t> planar(rows * nblk * f.block_bytes);
+    dara::kernels::repack_q6k_planar(static_cast<const uint8_t*>(blocks), rows, nblk, planar.data());
+    DeviceMatrix m = make_matrix(planar.data(), planar.size(), rows, cols, nblk);
+    m.quantized = true;
+    m.qtype = dara::kernels::QuantType::Q6_K;
+    m.q6_planar = true;
+    return m;
+}
+
 int matvec_cuda(const DeviceMatrix& m, const float* d_x, float* d_y, void* stream) {
     if (!m.data) return static_cast<int>(cudaErrorInvalidValue);
+    if (m.q6_planar) return matvec_multi_cuda(m, d_x, m.cols, d_y, m.rows, 1, stream);
     if (m.quantized) return dara::kernels::gemv_quant_cuda(m.qtype, m.data.get(), m.ld, d_x, d_y, m.rows, m.cols, stream);
     return dara::kernels::gemv_cuda(dara::kernels::WeightType::BF16, m.data.get(), m.ld, d_x, d_y, m.rows, m.cols, stream);
 }
@@ -121,6 +135,21 @@ static int int8_gemm(const DeviceMatrix& m, const float* d_x, size_t ldx, float*
 
 int matvec_multi_cuda(const DeviceMatrix& m, const float* d_x, size_t ldx, float* d_y, size_t ldy, int nt, void* stream) {
     if (!m.data) return static_cast<int>(cudaErrorInvalidValue);
+    if (m.q6_planar) {   // planar Q6_K (output head): one vector with int8 activations; several (verification) with FP32 activations
+        static const bool f32_multi = [] { const char* e = std::getenv("DARA_Q6P_F32_MULTI"); return e && e[0] == '1'; }();   // A/B switch
+        if (nt > 1 && f32_multi && ldx % 4 == 0)
+            return dara::kernels::gemv_q6kp_f32_cuda(m.data.get(), m.rows, m.cols, d_x, ldx, nt, d_y, ldy, stream);
+        if (!g_q8_scratch) return static_cast<int>(cudaErrorInvalidValue);
+        for (int t0 = 0; t0 < nt; t0 += 8) {
+            const int n = std::min(8, nt - t0);
+            if (dara::kernels::q8act_bytes(m.cols, n) > kQ8ScratchBytes) return static_cast<int>(cudaErrorInvalidValue);
+            int e = dara::kernels::quantize_activations_cuda(d_x + static_cast<size_t>(t0) * ldx, ldx, m.cols, n, g_q8_scratch, stream);
+            g_share_cols = 0;   // the shared-input scratch now holds these vectors
+            if (!e) e = dara::kernels::gemv_q6kp_q8_cuda(m.data.get(), m.rows, m.cols, g_q8_scratch, n, d_y + static_cast<size_t>(t0) * ldy, ldy, stream);
+            if (e) return e;
+        }
+        return 0;
+    }
     if (m.quantized) {
         // Q6_K has an int8 kernel too, but on its 2-byte-aligned blocks it has not yet measured faster than the FP32 kernel: DARA_INT8_Q6=1 opts in.
         static const bool q6 = [] { const char* e = std::getenv("DARA_INT8_Q6"); return e && e[0] == '1'; }();
