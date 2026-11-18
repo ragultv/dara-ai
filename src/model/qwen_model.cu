@@ -399,6 +399,58 @@ void QwenModel::restore(const Checkpoint& c) {
     cpu_current_ = false;   // the GPU copy is the restored one
 }
 
+void QwenModel::save_device(DeviceCheckpoint& c) {
+    if (cpu_current_) sync_hosted_to_gpu();   // the GPU copy of the hosted layers' states is the one saved
+    const size_t L = states_.size();
+    c.conv.resize(L);
+    c.S.resize(L);
+    c.layer_pos.resize(L);
+    for (size_t i = 0; i < L; ++i) {
+        const GpuLayerState& s = states_[i];
+        c.layer_pos[i] = s.pos;
+        if (s.kind != LayerKind::DeltaNet) continue;
+        if (c.conv[i].n != s.conv_state.n) c.conv[i] = DevBuf<float>(s.conv_state.n);
+        if (c.S[i].n != s.S.n) c.S[i] = DevBuf<float>(s.S.n);
+        cuda_check(cudaMemcpyAsync(c.conv[i].p, s.conv_state.p, s.conv_state.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "checkpoint conv");
+        cuda_check(cudaMemcpyAsync(c.S[i].p, s.S.p, s.S.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "checkpoint S");
+    }
+    cuda_check(cudaStreamSynchronize(0), "checkpoint");
+    c.pos = pos_;
+    c.valid = true;
+}
+
+void QwenModel::restore_device(const DeviceCheckpoint& c) {
+    if (!c.valid || c.layer_pos.size() != states_.size()) throw std::invalid_argument("device checkpoint does not match this model");
+    for (size_t i = 0; i < states_.size(); ++i) {
+        GpuLayerState& s = states_[i];
+        s.pos = c.layer_pos[i];   // attention layers: the K/V cache simply rewinds to this length
+        if (s.kind != LayerKind::DeltaNet) continue;
+        cuda_check(cudaMemcpyAsync(s.conv_state.p, c.conv[i].p, s.conv_state.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "restore conv");
+        cuda_check(cudaMemcpyAsync(s.S.p, c.S[i].p, s.S.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "restore S");
+    }
+    cuda_check(cudaStreamSynchronize(0), "restore");
+    pos_ = c.pos;
+    cpu_current_ = false;   // the GPU copy is the restored one (the hosted layers' CPU copy is refreshed on the next CPU step)
+    images_.erase(std::remove_if(images_.begin(), images_.end(), [&](const ImageSpan& sp) { return sp.start >= pos_; }), images_.end());
+}
+
+void QwenModel::reset() {
+    for (GpuLayerState& s : states_) {
+        s.pos = 0;
+        if (s.kind != LayerKind::DeltaNet) continue;
+        cuda_check(cudaMemsetAsync(s.conv_state.p, 0, s.conv_state.n * sizeof(float), 0), "reset conv");
+        cuda_check(cudaMemsetAsync(s.S.p, 0, s.S.n * sizeof(float), 0), "reset S");
+    }
+    cuda_check(cudaStreamSynchronize(0), "reset");
+    for (size_t i = 0; i < cpu_s_.size(); ++i) {   // hosted layers decoded on the CPU: their host state restarts too
+        std::fill(cpu_s_[i].conv.begin(), cpu_s_[i].conv.end(), 0.0f);
+        std::fill(cpu_s_[i].S.begin(), cpu_s_[i].S.end(), 0.0f);
+    }
+    pos_ = 0;
+    cpu_current_ = false;
+    images_.clear();
+}
+
 void QwenModel::snapshot() {
     // CPU decode mode: the verification step runs the hosted layers on the CPU, so their snapshot lives in host RAM
     const bool cpu_side = cpu_ != nullptr && !cpu_s_.empty();
