@@ -1,4 +1,4 @@
-﻿// `dara serve`: an HTTP server around one loaded model (OpenAI-compatible chat / completions API) plus Dara's own development endpoints.
+// `dara serve`: an HTTP server around one loaded model (OpenAI-compatible chat / completions API) plus Dara's own development endpoints.
 //
 //   GET  /health                 liveness + model id
 //   GET  /v1/models              the loaded model
@@ -452,6 +452,7 @@ int dara_serve_main(int argc, char** argv) {
         else if (a == "--flash-min-p") reg.base.flash_min_p = static_cast<float>(std::atof(next().c_str()));
         else if (a == "--kv" || a == "--ctx") { const std::string v = next(); reg.base.kv = v == "auto" ? 0 : static_cast<size_t>(std::atoll(v.c_str())); }
         else if (a == "--min-context") reg.base.min_context = static_cast<size_t>(std::atoll(next().c_str()));
+        else if (a == "--vram-reserve") reg.base.vram_reserve_mb = static_cast<size_t>(std::atoll(next().c_str()));
         else if (a == "--image-max-tokens") reg.base.image_max_tokens = std::atoi(next().c_str());
         else if (a == "--compact-reserve") reg.base.compact_reserve = std::atoi(next().c_str());
         else if (a == "--max-tokens") default_max = std::atoi(next().c_str());
