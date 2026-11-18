@@ -46,7 +46,7 @@ struct QwenConfig {
 struct ResidencyOptions {
     int max_chunk_tokens = 64;      // prefill is processed in chunks of at most this many tokens (bounds the workspace)
     int force_resident_layers = -1; // -1: let the planner decide; otherwise exactly this many layers (prefix) live in VRAM
-    size_t safety_bytes = 0;        // extra VRAM kept free; 0 = max(256 MiB, 1/16 of total)
+    size_t safety_bytes = 0;        // extra VRAM kept free; 0 = the default (Qwen: max(128 MiB, 1/32 of total); Gemma: max(256 MiB, 1/16 of total))
     KvFormat kv_format = KvFormat::F32;  // KV cache format of the attention layers (F32 reference or 4-bit TurboQuant)
     // Memory the caller will allocate on the GPU after the model (e.g. the Flash drafter): a fixed part and a part per context
     // position. Counted by the placement planner, so the model leaves room for it.

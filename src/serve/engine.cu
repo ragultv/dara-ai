@@ -884,6 +884,7 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
     dara::model::ResidencyOptions ropt;
     ropt.kv_format = dara::model::KvFormat::Q8;
     ropt.auto_min_context = o.min_context;
+    ropt.safety_bytes = o.vram_reserve_mb << 20;
     std::error_code ec;
     if (!o.mmproj.empty()) {   // the image encoder's weights and activations get VRAM when the context is sized
         const auto sz = std::filesystem::file_size(std::filesystem::u8path(o.mmproj), ec);

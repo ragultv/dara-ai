@@ -211,7 +211,8 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     const size_t workspace = C * (10 * static_cast<size_t>(cfg_.hidden) + 3 * static_cast<size_t>(max_inter) + 3 * static_cast<size_t>(max_qw) +
                                   3 * pli_floats_per_token + 4 * static_cast<size_t>(cfg_.per_layer_dim)) * sizeof(float) + 32 * kMiB +
                                  static_cast<size_t>(kGemmaMaxContext) * sizeof(float) * 0;
-    const size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(256 * kMiB, total_b / 16);
+    size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(256 * kMiB, total_b / 16);
+    if (const char* e = std::getenv("DARA_VRAM_SAFETY_MB")) safety = static_cast<size_t>(std::atoll(e)) * kMiB;   // tuning / experiments (as the Qwen backend)
     const bool auto_ctx = kv_capacity == 0;
     const AttnFmt afmt = opt.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
     // VRAM that grows with the context outside the K/V caches: the caller's per-position extra (drafter K/V) and, in auto mode, the

@@ -121,6 +121,7 @@ struct EngineOptions {
     std::string id;                         // model id reported by the API (default: the file name)
     size_t kv = 0;                          // 0: auto
     size_t min_context = 32768;
+    size_t vram_reserve_mb = 0;             // VRAM the planner leaves free (0: the model's default; DARA_VRAM_SAFETY_MB overrides)
     int image_max_tokens = 400;             // Qwen image token cap (Gemma: at most 280 by the model)
     int compact_reserve = 256;              // tokens kept free after max_tokens before compacting
     std::string flash = "auto";             // drafter file, "auto" (the bundled drafter for this model, if found) or "" (off)
