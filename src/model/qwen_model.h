@@ -127,6 +127,26 @@ public:
     };
     Checkpoint checkpoint() const;           // copies DeltaNet states, records KV lengths
     void restore(const Checkpoint& c);       // rewinds the whole model to the checkpoint
+    // The same, kept in VRAM (device-to-device copies of the DeltaNet states; buffers reused between saves): the prompt cache of `dara serve`
+    // saves one after each prompt and resumes from it when the next request extends that prompt. No host RAM.
+    struct DeviceCheckpoint {
+        std::vector<DevBuf<float>> conv, S;
+        std::vector<size_t> layer_pos;
+        size_t pos = 0;
+        bool valid = false;
+    };
+    void save_device(DeviceCheckpoint& c);
+    void restore_device(const DeviceCheckpoint& c);
+    void reset();   // back to an empty sequence (position 0, zero recurrent states, no images)
+    // VRAM of one DeviceCheckpoint (the DeltaNet states), for callers that reserve it before the model sizes its context
+    static size_t device_checkpoint_bytes(const QwenConfig& cfg) {
+        size_t n = 0;
+        for (LayerKind k : cfg.kinds)
+            if (k == LayerKind::DeltaNet)
+                n += (static_cast<size_t>(cfg.k_heads) * cfg.k_dim * 2 + static_cast<size_t>(cfg.v_heads) * cfg.v_dim) * (cfg.conv_kernel - 1) +
+                     static_cast<size_t>(cfg.v_heads) * cfg.k_dim * cfg.v_dim;
+        return n * sizeof(float);
+    }
     // Fast in-VRAM variant for speculative decoding: snapshot() copies DeltaNet states device-to-device (no host traffic) and
     // records KV lengths; rollback() returns the model to exactly that point. One snapshot is kept; allocated on first use.
     // The forward() right after snapshot() (at most kMaxSpecTokens tokens) also records each DeltaNet layer's recurrence inputs, so

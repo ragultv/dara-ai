@@ -62,8 +62,39 @@ RgbImage load_image_rgb(const std::string& path) {
     }
     return img;
 }
+
+RgbImage load_image_rgb_from_memory(const uint8_t* data, size_t size) {
+    const std::string what = "image data (" + std::to_string(size) + " bytes)";
+    if (!data || size == 0 || size > (512u << 20)) throw std::runtime_error("empty or oversized " + what);
+    const HRESULT ci = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool uninit = SUCCEEDED(ci);
+    struct Uninit { bool on; ~Uninit() { if (on) CoUninitialize(); } } guard{uninit};
+    RgbImage img;
+    {
+        Com<IWICImagingFactory> factory;
+        hr_check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)), "WIC factory", what);
+        Com<IWICStream> stream;
+        hr_check(factory->CreateStream(&stream), "stream", what);
+        hr_check(stream->InitializeFromMemory(const_cast<BYTE*>(data), static_cast<DWORD>(size)), "stream init", what);
+        Com<IWICBitmapDecoder> dec;
+        hr_check(factory->CreateDecoderFromStream(stream.p, nullptr, WICDecodeMetadataCacheOnDemand, &dec), "open", what);
+        Com<IWICBitmapFrameDecode> frame;
+        hr_check(dec->GetFrame(0, &frame), "decode", what);
+        Com<IWICBitmapSource> rgb;
+        hr_check(WICConvertBitmapSource(GUID_WICPixelFormat24bppRGB, frame.p, &rgb), "convert to RGB", what);
+        UINT w = 0, h = 0;
+        hr_check(rgb->GetSize(&w, &h), "size", what);
+        if (w == 0 || h == 0 || w > 32768 || h > 32768) throw std::runtime_error("image has unsupported dimensions: " + what);
+        img.width = static_cast<int>(w);
+        img.height = static_cast<int>(h);
+        img.px.resize(static_cast<size_t>(w) * h * 3);
+        hr_check(rgb->CopyPixels(nullptr, w * 3, static_cast<UINT>(img.px.size()), img.px.data()), "copy pixels", what);
+    }
+    return img;
+}
 #else
 RgbImage load_image_rgb(const std::string& path) { throw std::runtime_error("image decoding is only implemented on Windows: " + path); }
+RgbImage load_image_rgb_from_memory(const uint8_t*, size_t) { throw std::runtime_error("image decoding is only implemented on Windows"); }
 #endif
 
 namespace {
