@@ -20,10 +20,13 @@ int dara_qwen_main(int argc, char** argv);
 int dara_nano_main(int argc, char** argv);
 int dara_probe_main();   // tests/bw_probe.cu: GPU memory-bandwidth probe (dara --probe)
 int dara_serve_main(int argc, char** argv);   // src/serve/server.cpp: dara serve --model <gguf> (HTTP API)
+int dara_models_main(int argc, char** argv);  // src/serve/server.cpp: dara pull / list / rm
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--probe") == 0) return dara_probe_main();   // memory-bandwidth ceiling of this GPU
     if (argc >= 2 && std::strcmp(argv[1], "serve") == 0) return dara_serve_main(argc - 1, argv + 1);
+    if (argc >= 2 && (std::strcmp(argv[1], "pull") == 0 || std::strcmp(argv[1], "list") == 0 || std::strcmp(argv[1], "rm") == 0))
+        return dara_models_main(argc - 1, argv + 1);
     std::string gguf;
     bool info = false;
     for (int i = 1; i < argc; ++i) {
@@ -37,7 +40,8 @@ int main(int argc, char** argv) {
                      "  all options of the matching driver apply (--prompt, --prompt-file, --new, --flash, --spec, ...)\n"
                      "  dara --info --gguf <model.gguf> prints the detected architecture\n"
                      "  dara --probe measures this GPU's memory bandwidth (the ceiling for decode speed)\n"
-                     "  dara serve --model <model.gguf> [--port 11435] runs the HTTP server (OpenAI-compatible API, /dara/stats)\n");
+                     "  dara serve [--model <id or model.gguf>] [--port 11435] runs the HTTP server (OpenAI-compatible API, /dara/stats)\n"
+                     "  dara pull <dara-nano|dara-core-4b|dara-pro-9b>, dara list, dara rm <id> manage downloaded models\n");
         return 2;
     }
     std::string arch;
