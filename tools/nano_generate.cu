@@ -94,7 +94,9 @@ int main(int argc, char** argv) {
         return 2;
     }
     try {
+        dara::core::memtrace("start");
         dara::io::GgufCheckpoint gguf(gguf_path);
+        dara::core::memtrace("gguf header parsed");
         std::unique_ptr<GemmaTokenizer> tokenizer;
         try { tokenizer = std::make_unique<GemmaTokenizer>(GemmaTokenizer::from_gguf(gguf.header())); }
         catch (const std::exception& e) { if (text_mode) throw; std::fprintf(stderr, "note: no text output (%s)\n", e.what()); }
@@ -173,7 +175,10 @@ int main(int argc, char** argv) {
         if (!flash_path.empty()) {   // leave room for the drafter (loaded after the model): its weights and its K/V per context position
             FlashDrafter::vram_estimate(flash_path, gguf, ropt.extra_vram_bytes, ropt.extra_bytes_per_token);
         }
+        gguf.release_string_arrays();   // the tokenizer holds its own copy of the vocabulary and merges
+        dara::core::memtrace("tokenizer + prompt ready");
         GemmaModel model(gguf, kv, ropt);
+        dara::core::memtrace("model loaded");
         if (kv == 0) std::printf("context: %zu tokens (auto: the most that keeps the model in VRAM)\n", model.kv_capacity());
         kv = model.kv_capacity();
         const GemmaConfig& cfg = model.config();
@@ -384,6 +389,7 @@ int main(int argc, char** argv) {
         const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_dec0).count();
         if (stream) { const std::string tail = stream->flush(); generated_text += tail; if (text_mode && !tail.empty()) std::fwrite(tail.data(), 1, tail.size(), stdout); }
         if (text_mode) std::printf("\n--- end (%s) ---\n", hit_eos ? "stopped at end-of-sequence" : "token limit");
+        dara::core::memtrace("after generation");
 
         if (tokenizer && text_mode) { std::ofstream f(out + ".text.txt", std::ios::binary); f << prompt_text << generated_text; }
         { std::ofstream f(out + ".tokens.txt"); for (size_t i = 0; i < seq.size(); ++i) f << seq[i] << (i + 1 < seq.size() ? " " : "\n"); }

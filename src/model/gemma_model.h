@@ -127,6 +127,8 @@ private:
     ScratchPool pool_;
     std::vector<uint8_t> embd_;        // token_embd (Q4_K etc.) in host RAM for row gathers
     std::vector<uint8_t> pli_table_;   // per_layer_token_embd in host RAM (empty if it did not fit: rows are then read on demand)
+    const uint8_t* embd_p_ = nullptr;  // token_embd rows: the memory-mapped GGUF (or embd_ with DARA_EMBD_RAM=1)
+    const uint8_t* pli_p_ = nullptr;   // per_layer_token_embd rows: mapped (or pli_table_); null: read_rows from the file
     uint32_t embd_type_ = 0, pli_type_ = 0;
     int resident_ = 0;
     size_t pos_ = 0;

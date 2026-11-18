@@ -242,9 +242,11 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     const auto sys = dara::core::query_system_memory();
     const size_t ram_margin = 1536 * kMiB;
     // The per-layer embedding table lives in host RAM when it fits next to the margin; otherwise its rows are read from the file.
-    const bool table_in_ram = sys.available_bytes > ram_margin + pli_table_bytes + 2 * head_bytes;
+    // Embedding tables: rows read from the memory-mapped GGUF (file-backed, no private copy) unless DARA_EMBD_RAM=1 (old full copies in host RAM).
+    static const bool embd_ram = [] { const char* e = std::getenv("DARA_EMBD_RAM"); return e && e[0] == '1'; }();
+    const bool table_in_ram = embd_ram && sys.available_bytes > ram_margin + pli_table_bytes + 2 * head_bytes;
     const size_t ram_for_layers_base = sys.available_bytes > ram_margin ? sys.available_bytes - ram_margin : 0;
-    const size_t reserved_host = (table_in_ram ? pli_table_bytes : 0) + head_bytes;  // token_embd copy for row gathers
+    const size_t reserved_host = embd_ram ? (table_in_ram ? pli_table_bytes : 0) + head_bytes : 0;  // copies for row gathers (none when mapped)
     auto make_plan = [&](size_t ctx, size_t& staging_out) {
         dara::core::PlacementRequest req;
         req.model = man;
@@ -388,9 +390,11 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
 
     // host-side embedding tables, read once now (cold load), not on the first token
     embd_type_ = g.info("token_embd.weight").type;
-    embd_ = g.read("token_embd.weight");
+    if (embd_ram) { embd_ = g.read("token_embd.weight"); embd_p_ = embd_.data(); }
+    else embd_p_ = g.map("token_embd.weight");
     pli_type_ = g.info("per_layer_token_embd.weight").type;
-    if (table_in_ram) pli_table_ = g.read("per_layer_token_embd.weight");
+    if (table_in_ram) { pli_table_ = g.read("per_layer_token_embd.weight"); pli_p_ = pli_table_.data(); }
+    else if (!embd_ram) pli_p_ = g.map("per_layer_token_embd.weight");
 
     report_.resident_layers = resident_;
     report_.hosted_layers = L - resident_;
@@ -713,7 +717,7 @@ std::vector<float> GemmaModel::embed_row_raw(int32_t token) const {
     const auto& ef = dara::kernels::quant_format(qtype_of(embd_type_, "token_embd.weight"));
     const size_t eb = static_cast<size_t>(cfg_.hidden) / ef.block_weights;
     std::vector<float> e(static_cast<size_t>(cfg_.hidden));
-    ef.dequant_f32(embd_.data() + static_cast<size_t>(token) * eb * ef.block_bytes, eb, e.data());
+    ef.dequant_f32(embd_p_ + static_cast<size_t>(token) * eb * ef.block_bytes, eb, e.data());
     return e;
 }
 
@@ -758,7 +762,7 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
         // Prompt chunks: tokens are independent, so the dequantisation (~8960 + 1536 values per token from host RAM) is split across CPU threads. Each token's
         // rows are computed exactly as in the serial loop, so the result is identical. The streamed-table path (read_rows) stays serial.
         const unsigned hw = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
-        if (!pli_table_.empty() && T >= 32 && hw > 1) {
+        if (pli_p_ && T >= 32 && hw > 1) {
             std::vector<std::thread> pool;
             const int per = (T + static_cast<int>(hw) - 1) / static_cast<int>(hw);
             for (unsigned w = 0; w < hw; ++w) {
@@ -767,10 +771,10 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
                 pool.emplace_back([&, a, b] {
                     for (int t = a; t < b; ++t) {
                         float* e = &emb[static_cast<size_t>(t) * H];
-                        ef.dequant_f32(embd_.data() + static_cast<size_t>(tokens[t]) * eb * ef.block_bytes, eb, e);
+                        ef.dequant_f32(embd_p_ + static_cast<size_t>(tokens[t]) * eb * ef.block_bytes, eb, e);
                         for (int i = 0; i < H; ++i) e[i] *= es;
                         float* pt = &pli_tok[static_cast<size_t>(t) * PL];
-                        pf.dequant_f32(pli_table_.data() + static_cast<size_t>(tokens[t]) * pb * pf.block_bytes, pb, pt);
+                        pf.dequant_f32(pli_p_ + static_cast<size_t>(tokens[t]) * pb * pf.block_bytes, pb, pt);
                         for (size_t i = 0; i < PL; ++i) pt[i] *= ps;
                     }
                 });
@@ -780,11 +784,11 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
         std::vector<uint8_t> row;
         for (int t = 0; t < T; ++t) {
             float* e = &emb[static_cast<size_t>(t) * H];
-            ef.dequant_f32(embd_.data() + static_cast<size_t>(tokens[t]) * eb * ef.block_bytes, eb, e);
+            ef.dequant_f32(embd_p_ + static_cast<size_t>(tokens[t]) * eb * ef.block_bytes, eb, e);
             for (int i = 0; i < H; ++i) e[i] *= es;
             float* pt = &pli_tok[static_cast<size_t>(t) * PL];
-            if (!pli_table_.empty()) {
-                pf.dequant_f32(pli_table_.data() + static_cast<size_t>(tokens[t]) * pb * pf.block_bytes, pb, pt);
+            if (pli_p_) {
+                pf.dequant_f32(pli_p_ + static_cast<size_t>(tokens[t]) * pb * pf.block_bytes, pb, pt);
             } else {
                 row = g_.read_rows("per_layer_token_embd.weight", static_cast<uint64_t>(tokens[t]), 1);
                 pf.dequant_f32(row.data(), pb, pt);

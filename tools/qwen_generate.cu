@@ -94,7 +94,9 @@ int main(int argc, char** argv) {
 
     try {
         // GGUF is the only supported model format: weights, configuration AND tokenizer all come from the .gguf file.
+        dara::core::memtrace("start");
         dara::io::GgufCheckpoint gguf(gguf_path);
+        dara::core::memtrace("gguf header parsed");
         const QwenConfig cfg = QwenConfig::from_gguf(gguf);
         std::unique_ptr<dara::tokenizer::Tokenizer> tokenizer;
         try { tokenizer = std::make_unique<dara::tokenizer::Tokenizer>(dara::tokenizer::Tokenizer::from_gguf(gguf.header())); }
@@ -167,7 +169,10 @@ int main(int argc, char** argv) {
         if (!flash_path.empty()) {   // leave room for the drafter (loaded after the model): its weights and its K/V per context position
             FlashDrafter::vram_estimate(flash_path, gguf, ropt.extra_vram_bytes, ropt.extra_bytes_per_token);
         }
+        gguf.release_string_arrays();   // the tokenizer holds its own copy of the vocabulary and merges
+        dara::core::memtrace("tokenizer + prompt ready");
         QwenModel model(cfg, *weights, kv, ropt);  // cold load: disk -> host images -> VRAM slabs, once
+        dara::core::memtrace("model loaded");
         if (kv == 0) std::printf("context: %zu tokens (auto: the most that keeps the model in VRAM)\n", model.kv_capacity());
         kv = model.kv_capacity();
         if (!images.empty()) {   // each run of <|image_pad|> takes one image's tokens (embeddings + 3D rotary positions)
@@ -381,6 +386,7 @@ int main(int argc, char** argv) {
         const long dec_tokens = static_cast<long>(seq.size() - prompt.size()) - 1;  // the first token came from the prefill
         if (stream) { const std::string tail = stream->flush(); generated_text += tail; if (text_mode && !tail.empty()) std::fwrite(tail.data(), 1, tail.size(), stdout); }
         if (text_mode) std::printf("\n--- end (%s) ---\n", hit_eos ? "stopped at end-of-sequence" : "token limit");
+        dara::core::memtrace("after generation");
         n_new = static_cast<int>(seq.size() - prompt.size());  // tokens actually generated
         if (tokenizer) { std::ofstream f(out + ".text.txt", std::ios::binary); f << prompt_text << generated_text; }
 
