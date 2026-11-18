@@ -106,6 +106,9 @@ private:
         DevBuf<float> K, V;            // KvFormat::F32:  [capacity][kv_heads*head_dim]
         DevBuf<uint8_t> Kq, Vq;        // KvFormat::TQ4:  packed codes [capacity][kv_heads][head_dim/2]
         DevBuf<float> Kn, Vn;          //                 and norms [capacity][kv_heads]
+        DevBuf<uint8_t> Kr;            // KvFormat::Q4:   key ring (kv4.h)
+        DevBuf<float> Krs;
+        KvBuffers bufs() { return {&K, &V, &Kq, &Vq, &Kn, &Vn, &Kr, &Krs}; }
     };
 
     void start_copy(int layer);

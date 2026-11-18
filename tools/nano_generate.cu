@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
         else if (a == "--ngram-min") ngram_min = std::atoi(next().c_str());
         else if (a == "--chunk") chunk_tokens = std::atoi(next().c_str());   // prefill chunk size (default: the model's, 64)
         else if (a == "--min-context") min_context = static_cast<size_t>(std::atoll(next().c_str()));   // auto context floor (default 32768; 0 = fully-resident size)
-        else if (a == "--kv-mode") { const std::string m = next(); if (m == "tq4") kv_format = KvFormat::TQ4; else if (m == "q8") kv_format = KvFormat::Q8; else if (m == "k16v8") kv_format = KvFormat::K16V8; else if (m == "f32") kv_format = KvFormat::F32; else { std::fprintf(stderr, "--kv-mode must be f32, q8 or tq4\n"); return 2; } }
+        else if (a == "--kv-mode") { const std::string m = next(); if (m == "tq4") kv_format = KvFormat::TQ4; else if (m == "q8") kv_format = KvFormat::Q8; else if (m == "k16v8") kv_format = KvFormat::K16V8; else if (m == "f32") kv_format = KvFormat::F32; else if (m == "k8v4") kv_format = KvFormat::K8V4; else if (m == "q4") kv_format = KvFormat::Q4; else { std::fprintf(stderr, "--kv-mode must be q8, k8v4, q4, tq4, k16v8 or f32\n"); return 2; } }
         else if (a == "--teacher") teacher_file = next();   // teacher forcing: feed the continuation of this reference tokens file instead of our own argmax
         else if (a == "--logits-last") logits_last = std::atoi(next().c_str());
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }

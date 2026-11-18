@@ -37,6 +37,7 @@ struct SampleParams {
     uint64_t seed = 0;               // 0: random
     std::vector<std::string> stop;   // stop strings (not included in the output)
     int flash = -1;                  // speculative decoding for this request: -1 auto (on when available), 0 off, 1 on (reported if unavailable)
+    bool cache_write = true;         // false: read the prompt cache but keep the saved prefix (a side question does not displace the conversation)
 };
 
 struct Usage {
@@ -92,7 +93,7 @@ struct ModelInfo {
     int layers = 0, layers_gpu = 0, hidden = 0, vocab = 0;
     bool head_on_cpu = false;
     size_t context_capacity = 0, native_context = 0;
-    std::string kv_format;
+    std::string kv_format;           // K/V cache format in use
     double load_seconds = 0;
     bool vision = false;
     int image_max_tokens = 0;
@@ -121,7 +122,8 @@ struct EngineOptions {
     std::string id;                         // model id reported by the API (default: the file name)
     size_t kv = 0;                          // 0: auto
     size_t min_context = 32768;
-    size_t vram_reserve_mb = 0;             // VRAM the planner leaves free (0: the model's default; DARA_VRAM_SAFETY_MB overrides)
+    size_t vram_reserve_mb = 0;
+    std::string kv_format = "q8";              // K/V cache: q8 (int8), k8v4, q4, tq4, k16v8             // VRAM the planner leaves free (0: the model's default; DARA_VRAM_SAFETY_MB overrides)
     int image_max_tokens = 400;             // Qwen image token cap (Gemma: at most 280 by the model)
     int compact_reserve = 256;              // tokens kept free after max_tokens before compacting
     std::string flash = "auto";             // drafter file, "auto" (the bundled drafter for this model, if found) or "" (off)

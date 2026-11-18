@@ -23,8 +23,19 @@ MODELS = {
     "nano": dict(exe="nano_generate.exe", gguf=os.path.join(ROOT, "models", "gemma4-e2b-gguf", "gemma-4-E2B-it-Q4_K_M.gguf"), vocab=262144, extra=["--no-layers"],
                  long=os.path.join(ROOT, "build", "bench", "prompt1500_gemma.tokens.txt")),
 }
-WORKLOADS = ["english", "tamil", "code", "structured", "long1500"]   # also available: long8k (build/bench/quality/long8k.txt, ~8K tokens)
-ALL_VARIANTS = {"int8_f32kv": ("1", "f32"), "fp32_q8kv": ("0", "q8"), "int8_q8kv": ("1", "q8"), "int8_k16v8kv": ("1", "k16v8"), "fp32_tq4kv": ("0", "tq4"), "int8_tq4kv": ("1", "tq4")}
+WORKLOADS = ["english", "code", "structured", "long1500", "long8k"]   # also available: tamil (multilingual; not in Dara's target usage)
+ALL_VARIANTS = {"int8_f32kv": ("1", "f32"), "fp32_q8kv": ("0", "q8"), "int8_q8kv": ("1", "q8"), "int8_k16v8kv": ("1", "k16v8"), "fp32_tq4kv": ("0", "tq4"), "int8_tq4kv": ("1", "tq4"),
+                "int8_k8v4kv": ("1", "k8v4"), "int8_q4kv": ("1", "q4")}
+
+
+def label(res):
+    """User-facing quality label of one workload result. Disagreements where the FP32 reference itself was nearly undecided (top-2 logit margin < 0.5)
+    are not counted as errors -- on long prompts even the int8 default has several -- so the grade is clear errors per 128 positions plus the mean KL
+    divergence from the reference."""
+    clear = (res["positions"] - res["top1"] - res["near_tie_flips"]) * 128.0 / max(1, res["positions"])
+    if clear <= 2 and res["kl_mean"] <= 0.015: return "high"
+    if clear <= 6 and res["kl_mean"] <= 0.05: return "medium"
+    return "lower"
 
 
 def run(model, workload, tag, int8, kv_mode, n_new, teacher=None):
@@ -69,21 +80,35 @@ def main():
     ap.add_argument("--workloads", nargs="+", default=WORKLOADS)
     ap.add_argument("--new", type=int, default=128)
     ap.add_argument("--variants", nargs="+", default=list(ALL_VARIANTS))
+    ap.add_argument("--results", default="results.json", help="file name under build/bench/quality")
     a = ap.parse_args()
     results = {}
     for model in a.models:
         V = MODELS[model]["vocab"]
         for w in a.workloads:
-            ref = run(model, w, "ref", "0", "f32", a.new)
+            try:
+                ref = run(model, w, "ref", "0", "f32", a.new)
+            except Exception as e:  # noqa: BLE001  record and continue (e.g. a reference that does not fit this GPU)
+                print(f"{model:4s} {w:10s} reference FAILED: {str(e).splitlines()[0]}", flush=True)
+                results[f"{model}/{w}/ref"] = {"error": str(e)[-500:]}
+                continue
             for tag in a.variants:
                 int8, kv = ALL_VARIANTS[tag]
-                test = run(model, w, tag, int8, kv, a.new, teacher=ref + ".tokens.txt")
+                try:
+                    test = run(model, w, tag, int8, kv, a.new, teacher=ref + ".tokens.txt")
+                except Exception as e:  # noqa: BLE001
+                    print(f"{model:4s} {w:10s} {tag:11s} FAILED: {str(e).splitlines()[0]}", flush=True)
+                    results[f"{model}/{w}/{tag}"] = {"error": str(e)[-500:]}
+                    continue
                 res = compare(ref, test, V)
+                res["label"] = label(res)
                 results[f"{model}/{w}/{tag}"] = res
                 print(f"{model:4s} {w:10s} {tag:11s} top-1 {res['top1']:3d}/{res['positions']} (near-tie flips {res['near_tie_flips']})  "
-                      f"KL mean {res['kl_mean']:.5f} p99 {res['kl_p99']:.5f} max {res['kl_max']:.5f}", flush=True)
+                      f"KL mean {res['kl_mean']:.5f} p99 {res['kl_p99']:.5f} max {res['kl_max']:.5f}  [{res['label']}]", flush=True)
                 os.remove(test + ".logits.bin")
-    with open(os.path.join(Q, "results.json"), "w") as f:
+            with open(os.path.join(Q, a.results), "w") as f:   # after every workload: a long run keeps what it has
+                json.dump(results, f, indent=1)
+    with open(os.path.join(Q, a.results), "w") as f:
         json.dump(results, f, indent=1)
 
 

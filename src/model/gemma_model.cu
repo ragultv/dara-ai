@@ -180,8 +180,8 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     // Longest context: the model's native one, except where a kernel keeps one score per position in shared memory (the TurboQuant
     // and FP32 reference attention kernels). The default split-KV / prefill attention path has no such bound.
     size_t max_ctx = cfg_.context_length ? cfg_.context_length : static_cast<size_t>(kGemmaMaxContext);
-    if (opt.kv_format == KvFormat::TQ4) max_ctx = std::min(max_ctx, static_cast<size_t>(kTqMaxPositions));
-    else if (!kv_q8_values(opt.kv_format) && attention_reference_mode()) max_ctx = std::min(max_ctx, static_cast<size_t>(kGemmaMaxContext));
+    if (opt.kv_format == KvFormat::TQ4 && attention_reference_mode()) max_ctx = std::min(max_ctx, static_cast<size_t>(kTqMaxPositions));   // split-KV: no bound
+    else if (opt.kv_format == KvFormat::F32 && attention_reference_mode()) max_ctx = std::min(max_ctx, static_cast<size_t>(kGemmaMaxContext));
     if (kv_capacity > max_ctx) throw std::invalid_argument("kv_capacity " + std::to_string(kv_capacity) + " is above this configuration's maximum context " + std::to_string(max_ctx));
     cuda_check(int8_init(), "int8_init");
     cuda_check(tq_init(), "tq_init");  // codebook (also read by the split-KV TurboQuant kernels)
@@ -198,6 +198,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
         mat_bytes[l] = off;
         max_layer = std::max(max_layer, off);
         if (cfg_.owns_kv(l)) kv_per_token += 2 * static_cast<size_t>(cfg_.kv_heads) * kv_bytes_per_head_vector(opt.kv_format, cfg_.head_dim(l));
+        if (cfg_.owns_kv(l) && opt.kv_format == KvFormat::Q4) small_bytes += kivi_ring_bytes(static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim(l));
         // norms, rope table, two small BF16 matrices
         small_bytes += (5 * static_cast<size_t>(cfg_.hidden) + 2 * cfg_.head_dim(l) + cfg_.head_dim(l) / 2) * sizeof(float) +
                        2 * static_cast<size_t>(cfg_.hidden) * cfg_.per_layer_dim * 2;
@@ -214,7 +215,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(256 * kMiB, total_b / 16);
     if (const char* e = std::getenv("DARA_VRAM_SAFETY_MB")) safety = static_cast<size_t>(std::atoll(e)) * kMiB;   // tuning / experiments (as the Qwen backend)
     const bool auto_ctx = kv_capacity == 0;
-    const AttnFmt afmt = opt.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
+    const AttnFmt afmt = attn_fmt(opt.kv_format);
     // VRAM that grows with the context outside the K/V caches: the caller's per-position extra (drafter K/V) and, in auto mode, the
     // scratch the pool grows into at long contexts (prefill attention scores of the global layers, split-KV partials).
     auto ctx_extra = [&](size_t ctx) -> size_t {
@@ -312,21 +313,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     kv_.resize(L);
     for (int l = 0; l < L; ++l)
         if (cfg_.owns_kv(l)) {
-            const size_t w = static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim(l);
-            if (opt.kv_format == KvFormat::K16V8) {
-                kv_[l].Kq = DevBuf<uint8_t>(kv_capacity * w * 2); kv_[l].Vq = DevBuf<uint8_t>(kv_capacity * w);
-                kv_[l].Vn = DevBuf<float>(kv_capacity * w / 32);
-            } else if (opt.kv_format == KvFormat::Q8) {
-                kv_[l].Kq = DevBuf<uint8_t>(kv_capacity * w); kv_[l].Vq = DevBuf<uint8_t>(kv_capacity * w);
-                kv_[l].Kn = DevBuf<float>(kv_capacity * w / 32); kv_[l].Vn = DevBuf<float>(kv_capacity * w / 32);
-            } else if (opt.kv_format == KvFormat::TQ4) {
-                const size_t codes = kv_capacity * static_cast<size_t>(cfg_.kv_heads) * (cfg_.head_dim(l) / 2), norms = kv_capacity * static_cast<size_t>(cfg_.kv_heads);
-                kv_[l].Kq = DevBuf<uint8_t>(codes); kv_[l].Vq = DevBuf<uint8_t>(codes);
-                kv_[l].Kn = DevBuf<float>(norms); kv_[l].Vn = DevBuf<float>(norms);
-            } else {
-                kv_[l].K = DevBuf<float>(kv_capacity * w);
-                kv_[l].V = DevBuf<float>(kv_capacity * w);
-            }
+            alloc_kv(kv_[l].bufs(), opt.kv_format, kv_capacity, cfg_.kv_heads, cfg_.head_dim(l));
         }
     head_ = upload_quant_raw(qtype_of(g.info("token_embd.weight").type, "token_embd.weight"), g.read("token_embd.weight").data(), static_cast<size_t>(cfg_.vocab), cfg_.hidden);
     const size_t PL = pli_floats_per_token;
@@ -464,7 +451,7 @@ void GemmaModel::reserve_pool() {
     pool_.get<float>(5, C * H); pool_.get<float>(6, C * max_inter); pool_.get<float>(7, C * max_inter); pool_.get<float>(8, C * H);
     pool_.get<float>(9, C * PD); pool_.get<float>(10, C * H); pool_.get<int64_t>(11, C);
     pool_.get<float>(12, C * max_kvw); pool_.get<float>(13, C * max_kvw);
-    pool_.get<float>(14, 8 * attn_splitkv_scratch_floats_per_token(opt_.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt_.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt_.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32, cfg_.heads, cfg_.head_dim_full, static_cast<int>(capacity_)));  // split-KV partials
+    pool_.get<float>(14, 8 * attn_splitkv_scratch_floats_per_token(attn_fmt(opt_.kv_format), cfg_.heads, cfg_.head_dim_full, static_cast<int>(capacity_)));  // split-KV partials
 }
 
 void GemmaModel::release_raw() {
@@ -482,6 +469,9 @@ GemmaModel::~GemmaModel() { release_raw(); }
 
 void GemmaModel::rewind(size_t pos) {
     if (pos > pos_) throw std::invalid_argument("cannot rewind forward");
+    if (opt_.kv_format == KvFormat::Q4)
+        for (int l = 0; l < cfg_.layers; ++l)
+            if (cfg_.owns_kv(l)) kv_rewound(opt_.kv_format, kv_[l].bufs(), 0, pos_, pos, graph_.stream());
     pos_ = pos;
 }
 
@@ -588,7 +578,14 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
         cuda_check(rmsnorm_cuda(k, s.k_norm.p, n * kvh, hd, c.eps, k, st), "k_norm");
         cuda_check(rope_cuda(k, n, kvh, hd, hd, dpos, s.inv_freq.p, st), "rope k");
         cuda_check(rmsnorm_cuda(v, ones_.p, n * kvh, hd, c.eps, v, st), "v_norm");  // parameter-free RMSNorm
-        if (kv_q8_values(opt_.kv_format)) {
+        if (kv_v4_values(opt_.kv_format)) {   // 4-bit values; keys Q8 (K8V4) or Q8 ring -> 4-bit groups (Q4)
+            if (opt_.kv_format == KvFormat::K8V4) cuda_check(q8kv_append_cuda(k, dpos, n, kvh, hd, kv_[l].Kq.p, kv_[l].Kn.p, st), "q8 append K");
+            else {
+                cuda_check(kivi_ring_append_cuda(k, dpos, n, kvh, hd, kv_[l].Kr.p, kv_[l].Krs.p, st), "q4 ring append K");
+                cuda_check(kivi_quantize_cuda(dpos, n, static_cast<int>(kvw), kv_[l].Kr.p, kv_[l].Krs.p, kv_[l].Kq.p, kv_[l].Kn.p, st), "q4 quantize K");
+            }
+            cuda_check(v4_append_cuda(v, dpos, n, kvh, hd, kv_[l].Vq.p, kv_[l].Vn.p, st), "v4 append V");
+        } else if (kv_q8_values(opt_.kv_format)) {
             if (opt_.kv_format == KvFormat::K16V8) cuda_check(f16kv_append_cuda(k, dpos, n, kvh, hd, kv_[l].Kq.p, st), "f16 append K");
             else cuda_check(q8kv_append_cuda(k, dpos, n, kvh, hd, kv_[l].Kq.p, kv_[l].Kn.p, st), "q8 append K");
             cuda_check(q8kv_append_cuda(v, dpos, n, kvh, hd, kv_[l].Vq.p, kv_[l].Vn.p, st), "q8 append V");
@@ -601,7 +598,7 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
         }
         PM("kv append / v norm");
     }
-    if (attention_reference_mode() && !kv_q8_values(opt_.kv_format)) {   // (INT8 KV has no reference kernel: always split-KV)
+    if (attention_reference_mode() && (opt_.kv_format == KvFormat::F32 || opt_.kv_format == KvFormat::TQ4)) {   // (quantized formats have no reference kernel)
         if (opt_.kv_format == KvFormat::TQ4)
             cuda_check(tq_attention_cuda(q, nullptr, kv_[src].Kq.p, kv_[src].Kn.p, kv_[src].Vq.p, kv_[src].Vn.p, dpos, n, heads, kvh, hd, win, 1.0f, smem_positions, att, st), "tq attention");
         else
@@ -609,10 +606,17 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
     } else {
         // positions any token can attend to: window-bounded for sliding layers; fixed by the capacity for the decode step (a graph cannot change the grid)
         const int maxpos = use_dev_pos ? (win > 0 ? std::min(win, cap) : cap) : (win > 0 ? std::min(win, static_cast<int>(pos0) + n) : static_cast<int>(pos0) + n);
-        const AttnFmt afmt = opt_.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt_.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt_.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
+        const AttnFmt afmt = attn_fmt(opt_.kv_format);
         const size_t per = attn_splitkv_scratch_floats_per_token(afmt, heads, hd, maxpos);
         // decode (n == 1) uses the slot sized at construction; prefill batches up to 64 tokens per launch (the slot grows outside any graph capture)
         const size_t floats = per * static_cast<size_t>(std::min(n, 8));
+        KvAux aux;
+        if (afmt == AttnFmt::Q4) {
+            aux.ring = reinterpret_cast<const int8_t*>(kv_[src].Kr.p);
+            aux.ring_sc = kv_[src].Krs.p;
+            aux.pend = dpos + (n - 1);
+            aux.kv_width = kvh * hd;
+        }
         if (afmt != AttnFmt::TQ4 && n >= kPrefillAttnMinTokens && !use_dev_pos) {
             // prefill chunk on an FP32 or INT8 cache: GEMM -> masked softmax -> GEMM (K/V tiles reused across 64 query rows)
             const size_t pf = attn_prefill_scratch_floats(n, static_cast<int>(pos0), win, heads, kvh);
@@ -620,12 +624,12 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
             const bool q8 = afmt != AttnFmt::F32;   // K/V in Kq/Vq (Q8 or K16V8)
             cuda_check(attn_prefill_cuda(afmt, q, nullptr, q8 ? static_cast<const void*>(kv_[src].Kq.p) : kv_[src].K.p, q8 ? kv_[src].Kn.p : nullptr,
                                          q8 ? static_cast<const void*>(kv_[src].Vq.p) : kv_[src].V.p, q8 ? kv_[src].Vn.p : nullptr, n, static_cast<int>(pos0), heads, kvh,
-                                         hd, win, 1.0f, ps, pf, att, st),
+                                         hd, win, 1.0f, ps, pf, att, st, aux),
                        "prefill attention");
         } else {
         float* scr = pool_.get<float>(14, floats);
         cuda_check(afmt != AttnFmt::F32
-                       ? attn_splitkv_cuda(afmt, q, nullptr, kv_[src].Kq.p, kv_[src].Kn.p, kv_[src].Vq.p, kv_[src].Vn.p, dpos, n, heads, kvh, hd, win, 1.0f, maxpos, scr, floats, att, st)
+                       ? attn_splitkv_cuda(afmt, q, nullptr, kv_[src].Kq.p, kv_[src].Kn.p, kv_[src].Vq.p, kv_[src].Vn.p, dpos, n, heads, kvh, hd, win, 1.0f, maxpos, scr, floats, att, st, aux)
                        : attn_splitkv_cuda(afmt, q, nullptr, kv_[src].K.p, nullptr, kv_[src].V.p, nullptr, dpos, n, heads, kvh, hd, win, 1.0f, maxpos, scr, floats, att, st),
                    "split-KV attention");
         }
