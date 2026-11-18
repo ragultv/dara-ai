@@ -63,9 +63,22 @@ DeviceMatrix upload_q6k_planar(const void* blocks, size_t rows, size_t cols) {
     return m;
 }
 
+DeviceMatrix upload_f16_raw(const uint16_t* bits, size_t rows, size_t cols) {
+    DeviceMatrix m = make_matrix(bits, rows * cols * sizeof(uint16_t), rows, cols, cols);
+    m.f16 = true;
+    return m;
+}
+
+DeviceMatrix upload_f16_matrix(const std::vector<float>& host, size_t rows, size_t cols) {
+    if (host.size() != rows * cols) throw std::invalid_argument("upload_f16_matrix: size mismatch");
+    std::vector<uint16_t> bits(host.size());
+    for (size_t i = 0; i < host.size(); ++i) bits[i] = dara::kernels::float_to_half(host[i]);
+    return upload_f16_raw(bits.data(), rows, cols);
+}
+
 int matvec_cuda(const DeviceMatrix& m, const float* d_x, float* d_y, void* stream) {
     if (!m.data) return static_cast<int>(cudaErrorInvalidValue);
-    if (m.q6_planar) return matvec_multi_cuda(m, d_x, m.cols, d_y, m.rows, 1, stream);
+    if (m.q6_planar || m.f16) return matvec_multi_cuda(m, d_x, m.cols, d_y, m.rows, 1, stream);
     if (m.quantized) return dara::kernels::gemv_quant_cuda(m.qtype, m.data.get(), m.ld, d_x, d_y, m.rows, m.cols, stream);
     return dara::kernels::gemv_cuda(dara::kernels::WeightType::BF16, m.data.get(), m.ld, d_x, d_y, m.rows, m.cols, stream);
 }
@@ -135,6 +148,7 @@ static int int8_gemm(const DeviceMatrix& m, const float* d_x, size_t ldx, float*
 
 int matvec_multi_cuda(const DeviceMatrix& m, const float* d_x, size_t ldx, float* d_y, size_t ldy, int nt, void* stream) {
     if (!m.data) return static_cast<int>(cudaErrorInvalidValue);
+    if (m.f16) return dara::kernels::gemm_f16_cuda(m.data.get(), m.ld, d_x, ldx, d_y, ldy, m.rows, m.cols, nt, stream);
     if (m.q6_planar) {   // planar Q6_K (output head): one vector with int8 activations; several (verification) with FP32 activations
         static const bool f32_multi = [] { const char* e = std::getenv("DARA_Q6P_F32_MULTI"); return e && e[0] == '1'; }();   // A/B switch
         if (nt > 1 && f32_multi && ldx % 4 == 0)

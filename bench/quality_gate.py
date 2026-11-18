@@ -31,7 +31,8 @@ def run(model, workload, tag, int8, kv_mode, n_new, teacher=None):
     m = MODELS[model]
     out = os.path.join(Q, f"{model}_{workload}_{tag}")
     src = ["--tokens", m["long"]] if workload == "long1500" else ["--prompt-file", os.path.join(Q, workload + ".txt")]
-    cmd = [os.path.join(BIN, m["exe"]), "--gguf", m["gguf"], *m["extra"], *src, "--new", str(n_new), "--kv", "12288" if workload.startswith("long8k") else "2048", "--kv-mode", kv_mode,
+    exe = os.environ.get("DARA_EXE") or (os.path.join(BIN, "dara.exe") if os.path.exists(os.path.join(BIN, "dara.exe")) else os.path.join(BIN, m["exe"]))
+    cmd = [exe, "--gguf", m["gguf"], *m["extra"], *src, "--new", str(n_new), "--kv", "12288" if workload.startswith("long8k") else "2048", "--kv-mode", kv_mode,
            "--logits-last", "1", "--out", out]
     if teacher: cmd += ["--teacher", teacher]
     # the FP32 reference must not use the CPU decode path (its kernels are int8 by design): DARA_CPU_DECODE=0 keeps hosted layers on the GPU path

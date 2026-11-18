@@ -26,6 +26,7 @@ struct DeviceMatrix {
     size_t ld = 0;               // row stride: elements (BF16) or blocks (quantized)
     size_t bytes = 0;
     bool q6_planar = false;      // Q6_K repacked into aligned planes (upload_q6k_planar): only the int8 GEMV reads it
+    bool f16 = false;            // FP16 weights (upload_f16_*): tensor-core GEMM (vision encoders)
 };
 
 // Exact when the values are BF16-representable (checkpoint-derived weights); otherwise rounds to nearest-even.
@@ -36,6 +37,9 @@ DeviceMatrix upload_bf16_raw(const uint16_t* bits, size_t rows, size_t cols);
 DeviceMatrix upload_quant_raw(dara::kernels::QuantType t, const void* blocks, size_t rows, size_t cols);
 // Q6_K GGUF blocks, repacked into the planar layout the int8 head kernel reads at full bandwidth. Needs int8_enabled(); matvec_multi_cuda only.
 DeviceMatrix upload_q6k_planar(const void* blocks, size_t rows, size_t cols);
+// FP16 weights for the tensor-core GEMM (matvec_multi_cuda; cols a multiple of 32): raw F16 bits, or floats rounded to fp16 (exact for F16-origin values).
+DeviceMatrix upload_f16_raw(const uint16_t* bits, size_t rows, size_t cols);
+DeviceMatrix upload_f16_matrix(const std::vector<float>& host, size_t rows, size_t cols);
 // y = M x (FP32 accumulation). Returns cudaError_t as int.
 int matvec_cuda(const DeviceMatrix& m, const float* d_x, float* d_y, void* stream = nullptr);
 // y[t*ldy ..] = M x[t*ldx ..] for t < nt: quantized weights are read once per group of up to 8 vectors, and every output is bitwise

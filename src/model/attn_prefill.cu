@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 
@@ -23,6 +24,18 @@ constexpr int BM = 128, BN = 64, BK = 32, TM = 8, TN = 4, kThreads = 256;
 constexpr int WS = BM + 4, XS = BN + 4;
 constexpr int kSub = 64;   // query tokens per sub-chunk (bounds the score scratch)
 constexpr size_t kScratchBudgetFloats = size_t{16} << 20;   // 64 MiB: beyond it (long contexts) a sub-chunk takes fewer query tokens
+// Tensor-core attention GEMMs: default on compute capability 8.0+ (Ampere, Ada, Blackwell); DARA_MMA=1 forces them on Turing (testing), DARA_MMA=0 off.
+bool attn_use_mma() {
+    static const bool on = [] {
+        if (const char* e = std::getenv("DARA_MMA_ATTN")) return e[0] == '1';   // attention only (A/B against the GEMMs)
+        if (const char* e = std::getenv("DARA_MMA")) return e[0] == '1';
+        int dev = 0, major = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        return major >= 8;
+    }();
+    return on;
+}
 constexpr int kDrainPositions = 16384;   // key ranges longer than this synchronise after each sub-chunk (Windows TDR, see attn_prefill_cuda)
 
 // Weight element (row r, column k) of a row-major matrix with leading dimension ldw: FP32, or an int8 code times the scale of its 32-value group
@@ -37,7 +50,7 @@ __device__ __forceinline__ float wget(const void* W, const float* Sc, size_t e) 
 
 // Y[t][n] = sum_k W(n, k) X[t][k], k < Kvalid (W and X zero beyond).  TRANS_W = false: W(n, k) at n*ldw + k  (rows n < N)
 //                                                                     TRANS_W = true:  W(n, k) at k*ldw + n
-template <bool TRANS_W, int WF>
+template <bool TRANS_W, int WF, bool MMA>
 __global__ void __launch_bounds__(kThreads, 2)
 attn_gemm_kernel(const void* __restrict__ W, const float* __restrict__ Sc, size_t ldw, const float* __restrict__ X, size_t ldx, float* __restrict__ Y, size_t ldy,
                  int N, int T, int Kpad, int Kvalid, int rpt, int qoff) {
@@ -91,6 +104,38 @@ attn_gemm_kernel(const void* __restrict__ W, const float* __restrict__ Sc, size_
 #pragma unroll
         for (int e = 0; e < 8; ++e) Xs[lq * 8 + e][xt] = (xv && k0 + lq * 8 + e < Kvalid) ? xp[k0 + lq * 8 + e] : 0.0f;
         __syncthreads();
+        if constexpr (MMA) {
+            // Tensor cores (mma.m16n8k8, FP16 inputs from the FP32 tiles, FP32 accumulation): warp w owns rows 32*(w&3)..+31 x tokens 32*(w>>2)..+31.
+            const int lane = tid & 31, wid = tid >> 5, gid = lane >> 2, tig = lane & 3;
+            const int wr = 32 * (wid & 3), wc = 32 * (wid >> 2);
+#pragma unroll
+            for (int kk = 0; kk < BK; kk += 8) {
+                const int k0r = kk + 2 * tig;
+                uint32_t a[2][2], b[4];
+#pragma unroll
+                for (int mi = 0; mi < 2; ++mi)
+#pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        const int r = wr + 16 * mi + gid + 8 * h;
+                        const __half2 v = __floats2half2_rn(Ws[k0r][r], Ws[k0r + 1][r]);
+                        a[mi][h] = *reinterpret_cast<const uint32_t*>(&v);
+                    }
+#pragma unroll
+                for (int ni = 0; ni < 4; ++ni) {
+                    const int t = wc + 8 * ni + gid;
+                    const __half2 v = __floats2half2_rn(Xs[k0r][t], Xs[k0r + 1][t]);
+                    b[ni] = *reinterpret_cast<const uint32_t*>(&v);
+                }
+#pragma unroll
+                for (int mi = 0; mi < 2; ++mi)
+#pragma unroll
+                    for (int ni = 0; ni < 4; ++ni) {
+                        float* c = &acc[(mi * 16 + ni * 4) / TN][(mi * 16 + ni * 4) % TN];
+                        asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};\n"
+                                     : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[mi][0]), "r"(a[mi][1]), "r"(b[ni]));
+                    }
+            }
+        } else {
 #pragma unroll
         for (int kk = 0; kk < BK; ++kk) {
             const float4 a0 = *reinterpret_cast<const float4*>(&Ws[kk][ty * 8]);
@@ -103,7 +148,23 @@ attn_gemm_kernel(const void* __restrict__ W, const float* __restrict__ Sc, size_
 #pragma unroll
                 for (int j = 0; j < TN; ++j) acc[i][j] = fmaf(a[i], bb[j], acc[i][j]);
         }
+        }
         __syncthreads();
+    }
+    if constexpr (MMA) {   // tile (mi, ni) = acc flat [mi*16 + ni*4 .. +3]: {row gid, tokens 2tig, 2tig+1}, {row gid+8, same tokens}
+        const int lane = tid & 31, wid = tid >> 5, gid = lane >> 2, tig = lane & 3;
+        const int wr = 32 * (wid & 3), wc = 32 * (wid >> 2);
+#pragma unroll
+        for (int mi = 0; mi < 2; ++mi)
+#pragma unroll
+            for (int ni = 0; ni < 4; ++ni)
+#pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    const int r = row0 + wr + 16 * mi + gid + 8 * (e >> 1), t = tok0 + wc + 8 * ni + 2 * tig + (e & 1);
+                    const int f = mi * 16 + ni * 4 + e;
+                    if (r < N && t < T) Y[static_cast<size_t>(t) * ldy + r] = acc[f / TN][f % TN];
+                }
+        return;
     }
 #pragma unroll
     for (int j = 0; j < TN; ++j) {
@@ -171,11 +232,13 @@ size_t round_up(size_t v, size_t m) { return (v + m - 1) / m * m; }
 template <int KF, int VF>
 void launch_pair(const void* Kh, const float* Ksc, const void* Vh, const float* Vsc, size_t kvw, const float* qrows, size_t ldq, float* S, size_t ldS, int P, int R,
                  int hd, int kstart, int pos0, int window, float scale, int rows_per_token, float* out, size_t ldo, cudaStream_t s) {
-    attn_gemm_kernel<false, KF><<<dim3(static_cast<unsigned>((P + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN)), kThreads, 0, s>>>(
-        Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart);
+    const dim3 g1(static_cast<unsigned>((P + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN));
+    if (attn_use_mma()) attn_gemm_kernel<false, KF, true><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart);
+    else attn_gemm_kernel<false, KF, false><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart);
     masked_softmax_kernel<<<R, 256, 0, s>>>(S, ldS, P, kstart, pos0, window, scale, rows_per_token);
-    attn_gemm_kernel<true, VF><<<dim3(static_cast<unsigned>((hd + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN)), kThreads, 0, s>>>(
-        Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P, rows_per_token, pos0 - kstart);
+    const dim3 g2(static_cast<unsigned>((hd + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN));
+    if (attn_use_mma()) attn_gemm_kernel<true, VF, true><<<g2, kThreads, 0, s>>>(Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P, rows_per_token, pos0 - kstart);
+    else attn_gemm_kernel<true, VF, false><<<g2, kThreads, 0, s>>>(Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P, rows_per_token, pos0 - kstart);
 }
 
 }  // namespace

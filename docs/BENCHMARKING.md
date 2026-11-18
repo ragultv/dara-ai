@@ -158,6 +158,8 @@ All answers should be `INVOICE 7731`.
 ```
 
 `context:` is the largest context Dara chose automatically for this GPU; `VRAM-resident layers` shows how many layers are on the GPU.
+Automatic context is at least 32,768 tokens: when keeping the whole model in VRAM would leave less (the 4B on a 4 GB GPU), Dara reserves 32K anyway
+and moves what does not fit (the output head) to the CPU. `--min-context 0` keeps the fully-in-VRAM size instead (faster, shorter context).
 
 ### 7.6 Quick decode check (about 5 minutes; needs release b6 or newer)
 

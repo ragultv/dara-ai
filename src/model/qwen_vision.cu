@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -29,12 +30,25 @@ std::vector<float> f32(const dara::io::GgufCheckpoint& g, const std::string& nam
     return out;
 }
 
-// [rows][cols] weights as BF16 (exact for BF16-origin values), optionally zero-padded to cols_pad columns / rows_pad rows
+// Weights FP16 for the tensor-core GEMM (default: the mmproj F16 values exactly) or BF16 for the FP32-FMA GEMM (DARA_VISION_F16=0)
+bool vision_f16() {
+    static const bool on = [] {   // default: GPUs with tensor cores (compute capability 8.0+); DARA_VISION_F16=1/0 forces
+        if (const char* e = std::getenv("DARA_VISION_F16")) return e[0] == '1';
+        int dev = 0, major = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        return major >= 8;
+    }();
+    return on;
+}
+
+// [rows][cols] weights, optionally zero-padded to cols_pad columns / rows_pad rows (padding adds zero terms only)
 DeviceMatrix bf16_matrix(const std::vector<float>& w, size_t rows, size_t cols, size_t rows_pad, size_t cols_pad) {
     std::vector<uint16_t> bits(rows_pad * cols_pad, 0);
+    const bool h = vision_f16();
     for (size_t r = 0; r < rows; ++r)
-        for (size_t c = 0; c < cols; ++c) bits[r * cols_pad + c] = dara::kernels::float_to_bf16(w[r * cols + c]);
-    return upload_bf16_raw(bits.data(), rows_pad, cols_pad);
+        for (size_t c = 0; c < cols; ++c) bits[r * cols_pad + c] = h ? dara::kernels::float_to_half(w[r * cols + c]) : dara::kernels::float_to_bf16(w[r * cols + c]);
+    return h ? upload_f16_raw(bits.data(), rows_pad, cols_pad) : upload_bf16_raw(bits.data(), rows_pad, cols_pad);
 }
 
 // torch.linspace(start, end, steps) in float32 (CPU kernel: symmetric fill from both ends)
@@ -199,6 +213,8 @@ std::vector<float> QwenVision::encode(const QwenVisionInput& in) {
         cuda_check(gelu_tanh_cuda(m.p, N * IP), "vision gelu");
         linear(B.fc2, m.p, IP, a.p, n);
         cuda_check(add_cuda(x.p, a.p, x.p, N * H), "vision residual 2");
+        // large images: let the GPU drain per layer, so no run of queued work gets long enough for the Windows timeout (TDR) on slow GPUs
+        if (n > 1024) cuda_check(cudaStreamSynchronize(nullptr), "vision layer");
     }
     // merger: LayerNorm per patch, 2x2 patches (consecutive in merge-block order) concatenated, fc1 + exact GELU + fc2
     const int M = n / 4;

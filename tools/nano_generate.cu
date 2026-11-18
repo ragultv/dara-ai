@@ -50,6 +50,7 @@ int main(int argc, char** argv) {
     std::string chat_user, chat_system, teacher_file;  // --chat renders the model's chat template around the user message
     std::string mmproj_path;                // --mmproj <vision GGUF> with --image <file> (repeatable): images go before the --chat text
     std::vector<std::string> image_paths;
+    size_t min_context = 32768;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { if (i + 1 >= argc) { std::fprintf(stderr, "missing value for %s\n", a.c_str()); std::exit(2); } return argv[++i]; };
@@ -78,6 +79,7 @@ int main(int argc, char** argv) {
         else if (a == "--ngram") ngram_max = std::atoi(next().c_str());
         else if (a == "--ngram-min") ngram_min = std::atoi(next().c_str());
         else if (a == "--chunk") chunk_tokens = std::atoi(next().c_str());   // prefill chunk size (default: the model's, 64)
+        else if (a == "--min-context") min_context = static_cast<size_t>(std::atoll(next().c_str()));   // auto context floor (default 32768; 0 = fully-resident size)
         else if (a == "--kv-mode") { const std::string m = next(); if (m == "tq4") kv_format = KvFormat::TQ4; else if (m == "q8") kv_format = KvFormat::Q8; else if (m == "k16v8") kv_format = KvFormat::K16V8; else if (m == "f32") kv_format = KvFormat::F32; else { std::fprintf(stderr, "--kv-mode must be f32, q8 or tq4\n"); return 2; } }
         else if (a == "--teacher") teacher_file = next();   // teacher forcing: feed the continuation of this reference tokens file instead of our own argmax
         else if (a == "--logits-last") logits_last = std::atoi(next().c_str());
@@ -166,6 +168,7 @@ int main(int argc, char** argv) {
         ResidencyOptions ropt;
         ropt.force_resident_layers = force_resident;
         ropt.kv_format = kv_format;
+        ropt.auto_min_context = min_context;
         if (chunk_tokens > 0) ropt.max_chunk_tokens = chunk_tokens;
         if (!flash_path.empty()) {   // leave room for the drafter (loaded after the model): its weights and its K/V per context position
             FlashDrafter::vram_estimate(flash_path, gguf, ropt.extra_vram_bytes, ropt.extra_bytes_per_token);

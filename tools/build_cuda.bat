@@ -16,7 +16,7 @@ set GENCODE=-gencode arch=compute_75,code=sm_75 -gencode arch=compute_86,code=sm
 if /i not "%DARA_ARCH%"=="all" set GENCODE=-arch=sm_%DARA_ARCH%
 echo CUDA targets: %GENCODE%
 set NVFLAGS=-std=c++20 -O3 -Xcompiler /O2 %GENCODE% -lineinfo -I"%CUDA%\include" -Isrc -Ithird_party -Itests -L"%CUDA%\lib\x64"
-set K=src\kernels\gemv.cu src\kernels\gemv_cpu.cpp src\kernels\q4k_gemv.cu src\kernels\q4k_cpu.cpp src\kernels\q5k_gemv.cu src\kernels\q80_gemv.cu src\kernels\q5k_q80_cpu.cpp src\kernels\q6k_gemv.cu src\kernels\q6k_cpu.cpp src\kernels\quant_gemv.cu src\kernels\gemv_multi.cu src\kernels\gemv16.cu src\kernels\gemv_q8.cu src\kernels\gemv_q6kp.cu src\kernels\gemv_q8_multi.cu src\kernels\gemm_q8.cu src\kernels\gemm_q8_q6k.cu src\kernels\gemm_bf16.cu src\kernels\gemm_q4k.cu src\kernels\quant.cpp
+set K=src\kernels\gemv.cu src\kernels\gemv_cpu.cpp src\kernels\q4k_gemv.cu src\kernels\q4k_cpu.cpp src\kernels\q5k_gemv.cu src\kernels\q80_gemv.cu src\kernels\q5k_q80_cpu.cpp src\kernels\q6k_gemv.cu src\kernels\q6k_cpu.cpp src\kernels\quant_gemv.cu src\kernels\gemv_multi.cu src\kernels\gemv16.cu src\kernels\gemv_q8.cu src\kernels\gemv_q6kp.cu src\kernels\gemv_q8_multi.cu src\kernels\gemm_q8.cu src\kernels\gemm_q8_q6k.cu src\kernels\gemm_bf16.cu src\kernels\gemm_f16.cu src\kernels\gemm_q4k.cu src\kernels\quant.cpp
 
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% tests\cuda_smoke.cu -o build\cuda\cuda_smoke.exe -lcudart || exit /b 1
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% tests\gemv_test.cu %K% src\core\manifest.cpp -o build\cuda\gemv_test.exe -lcudart || exit /b 1

@@ -184,6 +184,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
             size_t a = lo / step, b = native / step;
             while (a < b) { const size_t m = (a + b + 1) / 2; if (fully_resident(m * step)) a = m; else b = m - 1; }
             kv_capacity = a * step;
+            if (kv_capacity < opt.auto_min_context) kv_capacity = std::min(native, opt.auto_min_context);   // minimum context over full residency
         } else {
             kv_capacity = std::min(native, opt.auto_partial_context);
         }

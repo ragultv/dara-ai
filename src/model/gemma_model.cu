@@ -280,6 +280,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
             size_t a = lo / step, b = max_ctx / step;
             while (a < b) { const size_t m = (a + b + 1) / 2; if (fully_resident(m * step)) a = m; else b = m - 1; }
             kv_capacity = std::max(lo, a * step);
+            if (kv_capacity < opt.auto_min_context) kv_capacity = std::min(max_ctx, opt.auto_min_context);   // minimum context over full residency
         } else {
             kv_capacity = std::min(max_ctx, opt.auto_partial_context);
         }
