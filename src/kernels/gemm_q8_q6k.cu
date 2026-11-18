@@ -56,6 +56,7 @@ __device__ __forceinline__ void load_half6(Regs6& r, const uint8_t* wrow, const 
     }
 }
 
+template <bool MMA>
 __global__ void __launch_bounds__(kThreads, 2)
 q6k_q8_gemm_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t* __restrict__ qa, const float* __restrict__ da, const int* __restrict__ sa,
                    float* __restrict__ Y, size_t ldy, int N, int T, int K) {
@@ -110,6 +111,49 @@ q6k_q8_gemm_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t
         }
         __syncthreads();
         if (s + 1 < steps) load_half6(cur, wrow, qa_t, da_t, sa_t, xv, s + 1, part, q);
+        if constexpr (MMA) {
+            // Tensor cores (mma.m8n8k16 s8): warp w owns rows 32*(w&3)..+31 x tokens 32*(w>>2)..+31 as 4 x 4 tiles of 8 x 8; one mma per tile and 16-weight
+            // scale group gives exactly the dp4a group sum, and the float combine is the same expression in the same order: same output.
+            const int lane = tid & 31, wid = tid >> 5, gid = lane >> 2, tig = lane & 3;
+            const int wr = 32 * (wid & 3), wc = 32 * (wid >> 2);
+#pragma unroll
+            for (int ab = 0; ab < 4; ++ab) {
+                float pa[4][8];
+#pragma unroll
+                for (int mi = 0; mi < 4; ++mi)
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) pa[mi][j] = 0.0f;
+#pragma unroll
+                for (int g16 = 0; g16 < 2; ++g16) {
+                    const int sg = 2 * ab + g16;
+                    uint32_t a[4], b[4];
+#pragma unroll
+                    for (int mi = 0; mi < 4; ++mi) a[mi] = static_cast<uint32_t>(Ws[4 * sg + tig][wr + 8 * mi + gid]);
+#pragma unroll
+                    for (int ni = 0; ni < 4; ++ni) b[ni] = static_cast<uint32_t>(Xs[4 * sg + tig][wc + 8 * ni + gid]);
+#pragma unroll
+                    for (int mi = 0; mi < 4; ++mi) {
+                        const float wdv = Wd[sg][wr + 8 * mi + gid];
+#pragma unroll
+                        for (int ni = 0; ni < 4; ++ni) {
+                            int c0 = 0, c1 = 0;
+                            asm volatile("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0,%1}, {%2}, {%3}, {%0,%1};\n" : "+r"(c0), "+r"(c1) : "r"(a[mi]), "r"(b[ni]));
+                            const int t0 = wc + 8 * ni + 2 * tig;
+                            pa[mi][2 * ni] = fmaf(wdv, static_cast<float>(c0 - 32 * Xs16[sg][t0]), pa[mi][2 * ni]);
+                            pa[mi][2 * ni + 1] = fmaf(wdv, static_cast<float>(c1 - 32 * Xs16[sg][t0 + 1]), pa[mi][2 * ni + 1]);
+                        }
+                    }
+                }
+#pragma unroll
+                for (int ni = 0; ni < 4; ++ni)
+#pragma unroll
+                    for (int e = 0; e < 2; ++e) {
+                        const float xd = Xd[ab][wc + 8 * ni + 2 * tig + e];
+#pragma unroll
+                        for (int mi = 0; mi < 4; ++mi) acc[(mi * 8 + 2 * ni + e) / TN][(mi * 8 + 2 * ni + e) % TN] = fmaf(xd, pa[mi][2 * ni + e], acc[(mi * 8 + 2 * ni + e) / TN][(mi * 8 + 2 * ni + e) % TN]);
+                    }
+            }
+        } else {
 #pragma unroll
         for (int ab = 0; ab < 4; ++ab) {            // activation 32-block = two 16-weight scale groups
             float pa[TM][TN];
@@ -155,7 +199,25 @@ q6k_q8_gemm_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t
                 for (int i = 0; i < TM; ++i) acc[i][j] = fmaf(xd, pa[i][j], acc[i][j]);
             }
         }
+        }
         __syncthreads();
+    }
+    if constexpr (MMA) {   // acc[mi][2*ni+e] = row wr+8mi+gid, token wc+8ni+2tig+e
+        const int lane = tid & 31, wid = tid >> 5, gid = lane >> 2, tig = lane & 3;
+        const int wr = 32 * (wid & 3), wc = 32 * (wid >> 2);
+#pragma unroll
+        for (int mi = 0; mi < 4; ++mi) {
+            const int r = row0 + wr + 8 * mi + gid;
+            if (r >= N) continue;
+#pragma unroll
+            for (int ni = 0; ni < 4; ++ni)
+#pragma unroll
+                for (int e = 0; e < 2; ++e) {
+                    const int t = tok0 + wc + 8 * ni + 2 * tig + e;
+                    if (t < T) Y[static_cast<size_t>(t) * ldy + r] = acc[(mi * 8 + 2 * ni + e) / TN][(mi * 8 + 2 * ni + e) % TN];
+                }
+        }
+        return;
     }
 #pragma unroll
     for (int j = 0; j < TN; ++j) {
@@ -175,6 +237,8 @@ q6k_q8_gemm_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t
 
 }  // namespace
 
+bool gemm_q8_use_mma();   // gemm_q8.cu
+
 int gemm_q6k_q8_cuda(const void* dW, size_t ld_blocks, const void* scratch, size_t K, int T, float* dy, size_t ldy, size_t rows, void* stream) {
     if (rows == 0 || T == 0) return 0;
     if (!dW || !scratch || !dy || T < 0 || K == 0 || K % 256 != 0 || ld_blocks < K / 256) return static_cast<int>(cudaErrorInvalidValue);
@@ -185,8 +249,12 @@ int gemm_q6k_q8_cuda(const void* dW, size_t ld_blocks, const void* scratch, size
     const float* d = reinterpret_cast<const float*>(base + static_cast<size_t>(T) * K);
     const int* s = reinterpret_cast<const int*>(base + static_cast<size_t>(T) * K + static_cast<size_t>(T) * (K / 32) * sizeof(float));
     const dim3 grid(static_cast<unsigned>((rows + BM - 1) / BM), static_cast<unsigned>((T + BN - 1) / BN));
-    q6k_q8_gemm_kernel<<<grid, kThreads, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * kQ6KBlockBytes, q, d, s, dy, ldy,
-                                                                                 static_cast<int>(rows), T, static_cast<int>(K));
+    if (gemm_q8_use_mma())
+        q6k_q8_gemm_kernel<true><<<grid, kThreads, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * kQ6KBlockBytes, q, d, s, dy, ldy,
+                                                                                       static_cast<int>(rows), T, static_cast<int>(K));
+    else
+        q6k_q8_gemm_kernel<false><<<grid, kThreads, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * kQ6KBlockBytes, q, d, s, dy, ldy,
+                                                                                        static_cast<int>(rows), T, static_cast<int>(K));
     return static_cast<int>(cudaGetLastError());
 }
 

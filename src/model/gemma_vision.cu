@@ -21,7 +21,20 @@ std::string meta(const dara::io::GgufCheckpoint& g, const std::string& key, cons
     throw std::runtime_error("mmproj GGUF metadata is missing " + key);
 }
 
-// F16 (or F32) tensor -> BF16 bits: exact for weights that were BF16 before the F16 conversion
+// Weights: FP16 for the tensor-core GEMM (default; the mmproj F16 values exactly), or BF16 for the FP32-FMA GEMM (DARA_VISION_F16=0; exact for weights that
+// were BF16 before the F16 conversion).
+bool vision_f16() {
+    static const bool on = [] {   // default: GPUs with tensor cores (compute capability 8.0+); DARA_VISION_F16=1/0 forces
+        if (const char* e = std::getenv("DARA_VISION_F16")) return e[0] == '1';
+        int dev = 0, major = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        return major >= 8;
+    }();
+    return on;
+}
+
+// F16 (or F32) tensor -> 16-bit weight bits (fp16 or bf16, see vision_f16)
 std::vector<uint16_t> bf16_bits(const dara::io::GgufCheckpoint& g, const std::string& name) {
     const auto& info = g.info(name);
     const std::vector<uint8_t> raw = g.read(name);
@@ -32,10 +45,12 @@ std::vector<uint16_t> bf16_bits(const dara::io::GgufCheckpoint& g, const std::st
         if (info.type == 1) { uint16_t h; std::memcpy(&h, &raw[i * 2], 2); f = dara::kernels::half_to_float(h); }
         else if (info.type == 0) std::memcpy(&f, &raw[i * 4], 4);
         else throw std::runtime_error("mmproj tensor " + name + ": expected F16 or F32");
-        out[i] = dara::kernels::float_to_bf16(f);
+        out[i] = vision_f16() ? dara::kernels::float_to_half(f) : dara::kernels::float_to_bf16(f);
     }
     return out;
 }
+
+DeviceMatrix upload_w(const uint16_t* bits, size_t rows, size_t cols) { return vision_f16() ? upload_f16_raw(bits, rows, cols) : upload_bf16_raw(bits, rows, cols); }
 
 std::vector<float> f32(const dara::io::GgufCheckpoint& g, const std::string& name) {
     const auto& info = g.info(name);
@@ -77,18 +92,18 @@ GemmaVision::GemmaVision(const dara::io::GgufCheckpoint& g, int max_soft_tokens)
                                                : ((static_cast<size_t>(o) * C + c) * P + y) * P + x;
                         lin[static_cast<size_t>(o) * in + (static_cast<size_t>(y) * P + x) * C + c] = pe[src];
                     }
-        patch_w_ = upload_bf16_raw(lin.data(), static_cast<size_t>(hidden_), static_cast<size_t>(in));
+        patch_w_ = upload_w(lin.data(), static_cast<size_t>(hidden_), static_cast<size_t>(in));
     }
     pos_table_ = f32(g, "v.position_embd.weight");
     pos_size_ = static_cast<int>(pos_table_.size() / (2 * static_cast<size_t>(hidden_)));
     {
         const std::vector<uint16_t> pw = bf16_bits(g, "mm.input_projection.weight");
-        proj_w_ = upload_bf16_raw(pw.data(), static_cast<size_t>(proj_dim_), static_cast<size_t>(hidden_));
+        proj_w_ = upload_w(pw.data(), static_cast<size_t>(proj_dim_), static_cast<size_t>(hidden_));
     }
     auto lin = [&](const std::string& p, size_t rows, size_t cols) {
         Linear l;
         const std::vector<uint16_t> w = bf16_bits(g, p + ".weight");
-        l.w = upload_bf16_raw(w.data(), rows, cols);
+        l.w = upload_w(w.data(), rows, cols);
         auto sc = [&](const char* s, float dflt) { const std::string n = p + "." + s; return g.has(n) ? g.read_f32(n)[0] : dflt; };
         l.in_lo = sc("input_min", -INFINITY); l.in_hi = sc("input_max", INFINITY);
         l.out_lo = sc("output_min", -INFINITY); l.out_hi = sc("output_max", INFINITY);
@@ -196,6 +211,8 @@ std::vector<float> GemmaVision::encode(const VisionInput& in) {
         cuda_check(geglu_cuda(g.p, u.p, g.p, N * I), "vision geglu");
         linear(L.down, g.p, t.p, a.p, n);
         cuda_check(norm_residual_cuda(a.p, L.ffn_post.p, n, hidden_, eps_, h.p, 1.0f, false, h.p), "vision post-feed-forward norm + residual");
+        // large images: let the GPU drain per layer, so no run of queued work gets long enough for the Windows timeout (TDR) on slow GPUs
+        if (n > 1024) cuda_check(cudaStreamSynchronize(nullptr), "vision layer");
     }
     const std::vector<float> hs = h.get();
 

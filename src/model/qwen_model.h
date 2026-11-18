@@ -55,6 +55,9 @@ struct ResidencyOptions {
     // and the output head in VRAM. A model that cannot be fully VRAM-resident even with a short context gets auto_partial_context
     // and the planner places what fits (more context would push more layers to the CPU).
     size_t auto_partial_context = 32768;
+    // Minimum auto context: when keeping everything in VRAM leaves less than this, the context is raised to it and the planner places what fits
+    // (the 4B on 4 GB: 32K with the output head in host RAM instead of 21.5K fully resident). 0: always the fully-resident size (dara --min-context 0).
+    size_t auto_min_context = 32768;
 };
 
 struct PlacementReport {

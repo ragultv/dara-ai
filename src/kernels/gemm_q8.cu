@@ -9,6 +9,8 @@
 // Tile: 128 output rows x 64 tokens per block, k advanced one Q4_K quant group (64 weights = sub-blocks 2g and 2g+1, which share 32 bytes of nibbles) per
 // step. Shared memory holds the group as int8 (4 values per int): weights [16][row], activations [16][token]. Thread (tx, ty) owns rows ty*8..+7 and tokens
 // tx*4..+3: per sub-block 8 x 4 int dot products (8 dp4a each), then one float combine per output. The next group is fetched into registers meanwhile.
+#include <cstdlib>
+
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -20,6 +22,19 @@ namespace dara::kernels {
 namespace {
 
 constexpr int BM = 128, BN = 64, TM = 8, TN = 4, kThreads = 256;
+
+// Tensor-core path: default on GPUs of compute capability 8.0 and newer (Ampere, Ada, Blackwell). Turing runs the same instructions (GTX 16xx without
+// tensor-core hardware, slowly), so DARA_MMA=1 forces it there for testing; DARA_MMA=0 keeps the dp4a kernel everywhere. Same output either way.
+bool use_mma() {
+    static const bool on = [] {
+        if (const char* e = std::getenv("DARA_MMA")) return e[0] == '1';
+        int dev = 0, major = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+        return major >= 8;
+    }();
+    return on;
+}
 constexpr int WSI = BM + 4, XSI = BN + 4;   // padded int rows (16-byte aligned vector loads)
 
 struct Regs {
@@ -50,7 +65,7 @@ __device__ __forceinline__ void load_group(Regs& r, const uint8_t* wrow, const i
     }
 }
 
-template <bool Q5>
+template <bool Q5, bool MMA>
 __global__ void __launch_bounds__(kThreads, 2)
 q_q8_gemm_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t* __restrict__ qa, const float* __restrict__ da, const int* __restrict__ sa,
                  float* __restrict__ Y, size_t ldy, int N, int T, int K) {
@@ -124,6 +139,49 @@ q_q8_gemm_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t* 
         }
         __syncthreads();
         if (s + 1 < steps) load_group<Q5>(cur, wrow, qa_t, da_t, sa_t, xv, s + 1, half, part);
+        if constexpr (MMA) {
+            // Tensor cores (mma.m8n8k16 s8, Turing and newer): warp w owns rows 32*(w&3)..+31 x tokens 32*(w>>2)..+31 as 4 x 4 tiles of 8 x 8. The int32
+            // sums per 32-value sub-block are exactly the dp4a sums, and the float combine below is the same expression in the same order: same output.
+            const int lane = tid & 31, wid = tid >> 5, gid = lane >> 2, tig = lane & 3;
+            const int wr = 32 * (wid & 3), wc = 32 * (wid >> 2);
+#pragma unroll
+            for (int sb = 0; sb < 2; ++sb) {
+                int c[4][4][2];
+#pragma unroll
+                for (int mi = 0; mi < 4; ++mi)
+#pragma unroll
+                    for (int ni = 0; ni < 4; ++ni) c[mi][ni][0] = c[mi][ni][1] = 0;
+#pragma unroll
+                for (int ks = 0; ks < 2; ++ks) {
+                    const int kr = 8 * sb + 4 * ks + tig;
+                    uint32_t a[4], b[4];
+#pragma unroll
+                    for (int mi = 0; mi < 4; ++mi) a[mi] = static_cast<uint32_t>(Ws[kr][wr + 8 * mi + gid]);
+#pragma unroll
+                    for (int ni = 0; ni < 4; ++ni) b[ni] = static_cast<uint32_t>(Xs[kr][wc + 8 * ni + gid]);
+#pragma unroll
+                    for (int mi = 0; mi < 4; ++mi)
+#pragma unroll
+                        for (int ni = 0; ni < 4; ++ni)
+                            asm volatile("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0,%1}, {%2}, {%3}, {%0,%1};\n"
+                                         : "+r"(c[mi][ni][0]), "+r"(c[mi][ni][1]) : "r"(a[mi]), "r"(b[ni]));
+                }
+#pragma unroll
+                for (int mi = 0; mi < 4; ++mi) {
+                    const int r = wr + 8 * mi + gid;
+                    const float wdv = Wd[sb][r], wmv = Wm[sb][r];
+#pragma unroll
+                    for (int ni = 0; ni < 4; ++ni)
+#pragma unroll
+                        for (int e = 0; e < 2; ++e) {
+                            const int tk = wc + 8 * ni + 2 * tig + e;
+                            const float xdv = Xd[sb][tk], xsv = static_cast<float>(Xsum[sb][tk]);
+                            float& av = acc[(mi * 8 + 2 * ni + e) / TN][(mi * 8 + 2 * ni + e) % TN];
+                            av = fmaf(xdv, fmaf(wdv, static_cast<float>(c[mi][ni][e]), -wmv * xsv), av);
+                        }
+                }
+            }
+        } else {
 #pragma unroll
         for (int sb = 0; sb < 2; ++sb) {
             int isum[TM][TN];
@@ -153,7 +211,25 @@ q_q8_gemm_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t* 
 #pragma unroll
                 for (int j = 0; j < TN; ++j) acc[i][j] = fmaf(xd[j], fmaf(wd[i], static_cast<float>(isum[i][j]), -wm[i] * xs[j]), acc[i][j]);
         }
+        }
         __syncthreads();
+    }
+    if constexpr (MMA) {   // acc[mi][2*ni+e] = row wr+8mi+gid, token wc+8ni+2tig+e
+        const int lane = tid & 31, wid = tid >> 5, gid = lane >> 2, tig = lane & 3;
+        const int wr = 32 * (wid & 3), wc = 32 * (wid >> 2);
+#pragma unroll
+        for (int mi = 0; mi < 4; ++mi) {
+            const int r = row0 + wr + 8 * mi + gid;
+            if (r >= N) continue;
+#pragma unroll
+            for (int ni = 0; ni < 4; ++ni)
+#pragma unroll
+                for (int e = 0; e < 2; ++e) {
+                    const int t = tok0 + wc + 8 * ni + 2 * tig + e;
+                    if (t < T) Y[static_cast<size_t>(t) * ldy + r] = acc[(mi * 8 + 2 * ni + e) / TN][(mi * 8 + 2 * ni + e) % TN];
+                }
+        }
+        return;
     }
 #pragma unroll
     for (int j = 0; j < TN; ++j) {
@@ -183,14 +259,20 @@ int launch(const void* dW, size_t ld_blocks, const void* scratch, size_t K, int 
     const float* d = reinterpret_cast<const float*>(base + static_cast<size_t>(T) * K);
     const int* s = reinterpret_cast<const int*>(base + static_cast<size_t>(T) * K + static_cast<size_t>(T) * (K / 32) * sizeof(float));
     const dim3 grid(static_cast<unsigned>((rows + BM - 1) / BM), static_cast<unsigned>((T + BN - 1) / BN));
-    q_q8_gemm_kernel<Q5><<<grid, kThreads, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * block_bytes, q, d, s, dy, ldy,
-                                                                                    static_cast<int>(rows), T, static_cast<int>(K));
+    if (use_mma())
+        q_q8_gemm_kernel<Q5, true><<<grid, kThreads, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * block_bytes, q, d, s, dy, ldy,
+                                                                                          static_cast<int>(rows), T, static_cast<int>(K));
+    else
+        q_q8_gemm_kernel<Q5, false><<<grid, kThreads, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * block_bytes, q, d, s, dy, ldy,
+                                                                                           static_cast<int>(rows), T, static_cast<int>(K));
     return static_cast<int>(cudaGetLastError());
 }
 
 }  // namespace
 
 int gemm_q6k_q8_cuda(const void* dW, size_t ld_blocks, const void* scratch, size_t K, int T, float* dy, size_t ldy, size_t rows, void* stream);  // gemm_q8_q6k.cu
+
+bool gemm_q8_use_mma() { return use_mma(); }
 
 bool gemm_q8_available(QuantType t) { return t == QuantType::Q4_K || t == QuantType::Q5_K || t == QuantType::Q6_K; }
 
