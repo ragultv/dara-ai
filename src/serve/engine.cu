@@ -480,7 +480,11 @@ struct Engine::Impl {
             if (!qwen) reuse = std::min(flash_valid, flash->position());   // Nano can rewind anywhere: recompute the part the drafter missed
             else { use_flash = false; r.spec.note = "drafter out of step with the cached prompt (a request with flash off ran in between)"; }
         }
-        if (reuse == 0) reset_state();
+        if (reuse == 0) {
+            reset_state();
+            // the checkpoint holds only the recurrent states: once the K/V it relied on is overwritten it must never be restored
+            if (qwen) { qckpt.valid = false; qckpt_tokens.clear(); }
+        }
         else if (qwen) { qm->restore_device(qckpt); qm->clear_images(); }
         else { gm->rewind(reuse); gm->clear_soft_tokens(); }
         kv_tokens.assign(ids.begin(), ids.begin() + static_cast<long>(reuse));
@@ -502,7 +506,8 @@ struct Engine::Impl {
         const auto tp = Clock::now();
         int32_t first = -1;
         std::vector<float> row, last_feat;
-        const size_t split = qwen && allow_cache && !has_img && pr.conv_len >= 1 && pr.conv_len - 1 > reuse && pr.conv_len < ids.size() ? pr.conv_len - 1 : reuse;
+        // (cache_write false: keep the existing checkpoint; this request only writes positions after it, so it stays valid)
+        const size_t split = qwen && allow_cache && sp.cache_write && !has_img && pr.conv_len >= 1 && pr.conv_len - 1 > reuse && pr.conv_len < ids.size() ? pr.conv_len - 1 : reuse;
         if (split > reuse) {   // Qwen: checkpoint after all but the last conversation token (the next request resumes there)
             feed(ids, reuse, split, false, greedy, nullptr, nullptr, use_flash, nullptr);
             qm->save_device(qckpt);
@@ -882,7 +887,12 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
     m.qwen = arch == "qwen35";
 
     dara::model::ResidencyOptions ropt;
-    ropt.kv_format = dara::model::KvFormat::Q8;
+    {
+        using dara::model::KvFormat;
+        const std::string& f = o.kv_format;
+        ropt.kv_format = f == "k8v4" ? KvFormat::K8V4 : f == "q4" ? KvFormat::Q4 : f == "tq4" ? KvFormat::TQ4 : f == "k16v8" ? KvFormat::K16V8 : f == "f32" ? KvFormat::F32 : KvFormat::Q8;
+        if (f != "q8" && f != "int8" && f != "k8v4" && f != "q4" && f != "tq4" && f != "k16v8" && f != "f32") throw std::invalid_argument("unknown K/V format '" + f + "' (q8, k8v4, q4, tq4, k16v8)");
+    }
     ropt.auto_min_context = o.min_context;
     ropt.safety_bytes = o.vram_reserve_mb << 20;
     std::error_code ec;
@@ -1006,7 +1016,7 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
     m.info.hidden = m.hidden;
     m.info.vocab = m.vocab;
     m.info.context_capacity = m.capacity();
-    m.info.kv_format = "q8";
+    m.info.kv_format = dara::model::to_string(ropt.kv_format);
     m.info.vision = !o.mmproj.empty();
     m.info.image_max_tokens = m.qwen ? o.image_max_tokens : 280;
     m.info.flash = m.flash ? flash_path : std::string();

@@ -17,7 +17,7 @@ size_t attn_prefill_scratch_floats(int n, int pos0, int window, int heads, int k
 // General form: q8 = INT8 cache (K/V int8 codes, Ksc/Vsc per-32 scales as in attn_splitkv.h), otherwise FP32 (Ksc/Vsc ignored). gate: [n][heads*hd] or
 // null; when given, out *= sigmoid(gate) (Qwen). Queries are processed in sub-chunks so the scratch stays bounded.
 int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void* K, const float* Ksc, const void* V, const float* Vsc, int n, int pos0, int heads,
-                      int kv_heads, int hd, int window, float scale, float* scratch, size_t scratch_floats, float* out, void* stream = nullptr);
+                      int kv_heads, int hd, int window, float scale, float* scratch, size_t scratch_floats, float* out, void* stream = nullptr, const KvAux& aux = {});
 
 int attn_prefill_f32_cuda(const float* q, const float* K, const float* V, int n, int pos0, int heads, int kv_heads, int hd, int window, float scale, float* scratch,
                           size_t scratch_floats, float* out, void* stream = nullptr);

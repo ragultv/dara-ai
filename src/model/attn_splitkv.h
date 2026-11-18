@@ -12,11 +12,13 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "model/kv4.h"
+
 namespace dara::model {
 
 constexpr int kSplitChunk = 128;  // positions per block
 
-enum class AttnFmt { F32, TQ4, Q8, K16V8 };
+enum class AttnFmt { F32, TQ4, Q8, K16V8, K8V4, Q4 };   // K8V4 / Q4: kv4.h
 
 // INT8 K/V cache: codes [position][kv_heads][hd] int8 and scales [position][kv_heads][hd/32] float (scale = max|x| / 127 per 32 values, ~9 bits per
 // value). Appends T vectors x [T][kv_heads][hd] at positions d_pos[t]. hd % 32 == 0.
@@ -32,11 +34,12 @@ size_t attn_splitkv_scratch_floats_per_token(AttnFmt fmt, int heads, int hd, int
 
 // out[t][h][:] = softmax(scale * q.K over the causal window) V  (* sigmoid(gate) when gate != nullptr), token t at position d_pos[t].
 // K/Kn/V/Vn: F32 -> K, V are float* caches and Kn/Vn are ignored; TQ4 -> K, V are uint8_t* codes and Kn, Vn float* norms;
-// Q8 -> K, V are int8 codes and Kn, Vn the per-32 float scales (hd % 128 == 0).
+// Q8 -> K, V are int8 codes and Kn, Vn the per-32 float scales (hd % 128 == 0). K8V4: K/Kn as Q8, V/Vn 4-bit (kv4.h). Q4: K/Kn the 4-bit keys + per-channel
+// group scales, V/Vn as K8V4, and aux the key ring (aux.pend: the last appended position).
 // window > 0: sliding window; q: [T][heads][hd]; gate: [T][heads*hd] or null; scratch must hold >= one token's worth (more tokens are batched
 // per launch group). hd: 128, 256 or 512 for F32; 64..512 power of two for TQ4 (the kernels assume hd % 128 == 0 for F32).
 int attn_splitkv_cuda(AttnFmt fmt, const float* d_q, const float* d_gate, const void* d_K, const float* d_Kn, const void* d_V, const float* d_Vn,
                       const int64_t* d_pos, int T, int heads, int kv_heads, int hd, int window, float scale, int max_positions, float* d_scratch,
-                      size_t scratch_floats, float* d_out, void* stream = nullptr);
+                      size_t scratch_floats, float* d_out, void* stream = nullptr, const KvAux& aux = {});
 
 }  // namespace dara::model

@@ -8,6 +8,7 @@
 // tile is loaded (code * scale of its 32-value group), so the INT8 cache is consumed directly. Queries are processed in sub-chunks of kSub tokens so the score
 // scratch stays bounded at long contexts. Results differ from the split-KV path only by summation order.
 #include "model/attn_prefill.h"
+#include "model/layer_cuda.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -40,11 +41,27 @@ constexpr int kDrainPositions = 16384;   // key ranges longer than this synchron
 
 // Weight element (row r, column k) of a row-major matrix with leading dimension ldw: FP32, or an int8 code times the scale of its 32-value group
 // (Q8 cache: element offset e -> scale index e / 32; the base pointers passed in are at an offset that is a multiple of 32).
-// WF: 0 = FP32, 1 = int8 code * per-32 scale, 2 = FP16
+// WF: 0 = FP32, 1 = int8 code * per-32 scale, 2 = FP16, 3 = 4-bit value * per-32 (scale, min) (kv4.h), 4 = Q4 keys: 4-bit with per-channel group
+// (scale, min) before the frontier, the Q8 ring after it (aux.base: element offset of W within the cache; Sc: the cache's group scales, not offset)
 template <int WF>
-__device__ __forceinline__ float wget(const void* W, const float* Sc, size_t e) {
+__device__ __forceinline__ float wget(const void* W, const float* Sc, size_t e, const KvAux& aux) {
     if (WF == 1) return static_cast<float>(static_cast<const int8_t*>(W)[e]) * Sc[e >> 5];
     if (WF == 2) return __half2float(static_cast<const __half*>(W)[e]);
+    if (WF == 3) {
+        const float2 sm = __half22float2(reinterpret_cast<const __half2*>(Sc)[e >> 5]);
+        return static_cast<float>((static_cast<const uint8_t*>(W)[e >> 1] >> ((e & 1) * 4)) & 15u) * sm.x + sm.y;
+    }
+    if (WF == 4) {
+        const size_t a = aux.base + e;
+        const int r = static_cast<int>(a / static_cast<size_t>(aux.kv_width));
+        const size_t c = a - static_cast<size_t>(r) * aux.kv_width;
+        if (r < kivi_frontier(aux.held)) {
+            const float2 sm = __half22float2(reinterpret_cast<const __half2*>(Sc)[static_cast<size_t>(r / kKiviGroup) * aux.kv_width + c]);
+            return static_cast<float>((static_cast<const uint8_t*>(W)[e >> 1] >> ((a & 1) * 4)) & 15u) * sm.x + sm.y;
+        }
+        const size_t i = static_cast<size_t>(r % kKiviRing) * aux.kv_width + c;
+        return static_cast<float>(aux.ring[i]) * aux.ring_sc[i >> 5];
+    }
     return static_cast<const float*>(W)[e];
 }
 
@@ -53,7 +70,7 @@ __device__ __forceinline__ float wget(const void* W, const float* Sc, size_t e) 
 template <bool TRANS_W, int WF, bool MMA>
 __global__ void __launch_bounds__(kThreads, 2)
 attn_gemm_kernel(const void* __restrict__ W, const float* __restrict__ Sc, size_t ldw, const float* __restrict__ X, size_t ldx, float* __restrict__ Y, size_t ldy,
-                 int N, int T, int Kpad, int Kvalid, int rpt, int qoff) {
+                 int N, int T, int Kpad, int Kvalid, int rpt, int qoff, KvAux aux) {
     // Causal bound: rows of X are queries (token = row / rpt, at key index qoff + token). A tile never needs keys past its last query's index:
     // the scores GEMM (keys are the output rows) skips tiles entirely above it -- the masked softmax ignores those entries -- and the values GEMM
     // (keys are the reduction) stops there, where the probabilities are zero anyway. Halves the work of a causal prefill chunk.
@@ -89,7 +106,7 @@ attn_gemm_kernel(const void* __restrict__ W, const float* __restrict__ Sc, size_
                 }
             } else {
 #pragma unroll
-                for (int e = 0; e < 16; ++e) Ws[k][n0 + e] = (kv && row0 + n0 + e < N) ? wget<WF>(W, Sc, base + e) : 0.0f;
+                for (int e = 0; e < 16; ++e) Ws[k][n0 + e] = (kv && row0 + n0 + e < N) ? wget<WF>(W, Sc, base + e, aux) : 0.0f;
             }
         } else {         // 128 rows x 32 k: thread -> rows tid/4 and tid/4 + 64, 8 consecutive k
 #pragma unroll
@@ -98,7 +115,7 @@ attn_gemm_kernel(const void* __restrict__ W, const float* __restrict__ Sc, size_
                 const bool rv = row0 + r < N;
                 const size_t base = static_cast<size_t>(rv ? row0 + r : 0) * ldw + k0 + lq * 8;
 #pragma unroll
-                for (int e = 0; e < 8; ++e) Ws[lq * 8 + e][r] = (rv && k0 + lq * 8 + e < Kvalid) ? wget<WF>(W, Sc, base + e) : 0.0f;
+                for (int e = 0; e < 8; ++e) Ws[lq * 8 + e][r] = (rv && k0 + lq * 8 + e < Kvalid) ? wget<WF>(W, Sc, base + e, aux) : 0.0f;
             }
         }
 #pragma unroll
@@ -231,14 +248,14 @@ size_t round_up(size_t v, size_t m) { return (v + m - 1) / m * m; }
 
 template <int KF, int VF>
 void launch_pair(const void* Kh, const float* Ksc, const void* Vh, const float* Vsc, size_t kvw, const float* qrows, size_t ldq, float* S, size_t ldS, int P, int R,
-                 int hd, int kstart, int pos0, int window, float scale, int rows_per_token, float* out, size_t ldo, cudaStream_t s) {
+                 int hd, int kstart, int pos0, int window, float scale, int rows_per_token, float* out, size_t ldo, cudaStream_t s, const KvAux& aux) {
     const dim3 g1(static_cast<unsigned>((P + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN));
-    if (attn_use_mma()) attn_gemm_kernel<false, KF, true><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart);
-    else attn_gemm_kernel<false, KF, false><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart);
+    if (attn_use_mma()) attn_gemm_kernel<false, KF, true><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart, aux);
+    else attn_gemm_kernel<false, KF, false><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart, aux);
     masked_softmax_kernel<<<R, 256, 0, s>>>(S, ldS, P, kstart, pos0, window, scale, rows_per_token);
     const dim3 g2(static_cast<unsigned>((hd + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN));
-    if (attn_use_mma()) attn_gemm_kernel<true, VF, true><<<g2, kThreads, 0, s>>>(Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P, rows_per_token, pos0 - kstart);
-    else attn_gemm_kernel<true, VF, false><<<g2, kThreads, 0, s>>>(Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P, rows_per_token, pos0 - kstart);
+    if (attn_use_mma()) attn_gemm_kernel<true, VF, true><<<g2, kThreads, 0, s>>>(Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P, rows_per_token, pos0 - kstart, aux);
+    else attn_gemm_kernel<true, VF, false><<<g2, kThreads, 0, s>>>(Vh, Vsc, kvw, S, ldS, out, ldo, hd, R, static_cast<int>(ldS), P, rows_per_token, pos0 - kstart, aux);
 }
 
 }  // namespace
@@ -253,22 +270,37 @@ size_t attn_prefill_scratch_floats(int n, int pos0, int window, int heads, int k
 }
 
 int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void* K, const float* Ksc, const void* V, const float* Vsc, int n, int pos0, int heads,
-                      int kv_heads, int hd, int window, float scale, float* scratch, size_t scratch_floats, float* out, void* stream) {
+                      int kv_heads, int hd, int window, float scale, float* scratch, size_t scratch_floats, float* out, void* stream, const KvAux& aux_in) {
     if (!q || !K || !V || !scratch || !out || n <= 0 || pos0 < 0 || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || hd % 128 != 0 || window < 0)
         return static_cast<int>(cudaErrorInvalidValue);
     if (fmt == AttnFmt::TQ4) return static_cast<int>(cudaErrorNotSupported);
-    const int kf = fmt == AttnFmt::Q8 ? 1 : fmt == AttnFmt::K16V8 ? 2 : 0, vf = fmt == AttnFmt::F32 ? 0 : 1;
-    if ((kf == 1 && !Ksc) || (vf == 1 && !Vsc)) return static_cast<int>(cudaErrorInvalidValue);
+    // key / value element formats (wget): 0 FP32, 1 int8 * scale, 2 FP16, 3 4-bit values, 4 Q4 keys
+    const int kf = fmt == AttnFmt::F32 ? 0 : fmt == AttnFmt::K16V8 ? 2 : fmt == AttnFmt::Q4 ? 4 : 1;
+    const int vf = fmt == AttnFmt::F32 ? 0 : (fmt == AttnFmt::K8V4 || fmt == AttnFmt::Q4) ? 3 : 1;
+    if ((kf != 0 && kf != 2 && !Ksc) || (vf != 0 && !Vsc)) return static_cast<int>(cudaErrorInvalidValue);
+    if (kf == 4 && (!aux_in.ring || !aux_in.ring_sc)) return static_cast<int>(cudaErrorInvalidValue);
+    KvAux aux = aux_in;
+    aux.kv_width = kv_heads * hd;
+    aux.held = pos0 + n;   // the whole chunk is appended before attention
+    aux.pend = nullptr;
     if (scratch_floats < attn_prefill_scratch_floats(n, pos0, window, heads, kv_heads)) return static_cast<int>(cudaErrorInvalidValue);
     auto s = static_cast<cudaStream_t>(stream);
     const size_t kvw = static_cast<size_t>(kv_heads) * hd;
     const int group = heads / kv_heads;
-    const size_t kesz = kf == 0 ? 4 : kf == 1 ? 1 : 2, vesz = vf == 0 ? 4 : 1;
-    auto pair = [&](const void* Kh, const float* Ks, const void* Vh, const float* Vs, const float* qrows, size_t ldq, int P, int R, int kstart, int p0, int rpt,
+    // byte offset of element `off` in a cache of each element format; scales: per-32 groups (Q4 keys: the unoffset per-channel table + aux.base)
+    auto kbytes = [&](size_t off) { return kf == 0 ? off * 4 : kf == 2 ? off * 2 : kf == 4 ? off / 2 : off; };
+    auto vbytes = [&](size_t off) { return vf == 0 ? off * 4 : vf == 3 ? off / 2 : off; };
+    auto kscales = [&](size_t off) -> const float* { return kf == 1 ? Ksc + off / 32 : kf == 4 ? Ksc : nullptr; };
+    auto vscales = [&](size_t off) -> const float* { return vf != 0 ? Vsc + off / 32 : nullptr; };
+    auto pair = [&](size_t koff, const void* Kh, const float* Ks, const void* Vh, const float* Vs, const float* qrows, size_t ldq, int P, int R, int kstart, int p0, int rpt,
                     float* o, size_t ldo, size_t ldS) {
-        if (kf == 0) launch_pair<0, 0>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s);
-        else if (kf == 1) launch_pair<1, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s);
-        else launch_pair<2, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s);
+        KvAux a = aux;
+        a.base = koff;
+        if (kf == 0) launch_pair<0, 0>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
+        else if (kf == 2) launch_pair<2, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
+        else if (kf == 4) launch_pair<4, 3>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
+        else if (vf == 3) launch_pair<1, 3>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
+        else launch_pair<1, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
     };
     const size_t rows_per_token = kv_heads == 1 ? static_cast<size_t>(heads) : 1;
     for (int t0 = 0, m = 0; t0 < n; t0 += m) {
@@ -283,17 +315,16 @@ int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void
         float* os = out + static_cast<size_t>(t0) * heads * hd;
         if (kv_heads == 1) {   // one K/V head: the m*heads query rows (t, h) are evenly strided (hd apart): all heads in ONE pair of GEMMs
             const size_t off = static_cast<size_t>(kstart) * kvw;
-            const void* Kh = static_cast<const uint8_t*>(K) + off * kesz;
-            const void* Vh = static_cast<const uint8_t*>(V) + off * vesz;
-            pair(Kh, kf == 1 ? Ksc + off / 32 : nullptr, Vh, vf == 1 ? Vsc + off / 32 : nullptr, qs, static_cast<size_t>(hd), P, m * heads, kstart, p0, heads, os, hd, ldS);
+            const void* Kh = static_cast<const uint8_t*>(K) + kbytes(off);
+            const void* Vh = static_cast<const uint8_t*>(V) + vbytes(off);
+            pair(off, Kh, kscales(off), Vh, vscales(off), qs, static_cast<size_t>(hd), P, m * heads, kstart, p0, heads, os, hd, ldS);
         } else {
             for (int h = 0; h < heads; ++h) {
                 const size_t off = static_cast<size_t>(kstart) * kvw + static_cast<size_t>(h / group) * hd;
-                const void* Kh = static_cast<const uint8_t*>(K) + off * kesz;
-                const void* Vh = static_cast<const uint8_t*>(V) + off * vesz;
+                const void* Kh = static_cast<const uint8_t*>(K) + kbytes(off);
+                const void* Vh = static_cast<const uint8_t*>(V) + vbytes(off);
                 const size_t ldq = static_cast<size_t>(heads) * hd;
-                pair(Kh, kf == 1 ? Ksc + off / 32 : nullptr, Vh, vf == 1 ? Vsc + off / 32 : nullptr, qs + static_cast<size_t>(h) * hd, ldq, P, m, kstart, p0, 1,
-                     os + static_cast<size_t>(h) * hd, ldq, ldS);
+                pair(off, Kh, kscales(off), Vh, vscales(off), qs + static_cast<size_t>(h) * hd, ldq, P, m, kstart, p0, 1, os + static_cast<size_t>(h) * hd, ldq, ldS);
             }
         }
         const cudaError_t e = cudaGetLastError();
@@ -317,7 +348,7 @@ int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void
 
 int attn_prefill_f32_cuda(const float* q, const float* K, const float* V, int n, int pos0, int heads, int kv_heads, int hd, int window, float scale, float* scratch,
                           size_t scratch_floats, float* out, void* stream) {
-    return attn_prefill_cuda(AttnFmt::F32, q, nullptr, K, nullptr, V, nullptr, n, pos0, heads, kv_heads, hd, window, scale, scratch, scratch_floats, out, stream);
+    return attn_prefill_cuda(AttnFmt::F32, q, nullptr, K, nullptr, V, nullptr, n, pos0, heads, kv_heads, hd, window, scale, scratch, scratch_floats, out, stream, {});
 }
 
 }  // namespace dara::model

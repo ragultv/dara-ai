@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include "model/layer_cuda.h"
 #include "model/tq_kv.h"
 
 namespace dara::model {
@@ -46,7 +47,7 @@ __global__ void rotate_q_kernel(const float* __restrict__ q, float* __restrict__
 template <AttnFmt FMT>
 __global__ void __launch_bounds__(kThreads)
 partial_kernel(const float* __restrict__ q, const void* __restrict__ Kv, const float* __restrict__ Kn, const void* __restrict__ Vv, const float* __restrict__ Vn,
-               const int64_t* __restrict__ pos, int heads, int kv_heads, int hd, int window, float scale, int splits, float* __restrict__ part) {
+               const int64_t* __restrict__ pos, int heads, int kv_heads, int hd, int window, float scale, int splits, float* __restrict__ part, KvAux aux) {
     extern __shared__ float sq[];             // hd floats: the query (F32) or rotated query (TQ4)
     __shared__ float sc[kSplitChunk];         // scores of this chunk
     __shared__ float s_c[16];
@@ -87,7 +88,36 @@ partial_kernel(const float* __restrict__ q, const void* __restrict__ Kv, const f
             }
             for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
             if (lane == 0) sc[j] = acc * scale;
-        } else if (FMT == AttnFmt::Q8) {
+        } else if (FMT == AttnFmt::Q4) {
+            const int r = lo + j;
+            const int frontier = kivi_frontier(aux.pend ? static_cast<int>(*aux.pend) + 1 : aux.held);
+            if (r < frontier) {   // 4-bit, per-channel (scale, min) of the position's group
+                const uint8_t* kc = static_cast<const uint8_t*>(Kv) + (row * hd >> 1);
+                const __half2* ks = reinterpret_cast<const __half2*>(Kn) + static_cast<size_t>(r / kKiviGroup) * kv_heads * hd + static_cast<size_t>(kvh) * hd;
+                for (int i = lane * 4; i < hd; i += 128) {
+                    const uint16_t w = *reinterpret_cast<const uint16_t*>(kc + (i >> 1));
+                    const float4 qq = *reinterpret_cast<const float4*>(sq + i);
+                    const float2 s0 = __half22float2(ks[i]), s1 = __half22float2(ks[i + 1]), s2 = __half22float2(ks[i + 2]), s3 = __half22float2(ks[i + 3]);
+                    acc = fmaf(qq.x, fmaf(static_cast<float>(w & 15u), s0.x, s0.y), acc);
+                    acc = fmaf(qq.y, fmaf(static_cast<float>((w >> 4) & 15u), s1.x, s1.y), acc);
+                    acc = fmaf(qq.z, fmaf(static_cast<float>((w >> 8) & 15u), s2.x, s2.y), acc);
+                    acc = fmaf(qq.w, fmaf(static_cast<float>((w >> 12) & 15u), s3.x, s3.y), acc);
+                }
+            } else {              // the ring: Q8
+                const size_t srow = static_cast<size_t>(r % kKiviRing) * kv_heads + kvh;
+                const int8_t* kr = aux.ring + srow * hd;
+                const float* ks = aux.ring_sc + srow * (hd / 32);
+                for (int i = lane * 4; i < hd; i += 128) {
+                    const char4 kk = *reinterpret_cast<const char4*>(kr + i);
+                    const float4 qq = *reinterpret_cast<const float4*>(sq + i);
+                    float d = qq.x * static_cast<float>(kk.x);
+                    d = fmaf(qq.y, static_cast<float>(kk.y), d); d = fmaf(qq.z, static_cast<float>(kk.z), d); d = fmaf(qq.w, static_cast<float>(kk.w), d);
+                    acc = fmaf(ks[i >> 5], d, acc);
+                }
+            }
+            for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
+            if (lane == 0) sc[j] = acc * scale;
+        } else if (FMT == AttnFmt::Q8 || FMT == AttnFmt::K8V4) {
             const int8_t* kr = static_cast<const int8_t*>(Kv) + row * hd;
             const float* ks = Kn + row * (hd / 32);
             for (int i = lane * 4; i < hd; i += 128) {
@@ -144,6 +174,16 @@ partial_kernel(const float* __restrict__ q, const void* __restrict__ Kv, const f
             for (int j = 0; j < cnt; ++j) {
                 const size_t row = static_cast<size_t>(lo + j) * kv_heads + kvh;
                 acc = fmaf(sc[j] * Vn[row * (hd / 32) + (i >> 5)], static_cast<float>(vc[row * hd + i]), acc);
+            }
+        } else if (FMT == AttnFmt::K8V4 || FMT == AttnFmt::Q4) {
+            const uint8_t* vc = static_cast<const uint8_t*>(Vv);
+            const __half2* vs = reinterpret_cast<const __half2*>(Vn);
+            const int shift = (i & 1) * 4;
+            for (int j = 0; j < cnt; ++j) {
+                const size_t row = static_cast<size_t>(lo + j) * kv_heads + kvh;
+                const float2 sm = __half22float2(vs[row * (hd / 32) + (i >> 5)]);
+                const float code = static_cast<float>((vc[(row * hd + i) >> 1] >> shift) & 15u);
+                acc = fmaf(sc[j], fmaf(code, sm.x, sm.y), acc);
             }
         } else {
             const uint8_t* vc = static_cast<const uint8_t*>(Vv);
@@ -250,7 +290,9 @@ size_t attn_splitkv_scratch_floats_per_token(AttnFmt fmt, int heads, int hd, int
 }
 
 int attn_splitkv_cuda(AttnFmt fmt, const float* q, const float* gate, const void* K, const float* Kn, const void* V, const float* Vn, const int64_t* pos, int T,
-                      int heads, int kv_heads, int hd, int window, float scale, int max_positions, float* scratch, size_t scratch_floats, float* out, void* stream) {
+                      int heads, int kv_heads, int hd, int window, float scale, int max_positions, float* scratch, size_t scratch_floats, float* out, void* stream,
+                      const KvAux& aux) {
+    if (fmt == AttnFmt::Q4 && (!aux.ring || !aux.ring_sc)) return static_cast<int>(cudaErrorInvalidValue);
     if (!q || !K || !V || !pos || !out || !scratch || T < 0 || heads <= 0 || kv_heads <= 0 || heads % kv_heads != 0 || max_positions <= 0 || window < 0)
         return static_cast<int>(cudaErrorInvalidValue);
     if (fmt != AttnFmt::TQ4 ? (hd % 128 != 0 || hd > 512) : !tq_supported_head_dim(hd)) return static_cast<int>(cudaErrorInvalidValue);
@@ -276,14 +318,15 @@ int attn_splitkv_cuda(AttnFmt fmt, const float* q, const float* gate, const void
             qsrc = qrot;
         }
         const size_t smem = static_cast<size_t>(hd) * sizeof(float);
-        if (fmt == AttnFmt::F32)
-            partial_kernel<AttnFmt::F32><<<dim3(splits, heads, n), kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials);
-        else if (fmt == AttnFmt::Q8)
-            partial_kernel<AttnFmt::Q8><<<dim3(splits, heads, n), kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials);
-        else if (fmt == AttnFmt::K16V8)
-            partial_kernel<AttnFmt::K16V8><<<dim3(splits, heads, n), kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials);
-        else
-            partial_kernel<AttnFmt::TQ4><<<dim3(splits, heads, n), kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials);
+        const dim3 grid(splits, heads, n);
+        switch (fmt) {
+            case AttnFmt::F32: partial_kernel<AttnFmt::F32><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;
+            case AttnFmt::Q8: partial_kernel<AttnFmt::Q8><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;
+            case AttnFmt::K16V8: partial_kernel<AttnFmt::K16V8><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;
+            case AttnFmt::K8V4: partial_kernel<AttnFmt::K8V4><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;
+            case AttnFmt::Q4: partial_kernel<AttnFmt::Q4><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;
+            case AttnFmt::TQ4: partial_kernel<AttnFmt::TQ4><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;
+        }
         if (fmt != AttnFmt::TQ4)   // F32 and Q8 partials are in the plain (unrotated) domain
             combine_kernel<AttnFmt::F32><<<dim3(heads, n), 256, smem, s>>>(partials, gg, pg, heads, hd, window, splits, og);
         else

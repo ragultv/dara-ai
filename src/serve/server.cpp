@@ -203,6 +203,7 @@ struct LoadSpec {
     int vision = -1;              // -1: the server default, 0 off, 1 on
     std::string mmproj;           // explicit mmproj path (path models)
     long long ctx = -1;           // -1: the server default
+    std::string kv;               // K/V format (empty: the server default)
 };
 
 struct Registry {
@@ -253,6 +254,7 @@ struct Registry {
         else if (s.flash == "auto" || s.flash.empty()) eo.flash_mode = "auto";
         else { eo.flash = s.flash; eo.flash_mode = "on"; }   // an explicit drafter file
         if (s.ctx >= 0) eo.kv = static_cast<size_t>(s.ctx);
+        if (!s.kv.empty()) eo.kv_format = s.kv;
         unload();
         std::fprintf(stderr, "loading %s (%s) ...\n", id.empty() ? eo.gguf.c_str() : id.c_str(), eo.gguf.c_str());
         auto e = std::make_shared<Engine>(eo);
@@ -452,6 +454,7 @@ int dara_serve_main(int argc, char** argv) {
         else if (a == "--flash-min-p") reg.base.flash_min_p = static_cast<float>(std::atof(next().c_str()));
         else if (a == "--kv" || a == "--ctx") { const std::string v = next(); reg.base.kv = v == "auto" ? 0 : static_cast<size_t>(std::atoll(v.c_str())); }
         else if (a == "--min-context") reg.base.min_context = static_cast<size_t>(std::atoll(next().c_str()));
+        else if (a == "--kv-format") reg.base.kv_format = next();
         else if (a == "--vram-reserve") reg.base.vram_reserve_mb = static_cast<size_t>(std::atoll(next().c_str()));
         else if (a == "--image-max-tokens") reg.base.image_max_tokens = std::atoi(next().c_str());
         else if (a == "--compact-reserve") reg.base.compact_reserve = std::atoi(next().c_str());
@@ -654,6 +657,7 @@ int dara_serve_main(int argc, char** argv) {
             s.model = b.value("model", "");
             if (b.contains("flash")) { const json& f = b["flash"]; s.flash = f.is_boolean() ? (f.get<bool>() ? "on" : "off") : f.get<std::string>(); }
             if (b.contains("vision")) s.vision = b["vision"].get<bool>() ? 1 : 0;
+            if (b.contains("kv")) s.kv = b["kv"].get<std::string>();
             if (b.contains("ctx")) { const json& c = b["ctx"]; s.ctx = c.is_string() ? 0 : c.get<long long>(); }
         } catch (const std::exception& ex) { bad(res, 400, ex.what(), "invalid_request_error"); return; }
         if (s.model.empty()) { bad(res, 400, "\"model\" is required", "invalid_request_error"); return; }
@@ -664,7 +668,7 @@ int dara_serve_main(int argc, char** argv) {
             reg.load(s);
             const ModelInfo& mi = reg.get()->info();
             res.set_content(dump({{"model", mi.id}, {"context", mi.context_capacity}, {"layers_on_gpu", mi.layers_gpu}, {"layers", mi.layers},
-                                  {"load_seconds", r2(mi.load_seconds)}, {"flash", {{"active", !mi.flash.empty()}, {"note", mi.flash_note}}}, {"vision", mi.vision}}),
+                                  {"load_seconds", r2(mi.load_seconds)}, {"flash", {{"active", !mi.flash.empty()}, {"note", mi.flash_note}}}, {"vision", mi.vision}, {"kv_format", mi.kv_format}}),
                             "application/json");
         } catch (const ModelNotFound& ex) { not_found(res, s.model, ex.what()); }
         catch (const std::exception& ex) { bad(res, 500, ex.what(), "server_error"); }
@@ -723,6 +727,7 @@ int dara_serve_main(int argc, char** argv) {
                 if (f.is_boolean()) sp.flash = f.get<bool>() ? 1 : 0;
                 else if (f.is_string()) { const std::string v = f.get<std::string>(); sp.flash = v == "on" || v == "true" ? 1 : v == "off" || v == "false" ? 0 : -1; }
             }
+            if (body.contains("cache_write") && body["cache_write"].is_boolean()) sp.cache_write = body["cache_write"].get<bool>();
         } catch (const std::exception& e) { bad(res, 400, e.what(), "invalid_request_error"); return; }
         if (const CatalogEntry* ce = catalog_find(model)) {   // a Dara model that is not installed: 404 with the download hint, before streaming starts
             if (installed_path(reg.models_dir, *ce, *ce->file("model")).empty()) { not_found(res, model, "model '" + ce->id + "' is not installed"); return; }
