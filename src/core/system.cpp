@@ -1,5 +1,7 @@
 #include "core/system.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
 #ifdef _WIN32
@@ -36,6 +38,21 @@ SystemMemoryInfo query_system_memory() {
     return s;
 #else
     throw std::runtime_error("query_system_memory: Windows only");
+#endif
+}
+
+void memtrace(const char* stage) {
+#ifdef _WIN32
+    static const bool on = [] { const char* e = std::getenv("DARA_MEMTRACE"); return e && e[0] == '1'; }();
+    if (!on) return;
+    // PrivateWorkingSetSize = Task Manager's "Memory" column (file-backed pages such as the mapped GGUF are excluded); PrivateUsage = committed
+    PROCESS_MEMORY_COUNTERS_EX2 pmc{};
+    pmc.cb = sizeof pmc;
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc)) return;
+    std::fprintf(stderr, "MEMTRACE %-34s private working set %7.1f MB | working set %7.1f MB | committed %7.1f MB\n", stage, pmc.PrivateWorkingSetSize / 1048576.0,
+                 pmc.WorkingSetSize / 1048576.0, pmc.PrivateUsage / 1048576.0);
+#else
+    (void)stage;
 #endif
 }
 

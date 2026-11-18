@@ -244,10 +244,14 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         states_.push_back(std::move(s));
     }
     if (head_on_cpu_) {
+        // CPU head: read from the memory-mapped model file (hot pages every token; no private copy). DARA_EMBD_RAM=1 keeps a private copy.
         dara::kernels::QuantType hq;
-        head_host_ = weights.read_output_head(&hq);
-        const size_t rb = head_host_.size() / static_cast<size_t>(cfg_.vocab);
-        head_cpu_ = HostMatrix{head_host_.data(), hq, static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden), rb};
+        static const bool ram = [] { const char* e = std::getenv("DARA_EMBD_RAM"); return e && e[0] == '1'; }();
+        size_t hb = 0;
+        const uint8_t* mp = ram ? nullptr : weights.map_output_head(&hq, &hb);
+        if (!mp) { head_host_ = weights.read_output_head(&hq); mp = head_host_.data(); hb = head_host_.size(); }
+        const size_t rb = hb / static_cast<size_t>(cfg_.vocab);
+        head_cpu_ = HostMatrix{mp, hq, static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden), rb};
     } else {
         // Q6_K head (the largest single matrix: 521 MB per token on the 4B): planar copy for the aligned int8 kernel. DARA_Q6_PLANAR=0 or the FP32
         // reference path (DARA_INT8=0) keep the GGUF layout.

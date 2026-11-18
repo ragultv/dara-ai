@@ -4,6 +4,17 @@
 #include <filesystem>
 #include <stdexcept>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <malloc.h>
+#endif
+
 namespace dara::io {
 
 uint64_t gguf_row_bytes(uint32_t type, uint64_t cols) {
@@ -83,6 +94,45 @@ std::vector<float> GgufCheckpoint::read_f32(const std::string& name) const {
     std::vector<float> out(raw.size() / 4);
     std::memcpy(out.data(), raw.data(), raw.size());
     return out;
+}
+
+const uint8_t* GgufCheckpoint::map(const std::string& name) const {
+    const Info& in = info(name);
+#ifdef _WIN32
+    if (!map_base_) {
+        const int wn = MultiByteToWideChar(CP_UTF8, 0, path_.c_str(), -1, nullptr, 0);
+        std::wstring wpath(static_cast<size_t>(wn > 0 ? wn : 1), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, path_.c_str(), -1, wpath.data(), wn);
+        HANDLE f = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
+        if (f == INVALID_HANDLE_VALUE) throw std::runtime_error("gguf: cannot open for mapping: " + path_);
+        HANDLE m = CreateFileMappingW(f, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (!m) { CloseHandle(f); throw std::runtime_error("gguf: CreateFileMapping failed: " + path_); }
+        const void* v = MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
+        if (!v) { CloseHandle(m); CloseHandle(f); throw std::runtime_error("gguf: MapViewOfFile failed: " + path_); }
+        map_file_ = f;
+        map_handle_ = m;
+        map_base_ = static_cast<const uint8_t*>(v);
+    }
+    return map_base_ + in.offset;
+#else
+    (void)in;
+    throw std::runtime_error("gguf: memory mapping is only implemented on Windows");
+#endif
+}
+
+void GgufCheckpoint::release_string_arrays() {
+    hdr_.string_arrays.clear();
+#ifdef _WIN32
+    _heapmin();   // hand the freed vocabulary / merge strings back to the OS instead of keeping them in the CRT heap
+#endif
+}
+
+GgufCheckpoint::~GgufCheckpoint() {
+#ifdef _WIN32
+    if (map_base_) UnmapViewOfFile(map_base_);
+    if (map_handle_) CloseHandle(static_cast<HANDLE>(map_handle_));
+    if (map_file_) CloseHandle(static_cast<HANDLE>(map_file_));
+#endif
 }
 
 }  // namespace dara::io

@@ -18,6 +18,9 @@ struct SystemMemoryInfo {
 // Throws std::runtime_error if the OS query fails. Windows only.
 SystemMemoryInfo query_system_memory();
 
+// DARA_MEMTRACE=1: prints this process's working set and private bytes with a stage label (memory budget work). No-op otherwise.
+void memtrace(const char* stage);
+
 struct GpuMemoryInfo {
     std::string name;
     int cc_major = 0, cc_minor = 0;
