@@ -1,4 +1,4 @@
-﻿#include "serve/engine.h"
+#include "serve/engine.h"
 
 #include <algorithm>
 #include <chrono>
@@ -378,25 +378,26 @@ struct Engine::Impl {
         }
     }
 
-    int32_t sample(std::vector<float>& lg, const SampleParams& sp, const std::vector<int32_t>& seq, std::mt19937_64& rng) {
-        const int V = std::min(static_cast<int>(lg.size()), tok_vocab);
+    // The sampling distribution of one logits row (n floats, modified in place): repeat penalty, temperature, min_p, top_k, top_p. Fills
+    // cand[0, keep) / probs[0, keep) (normalised) and returns keep. Requires temperature > 0.
+    size_t dist(float* lg, size_t n, const SampleParams& sp, const std::vector<int32_t>& seq) {
+        const int V = std::min(static_cast<int>(n), tok_vocab);
         if (sp.repeat_penalty != 1.0f && sp.repeat_penalty > 0) {
             std::unordered_set<int32_t> seen;
-            const size_t n = std::min(seq.size(), static_cast<size_t>(std::max(0, sp.repeat_last_n)));
-            for (size_t i = seq.size() - n; i < seq.size(); ++i) {
+            const size_t m = std::min(seq.size(), static_cast<size_t>(std::max(0, sp.repeat_last_n)));
+            for (size_t i = seq.size() - m; i < seq.size(); ++i) {
                 const int32_t id = seq[i];
                 if (id < 0 || id >= V || !seen.insert(id).second) continue;
-                lg[static_cast<size_t>(id)] = lg[static_cast<size_t>(id)] > 0 ? lg[static_cast<size_t>(id)] / sp.repeat_penalty : lg[static_cast<size_t>(id)] * sp.repeat_penalty;
+                lg[id] = lg[id] > 0 ? lg[id] / sp.repeat_penalty : lg[id] * sp.repeat_penalty;
             }
         }
-        if (sp.temperature <= 0 || sp.top_k == 1) return static_cast<int32_t>(std::max_element(lg.begin(), lg.begin() + V) - lg.begin());
         const float T = sp.temperature;
-        const float mx = *std::max_element(lg.begin(), lg.begin() + V);
+        const float mx = *std::max_element(lg, lg + V);
         cand.clear();
         // min_p as a logit threshold first (cheap pruning of the long tail): p_i >= min_p * p_max  <=>  l_i >= l_max + T ln(min_p)
         const float thr = sp.min_p > 0 && sp.min_p < 1 ? mx + T * std::log(sp.min_p) : -INFINITY;
-        for (int i = 0; i < V; ++i) if (lg[static_cast<size_t>(i)] >= thr) cand.push_back(i);
-        auto by_logit = [&](int32_t x, int32_t y) { return lg[static_cast<size_t>(x)] > lg[static_cast<size_t>(y)]; };
+        for (int i = 0; i < V; ++i) if (lg[i] >= thr) cand.push_back(i);
+        auto by_logit = [&](int32_t x, int32_t y) { return lg[x] > lg[y]; };
         if (sp.top_k > 0 && static_cast<int>(cand.size()) > sp.top_k) {
             std::nth_element(cand.begin(), cand.begin() + sp.top_k, cand.end(), by_logit);
             cand.resize(static_cast<size_t>(sp.top_k));
@@ -404,7 +405,7 @@ struct Engine::Impl {
         std::sort(cand.begin(), cand.end(), by_logit);
         probs.resize(cand.size());
         double sum = 0;
-        for (size_t i = 0; i < cand.size(); ++i) { probs[i] = std::exp((lg[static_cast<size_t>(cand[i])] - mx) / T); sum += probs[i]; }
+        for (size_t i = 0; i < cand.size(); ++i) { probs[i] = std::exp((lg[cand[i]] - mx) / T); sum += probs[i]; }
         size_t keep = cand.size();
         if (sp.top_p > 0 && sp.top_p < 1) {
             double c = 0;
@@ -412,10 +413,37 @@ struct Engine::Impl {
         }
         double tot = 0;
         for (size_t i = 0; i < keep; ++i) tot += probs[i];
+        for (size_t i = 0; i < keep; ++i) probs[i] = static_cast<float>(probs[i] / tot);
+        return keep;
+    }
+
+    // Draws from cand/probs[0, keep), skipping `exclude` (rejection residual of a deterministic draft: p with that token removed).
+    int32_t draw(size_t keep, std::mt19937_64& rng, int32_t exclude = -1) {
+        double tot = 0;
+        for (size_t i = 0; i < keep; ++i) if (cand[i] != exclude) tot += probs[i];
+        if (tot <= 0) return cand[0];
         std::uniform_real_distribution<double> u(0.0, tot);
         double r = u(rng);
-        for (size_t i = 0; i < keep; ++i) { r -= probs[i]; if (r <= 0) return cand[i]; }
-        return cand[keep - 1];
+        int32_t last = cand[0];
+        for (size_t i = 0; i < keep; ++i) {
+            if (cand[i] == exclude) continue;
+            last = cand[i];
+            r -= probs[i];
+            if (r <= 0) return cand[i];
+        }
+        return last;
+    }
+
+    int32_t sample(float* lg, size_t n, const SampleParams& sp, const std::vector<int32_t>& seq, std::mt19937_64& rng) {
+        if (sp.temperature <= 0 || sp.top_k == 1) {   // greedy (with the repeat penalty applied)
+            SampleParams g = sp; g.temperature = 1.0f; g.top_k = 1; g.top_p = 1; g.min_p = 0;
+            dist(lg, n, g, seq);   // top_k 1: nth_element keeps only the best, O(vocab)
+            return cand[0];
+        }
+        return draw(dist(lg, n, sp, seq), rng);
+    }
+    int32_t sample(std::vector<float>& lg, const SampleParams& sp, const std::vector<int32_t>& seq, std::mt19937_64& rng) {
+        return sample(lg.data(), lg.size(), sp, seq, rng);
     }
 
     // ---- one generation over a token prompt ---------------------------------------------------------------------------------------------
@@ -444,10 +472,13 @@ struct Engine::Impl {
                 reuse = l > 0 ? l - 1 : 0;              // re-feed one token: the drafter and the next-token logits need it
             }
         }
-        bool use_flash = greedy && opt.spec && flash != nullptr;
+        // speculative decoding (prompt lookup + the Flash drafter), for greedy and sampled requests alike; "flash": false turns it off
+        const bool spec_on = opt.spec && sp.flash != 0;
+        bool use_flash = spec_on && flash != nullptr;
+        if (sp.flash == 1 && !flash) r.spec.note = "flash requested but no drafter is loaded" + (info.flash_note.empty() ? std::string() : ": " + info.flash_note);
         if (use_flash && std::min(flash_valid, flash->position()) < reuse) {
             if (!qwen) reuse = std::min(flash_valid, flash->position());   // Nano can rewind anywhere: recompute the part the drafter missed
-            else use_flash = false;                 // the drafter fell behind (sampled requests do not feed it)
+            else { use_flash = false; r.spec.note = "drafter out of step with the cached prompt (a request with flash off ran in between)"; }
         }
         if (reuse == 0) reset_state();
         else if (qwen) { qm->restore_device(qckpt); qm->clear_images(); }
@@ -518,15 +549,18 @@ struct Engine::Impl {
         };
         int passes = 0;
         bool go = accept(first);
-        if (go && greedy && opt.spec) {
-            // speculative decoding, greedy-exact: drafts (prompt lookup first, else the Flash drafter) are verified in one forward; the longest prefix
-            // the model itself would have produced is kept and the state rolled back past the rest
+        if (go && spec_on) {
+            // speculative decoding: drafts (prompt lookup first, else the Flash drafter) are verified in one forward and the state is rolled back past
+            // the first rejected draft. Greedy: a draft is kept while it equals the model's argmax (output identical to plain greedy decoding).
+            // Sampled: both drafters are deterministic (q = a point mass on the draft x), so the exact speculative-sampling rule is: keep x with
+            // probability p(x) under the request's sampling distribution; on rejection draw from p with x removed. The output then follows exactly
+            // the same distribution as plain sampling (only the random stream differs).
             const int kmax = qwen ? std::min(opt.spec_k > 0 ? opt.spec_k : 4, 7) : std::min(opt.spec_k > 0 ? opt.spec_k : 4, 15);
             std::vector<float> y; int32_t d1 = 0; float p1 = 1.0f;
             if (use_flash) { flash->extend(last_feat.data(), &first, 1, y, d1); p1 = flash->last_prob(); }
             r.spec.mode = use_flash ? "flash" : "ngram";
             std::vector<int32_t> draft, feed_t, vids;
-            std::vector<float> feats;
+            std::vector<float> feats, lgs;
             int ng_cool = 0, ng_back = 0, ng_len = qwen ? 4 : 7;
             const int ngram_max = 4, ngram_min = 3;
             auto lookup = [&](int limit) {
@@ -558,17 +592,44 @@ struct Engine::Impl {
                 feed_t.assign(1, cur);
                 feed_t.insert(feed_t.end(), draft.begin(), draft.end());
                 const size_t p0 = pos();
-                if (qwen) {
-                    if (kd > 0) qm->snapshot();
-                    qm->forward(feed_t.data(), kd + 1, 0, nullptr, &rs, &vids, use_flash ? &feats : nullptr, 0);
-                } else if (use_flash || kd > 0) {
-                    vids = gm->forward_argmax(feed_t.data(), kd + 1, &rs, use_flash ? &feats : nullptr);
+                int m = 0;
+                int32_t last_tok = -1;
+                if (greedy) {
+                    if (qwen) {
+                        if (kd > 0) qm->snapshot();
+                        qm->forward(feed_t.data(), kd + 1, 0, nullptr, &rs, &vids, use_flash ? &feats : nullptr, 0);
+                    } else if (use_flash || kd > 0) {
+                        vids = gm->forward_argmax(feed_t.data(), kd + 1, &rs, use_flash ? &feats : nullptr);
+                    } else {
+                        vids.assign(1, gm->forward_greedy(cur, &rs));
+                    }
+                    while (m < kd && vids[static_cast<size_t>(m)] == draft[static_cast<size_t>(m)]) ++m;
+                    last_tok = vids[static_cast<size_t>(m)];
                 } else {
-                    vids.assign(1, gm->forward_greedy(cur, &rs));
+                    if (qwen) {
+                        if (kd > 0) qm->snapshot();
+                        lgs = qm->forward(feed_t.data(), kd + 1, 0, nullptr, &rs, nullptr, use_flash ? &feats : nullptr, 0);
+                    } else if (use_flash || kd > 0) {
+                        lgs = gm->forward(feed_t.data(), kd + 1, 0, nullptr, &rs, use_flash ? &feats : nullptr);
+                    } else {
+                        gm->forward_greedy(cur, &rs, &lgs);
+                    }
+                    const size_t V = lgs.size() / static_cast<size_t>(kd + 1);
+                    const size_t base_len = seq.size();
+                    std::uniform_real_distribution<double> u01(0.0, 1.0);
+                    for (;; ++m) {
+                        const size_t keep = dist(lgs.data() + static_cast<size_t>(m) * V, V, sp, seq);
+                        if (m == kd) { last_tok = draw(keep, rng); break; }   // every draft kept: the bonus token
+                        const int32_t x = draft[static_cast<size_t>(m)];
+                        double px = 0;
+                        for (size_t i = 0; i < keep; ++i) if (cand[i] == x) { px = probs[i]; break; }
+                        if (u01(rng) < px) { seq.push_back(x); continue; }   // keep x with probability p(x)
+                        last_tok = draw(keep, rng, x);                        // rejected: draw from p without x
+                        break;
+                    }
+                    seq.resize(base_len);
                 }
                 ++passes;
-                int m = 0;
-                while (m < kd && vids[static_cast<size_t>(m)] == draft[static_cast<size_t>(m)]) ++m;
                 if (from_ngram) {
                     ng_len = m == kd ? std::min(ng_len * 2, 7) : std::max(2, m + 1);
                     if (m == 0) { ng_back = ng_back ? std::min(ng_back * 2, 32) : 2; ng_cool = ng_back; } else ng_back = 0;
@@ -576,7 +637,7 @@ struct Engine::Impl {
                 if (kd > 0) { ++r.spec.verify_steps; r.spec.drafted += kd; r.spec.accepted += m; }
                 if (m < kd) { if (qwen) qm->rollback(m + 1); else gm->rewind(p0 + static_cast<size_t>(m) + 1); }
                 std::vector<int32_t> to_add(draft.begin(), draft.begin() + m);
-                to_add.push_back(vids[static_cast<size_t>(m)]);
+                to_add.push_back(last_tok);
                 if (use_flash) {
                     flash->rewind(dpos);
                     flash->extend(feats.data(), to_add.data(), m + 1, y, d1);
@@ -848,7 +909,8 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
             }
         }
     }
-    if (!o.spec) flash_path.clear();
+    if (!o.spec || o.flash_mode == "off") { flash_path.clear(); m.info.flash_note = "turned off when the server started"; }
+    else if (flash_path.empty()) m.info.flash_note = m.qwen && dara::model::QwenConfig::from_gguf(*m.gguf).hidden != 2560 ? "no drafter exists for this model" : "drafter file not installed";
     dara::model::ResidencyOptions ropt_plain = ropt;   // without the drafter's VRAM (the "auto" fallback)
     if (!flash_path.empty()) {
         try {
@@ -858,6 +920,7 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
             ropt.extra_bytes_per_token += per;
         } catch (const std::exception& e) {
             std::fprintf(stderr, "note: Flash drafter %s not used (%s)\n", flash_path.c_str(), e.what());
+            m.info.flash_note = std::string("drafter unusable: ") + e.what();
             flash_path.clear();
         }
     }
@@ -873,11 +936,12 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         m.qm = std::make_unique<dara::model::QwenModel>(m.qcfg, *m.qweights, o.kv, ropt);
         // --flash auto: the drafter only pays off when it does not push layers out of VRAM (measured: 4B on 4 GB, 30/32 layers with it is slower
         // than 32/32 without); reload without it in that case
-        if (!flash_path.empty() && o.flash == "auto" && m.qm->placement().resident_layers < m.qcfg.layers) {
+        if (!flash_path.empty() && o.flash_mode == "auto" && m.qm->placement().resident_layers < m.qcfg.layers) {
             m.qm.reset();
             m.qm = std::make_unique<dara::model::QwenModel>(m.qcfg, *m.qweights, o.kv, ropt_plain);
             if (m.qm->placement().resident_layers < m.qcfg.layers) std::fprintf(stderr, "note: the model does not fit in VRAM; Flash is off\n");
             else std::fprintf(stderr, "note: Flash is off (its VRAM would move layers out of VRAM, which costs more than it gains)\n");
+            m.info.flash_note = "its VRAM would move model layers out of VRAM on this GPU (slower than without it); load with flash on to force it";
             flash_path.clear();
         }
         m.hidden = m.qcfg.hidden;
@@ -905,10 +969,11 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         m.gtok = std::make_unique<dara::tokenizer::GemmaTokenizer>(dara::tokenizer::GemmaTokenizer::from_gguf(m.gguf->header()));
         m.gguf->release_string_arrays();
         m.gm = std::make_unique<dara::model::GemmaModel>(*m.gguf, o.kv, ropt);
-        if (!flash_path.empty() && o.flash == "auto" && m.gm->placement().resident_layers < m.gm->config().layers) {   // as for Qwen above
+        if (!flash_path.empty() && o.flash_mode == "auto" && m.gm->placement().resident_layers < m.gm->config().layers) {   // as for Qwen above
             m.gm.reset();
             m.gm = std::make_unique<dara::model::GemmaModel>(*m.gguf, o.kv, ropt_plain);
             std::fprintf(stderr, "note: Flash is off (its VRAM would move layers out of VRAM)\n");
+            m.info.flash_note = "its VRAM would move model layers out of VRAM on this GPU (slower than without it); load with flash on to force it";
             flash_path.clear();
         }
         const auto& cfg = m.gm->config();
@@ -933,7 +998,7 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         if (!flash_path.empty()) m.flash = std::make_unique<dara::model::FlashDrafter>(flash_path, *m.gguf, [g = m.gm.get()](int32_t t) { return g->embed_row_raw(t); }, m.gm->kv_capacity() + 16);
     }
     m.info.path = o.gguf;
-    m.info.id = u8s(std::filesystem::u8path(o.gguf).stem());
+    m.info.id = o.id.empty() ? u8s(std::filesystem::u8path(o.gguf).stem()) : o.id;
     m.info.file_bytes = static_cast<size_t>(std::filesystem::file_size(std::filesystem::u8path(o.gguf), ec));
     m.info.mmproj = o.mmproj;
     m.info.quant = quant_from_name(o.gguf);

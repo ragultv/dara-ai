@@ -50,7 +50,9 @@ def summary(r):
 h = req("/health")
 check("health", h.get("status") == "ok", h.get("model"))
 m = req("/v1/models")
-check("models", m["data"][0]["id"] == h["model"], json.dumps(m["data"][0]["meta"]))
+loaded = [d for d in m["data"] if d.get("dara", {}).get("loaded")]
+check("models (catalog + loaded model)", len(loaded) == 1 and loaded[0]["id"] == h["model"],
+      ", ".join(f"{d['id']}:{d['dara']['status']}" for d in m["data"]))
 
 conv = [{"role": "system", "content": "You are a concise assistant."},
         {"role": "user", "content": "Name three primary colors, one per line."}]

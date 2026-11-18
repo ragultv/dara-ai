@@ -1,4 +1,4 @@
-﻿// Inference engine behind `dara serve`: one loaded model (Qwen3.5 Core 4B / Pro 9B or Gemma 4 Nano, detected from the GGUF), its tokenizer and chat
+// Inference engine behind `dara serve`: one loaded model (Qwen3.5 Core 4B / Pro 9B or Gemma 4 Nano, detected from the GGUF), its tokenizer and chat
 // template, optional image encoder (mmproj, loaded only while an image is encoded), sampling, a prompt cache (the next request reuses the K/V and
 // recurrent state of the shared prefix), a context maintainer that compacts conversations that do not fit, and per-request usage / timings.
 // Not thread-safe: the server serialises requests.
@@ -36,6 +36,7 @@ struct SampleParams {
     int repeat_last_n = 64;
     uint64_t seed = 0;               // 0: random
     std::vector<std::string> stop;   // stop strings (not included in the output)
+    int flash = -1;                  // speculative decoding for this request: -1 auto (on when available), 0 off, 1 on (reported if unavailable)
 };
 
 struct Usage {
@@ -69,8 +70,9 @@ struct ContextInfo {
     bool summary_cached = false;
 };
 
-struct SpecInfo {                    // speculative decoding (greedy requests only; output identical to plain greedy decoding)
+struct SpecInfo {                    // speculative decoding (greedy: output identical to plain greedy; sampled: same distribution as plain sampling)
     std::string mode;                // "": not used, "flash" (trained drafter + prompt lookup), "ngram" (prompt lookup)
+    std::string note;                // why Flash was not used when it was asked for
     int verify_steps = 0, drafted = 0, accepted = 0;
     int passes = 0;                  // model forward passes during decode (tokens per pass = decoded / passes)
 };
@@ -96,6 +98,7 @@ struct ModelInfo {
     int image_max_tokens = 0;
     size_t weights_vram_bytes = 0;
     std::string flash;               // drafter file in use ("" = none)
+    std::string flash_note;          // why no drafter is loaded
     int spec_k = 0;
     std::string gpu;
     std::string placement;
@@ -115,6 +118,7 @@ struct EngineStats {
 
 struct EngineOptions {
     std::string gguf, mmproj;               // mmproj optional (image input)
+    std::string id;                         // model id reported by the API (default: the file name)
     size_t kv = 0;                          // 0: auto
     size_t min_context = 32768;
     int image_max_tokens = 400;             // Qwen image token cap (Gemma: at most 280 by the model)
@@ -122,7 +126,8 @@ struct EngineOptions {
     std::string flash = "auto";             // drafter file, "auto" (the bundled drafter for this model, if found) or "" (off)
     int spec_k = 4;                         // draft tokens per verify step
     float flash_min_p = 0.6f;
-    bool spec = true;                       // speculative decoding for greedy requests (temperature 0)
+    std::string flash_mode = "auto";        // "auto": keep the drafter only if the model stays fully in VRAM with it; "on": always; "off": never
+    bool spec = true;                       // speculative decoding (prompt lookup + Flash) for requests that do not turn it off
 };
 
 class Engine {
