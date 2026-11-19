@@ -1,0 +1,87 @@
+{
+  "context": {
+    "capacity": 131072,
+    "held_tokens": 0
+  },
+  "disk": {
+    "flash_file_mb": 35.2,
+    "installed_models_mb": 13568.74,
+    "mmproj_file_mb": 939.99,
+    "model_file_mb": 2962.82,
+    "models_dir": "D:\\darap-ai\\models",
+    "volume_free_gb": 52.96,
+    "volume_total_gb": 200.0
+  },
+  "downloads": [],
+  "engine": {
+    "avg_decode_tokens_per_second": 0.0,
+    "avg_prefill_tokens_per_second": 0.0,
+    "busy": false,
+    "cached_tokens_total": 0,
+    "compactions": 0,
+    "completion_tokens_total": 0,
+    "errors": 0,
+    "live_tokens": 0,
+    "live_tokens_per_second": 0.0,
+    "prompt_tokens_total": 0,
+    "requests": 0
+  },
+  "gpu": {
+    "clock_mem_mhz": 5870,
+    "clock_sm_mhz": 1380,
+    "compute_capability": "7.5",
+    "memory_utilization_percent": 1,
+    "name": "NVIDIA GeForce GTX 1650",
+    "nvml": true,
+    "power_limit_w": 50.0,
+    "power_w": 18.2,
+    "pstate": 0,
+    "temperature_c": 50,
+    "utilization_percent": 10,
+    "vram_free_mb": 250.75,
+    "vram_total_mb": 4095.69,
+    "vram_used_mb": 3844.94,
+    "vram_used_percent": 93.88,
+    "vram_weights_mb": 1264.08
+  },
+  "last_request": null,
+  "model": {
+    "family": "gemma4",
+    "flash": "d:\\darap-ai\\build\\flash\\drafter_nano_v2.dflash",
+    "flash_note": "",
+    "hidden": 1536,
+    "id": "dara-nano",
+    "image_max_tokens": 280,
+    "image_scratch_max_mb": 174.14,
+    "kv_format": "q8",
+    "layers": 35,
+    "layers_on_gpu": 35,
+    "load_seconds": 2.56,
+    "mmproj": "D:\\darap-ai\\models\\gemma4-e2b-gguf\\mmproj-F16.gguf",
+    "native_context": 131072,
+    "output_head": "gpu",
+    "path": "D:\\darap-ai\\models\\gemma4-e2b-gguf\\gemma-4-E2B-it-Q4_K_M.gguf",
+    "placement": "gpu-only (35 gpu / 0 host layers, loadable=yes, performance-qualified=yes)",
+    "quant": "Q4_K_M",
+    "spec_k": 4,
+    "vision": true,
+    "vision_resident_mb": 1.13,
+    "vision_streamed": true,
+    "vocab": 262144
+  },
+  "pid": 15668,
+  "process": {
+    "committed_mb": 3349.6,
+    "peak_working_set_mb": 433.14,
+    "private_working_set_mb": 218.57,
+    "working_set_mb": 237.39
+  },
+  "queued": 0,
+  "ram": {
+    "available_mb": 6477.84,
+    "total_mb": 15710.1,
+    "used_mb": 9232.26,
+    "used_percent": 58.77
+  },
+  "uptime_seconds": 0.14
+}

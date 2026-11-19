@@ -1,0 +1,23 @@
+data: {"choices":[{"delta":{"content":"","role":"assistant"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":"!"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":" How"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":" can"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":" I"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":" help"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":" you"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{"content":" today"},"finish_reason":null,"index":0}],"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk"}
+
+data: {"choices":[{"delta":{},"finish_reason":"length","index":0}],"context":{"capacity":131072,"compacted":false,"dropped_messages":0,"summarized_messages":0,"summary_cached":false,"truncated_last_message":false,"used":19},"created":1795071569,"id":"chatcmpl-1795071569-2","model":"dara-nano","object":"chat.completion.chunk","speculative":{"acceptance":25.0,"accepted":2,"drafted":8,"flash_stood_down_at_pass":null,"mode":"flash","model_passes":5,"note":null,"tokens_per_pass":1.6,"verify_steps":4},"timings":{"compact_ms":0.0,"decode_ms":93.6,"decode_tokens":8,"decode_tokens_per_second":74.79,"image_memory":{"from_free_vram_mb":0.0,"from_unused_context_mb":0.0,"scratch_mb":0.0},"image_ms":0.0,"prefill_ms":49.94,"prefill_tokens":9,"prefill_tokens_per_second":180.21,"queue_ms":0.0,"total_ms":143.63,"ttft_ms":50.03},"usage":{"completion_tokens":8,"prompt_tokens":12,"prompt_tokens_details":{"cached_tokens":3,"image_tokens":0},"total_tokens":20}}
+
+data: [DONE]
+
+
