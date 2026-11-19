@@ -9,7 +9,7 @@
 | Tailwind CSS v4 at build time, tokens via `@theme` mapping to `tokens.css` | Utility classes without a runtime; tokens stay the single color source |
 | System font stack | No font files to load |
 | No UI kit with a large runtime (no MUI, no Ant); accessible headless primitives are allowed and recommended for Dialog/Popover/Menu/Tooltip/Select (Radix UI or React Aria), plus Zustand for state; keep the tree of dependencies small | Memory and bundle size |
-| Local storage in SQLite via `tauri-plugin-sql`, or JSON files for the first milestone | Conversations must survive restarts; keep it simple |
+| One SQLite database owned by the Rust side (`rusqlite`, bundled) at `%LOCALAPPDATA%\Dara\dara.db`, reached only through typed Tauri commands (see 08-database.md) | Conversations, settings and per-model config must survive restarts and updates; the WebView gets no raw SQL; not `localStorage` (can be cleared) |
 
 Budget: server + UI under 300 MB RAM total. Measure in Milestone 0 (see 07) with the WebView idle on Chat and again after a 50-message conversation; record the numbers in `app/PERF.md`. If the UI exceeds about 115 MB, stop and report before adding features.
 
@@ -59,7 +59,7 @@ Keep `tokens.css` in `docs/ui/` as the source; copy it into the app at build tim
 - Connection store: `{status: 'starting'|'ready'|'offline'|'error', baseUrl, apiKey}`. Every request goes through `api/client.ts`, which adds the `Authorization: Bearer` header, a timeout, an `AbortSignal`, and turns error bodies `{error:{message,type,code?,download?}}` into a typed `ApiError`.
 - Polling: `/dara/stats` every 1 s only while the Monitor page or the footer pill is visible; `/dara/load` every 300 ms only during a load; `/dara/models/pull/{job}` every 500 ms (or the SSE stream) during a download; stop on `document.hidden`.
 - Streaming chat: read the SSE with `fetch` + `ReadableStream`; batch updates with `requestAnimationFrame` (not one React render per token); keep the raw text in a plain string and render Markdown on a throttle (every 50 to 80 ms) to avoid O(n^2) re-parsing in long replies; abort with `AbortController` on Stop (the server stops generating when the connection closes).
-- Conversations: `{id, title, createdAt, messages[{id, role, content, images?, stats?}], settings}`. Store images as files, not base64 in the database. Keep only the active conversation's messages in memory; load others on demand.
+- Conversations live in the SQLite database (08-database.md), loaded and saved through Tauri commands; the React stores are a cache of the active conversation. Images are files in the Dara attachments folder, not base64 in the database. Keep only the active conversation's messages in memory; load others on demand.
 - Long lists (long conversations, model logs) must be virtualized or windowed once past about 200 items.
 
 ## Performance rules

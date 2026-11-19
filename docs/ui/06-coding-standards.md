@@ -12,6 +12,7 @@
 
 ## API and data
 
+- Persistent data (history, settings, per-model config) goes through the typed Tauri commands in `lib/db/` only; no `localStorage` for data that must persist, no SQL in the frontend (08-database.md).
 - All HTTP goes through `lib/api/client.ts`; types come from `types.ts` (copied from `docs/ui/dara-api.d.ts`). Never import `fetch` in a component.
 - Validate server responses at the boundary only where a wrong shape would crash the UI (use small hand-written guards, not a heavy schema library). Tolerate unknown and missing optional fields.
 - Errors: throw `ApiError` (`status`, `type`, `message`, `code`, `download`); catch at the store or page level and show an `ErrorState`/toast with the server's message. Never swallow errors silently; never show raw stack traces to users.
