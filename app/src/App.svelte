@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { serverStore } from "./lib/stores/server.svelte.ts";
+  import { modelsStore } from "./lib/stores/models.svelte.ts";
   import { router } from "./lib/router/router.svelte.ts";
   import LeftRail from "./lib/shell/LeftRail.svelte";
   import StatusPill from "./lib/shell/StatusPill.svelte";
@@ -11,9 +12,11 @@
   import MonitorPage from "./routes/MonitorPage.svelte";
   import SettingsPage from "./routes/SettingsPage.svelte";
   import KitPage from "./routes/KitPage.svelte";
+  import Onboarding from "./routes/Onboarding.svelte";
 
   onMount(() => {
     void serverStore.init();
+    void modelsStore.fetchModels();
     return () => {
       serverStore.stopHealthPolling();
     };
@@ -104,7 +107,11 @@
       <!-- Route Workspace Area -->
       <main class="flex-1 flex flex-col overflow-y-auto bg-bg" id="main-content">
         {#if router.current === "chat"}
-          <ChatPage />
+          {#if !modelsStore.hasInstalledModels && modelsStore.models.length > 0}
+            <Onboarding />
+          {:else}
+            <ChatPage />
+          {/if}
         {:else if router.current === "models"}
           <ModelsPage />
         {:else if router.current === "monitor"}
