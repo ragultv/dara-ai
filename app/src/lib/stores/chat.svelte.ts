@@ -123,6 +123,12 @@ class ChatStore {
     this.saveToStorage();
   }
 
+  clearAllConversations(): void {
+    this.conversations = [];
+    this.activeConversationId = null;
+    this.saveToStorage();
+  }
+
   renameConversation(id: string, newTitle: string): void {
     const conv = this.conversations.find((c) => c.id === id);
     if (conv) {
