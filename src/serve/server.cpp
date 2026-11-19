@@ -144,6 +144,7 @@ json timings_json(const GenResult& r) {
     return {{"queue_ms", r2(t.queue_ms)},
             {"compact_ms", r2(t.compact_ms)},
             {"image_ms", r2(t.image_ms)},
+            {"image_memory", {{"scratch_mb", r2(t.image_scratch_mb)}, {"from_unused_context_mb", r2(t.image_borrowed_mb)}, {"from_free_vram_mb", r2(t.image_free_vram_mb)}}},
             {"prefill_tokens", t.prefilled},
             {"prefill_ms", r2(t.prefill_ms)},
             {"prefill_tokens_per_second", r2(t.prefill_tps())},
@@ -884,7 +885,8 @@ int dara_serve_main(int argc, char** argv) {
         j["model"] = {{"id", mi.id}, {"family", mi.family}, {"path", mi.path}, {"quant", mi.quant}, {"layers", mi.layers}, {"layers_on_gpu", mi.layers_gpu},
                       {"output_head", mi.head_on_cpu ? "cpu" : "gpu"}, {"hidden", mi.hidden}, {"vocab", mi.vocab}, {"kv_format", mi.kv_format},
                       {"native_context", mi.native_context}, {"load_seconds", r2(mi.load_seconds)}, {"vision", mi.vision}, {"mmproj", mi.mmproj},
-                      {"image_max_tokens", mi.image_max_tokens}, {"flash", mi.flash}, {"flash_note", mi.flash_note}, {"spec_k", mi.spec_k}, {"placement", mi.placement}};
+                      {"image_max_tokens", mi.image_max_tokens}, {"vision_streamed", mi.vision_streamed}, {"vision_resident_mb", mb(mi.vision_resident_bytes)},
+                      {"image_scratch_max_mb", mb(mi.image_scratch_bytes)}, {"flash", mi.flash}, {"flash_note", mi.flash_note}, {"spec_k", mi.spec_k}, {"placement", mi.placement}};
         j["context"] = {{"capacity", mi.context_capacity}, {"held_tokens", s.has_last ? s.last.context.used : 0}};
         j["engine"] = {{"busy", s.busy}, {"live_tokens", s.live_tokens}, {"live_tokens_per_second", r2(s.live_tps)},
                        {"requests", s.requests}, {"errors", s.errors}, {"compactions", s.compactions}, {"prompt_tokens_total", s.prompt_tokens},

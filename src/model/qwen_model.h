@@ -138,6 +138,11 @@ public:
     void save_device(DeviceCheckpoint& c);
     void restore_device(const DeviceCheckpoint& c);
     void reset();   // back to an empty sequence (position 0, zero recurrent states, no images)
+    // Device ranges of the K/V caches holding positions >= from (unused while `from` positions are held): scratch to borrow (DeviceArena).
+    void kv_tail_regions(size_t from, std::vector<DeviceArena::Region>& out) {
+        for (GpuLayerState& s : states_)
+            if (s.kind != LayerKind::DeltaNet) dara::model::kv_tail_regions({&s.Kc, &s.Vc, &s.Kq, &s.Vq, &s.Kn, &s.Vn, &s.Kr, &s.Krs}, s.kv_format, s.kv_cap, from, out);
+    }
     // VRAM of one DeviceCheckpoint (the DeltaNet states), for callers that reserve it before the model sizes its context
     static size_t device_checkpoint_bytes(const QwenConfig& cfg) {
         size_t n = 0;

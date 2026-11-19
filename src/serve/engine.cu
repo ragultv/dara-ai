@@ -750,6 +750,33 @@ struct Engine::Impl {
     }
 
     // ---- images -------------------------------------------------------------------------------------------------------------------------
+    // Runs `fn` (an image encode) with its device allocations carved from the unused tail of the K/V caches (positions the conversation has not
+    // reached) first and cudaMalloc second, so the encoder takes no VRAM away from the context. `need` is the encoder's exact allocation
+    // (scratch_bytes); the largest single buffers may not fit a tail region and then come from free VRAM.
+    template <class Fn>
+    auto with_scratch(size_t need, Fn&& fn) {
+        dara::model::DeviceArena arena;
+        if (qwen) qm->kv_tail_regions(pos(), arena.regions); else gm->kv_tail_regions(pos(), arena.regions);
+        const size_t tail = arena.capacity();
+        size_t free_b = 0, total_b = 0;
+        cudaMemGetInfo(&free_b, &total_b);
+        last_image_need = need;
+        try {
+            dara::model::ArenaScope scope(arena);
+            auto r = fn();
+            last_image_borrowed = arena.peak;
+            last_image_from_free = arena.fallback;
+            return r;
+        } catch (const std::exception& e) {
+            cudaGetLastError();   // an out-of-memory error from cudaMalloc is not sticky, but clear it
+            if (dynamic_cast<const std::length_error*>(&e) || dynamic_cast<const std::invalid_argument*>(&e)) throw;
+            throw std::length_error("not enough GPU memory to encode this image right now: it needs " + std::to_string(need >> 20) + " MiB, of which " +
+                                    std::to_string(tail >> 20) + " MiB can be borrowed from the unused part of the context and " + std::to_string(free_b >> 20) +
+                                    " MiB are free (" + e.what() + "). Shorten the conversation, lower --image-max-tokens, or load the model with a smaller context.");
+        }
+    }
+    size_t last_image_need = 0, last_image_borrowed = 0, last_image_from_free = 0;
+
     std::vector<Img> encode_images(const std::vector<Message>& msgs, double* ms) {
         std::vector<Img> v;
         const auto t0 = Clock::now();
@@ -757,26 +784,17 @@ struct Engine::Impl {
             if (canon_role(m.role) != "user") continue;   // images are taken from user messages only (as the templates render them)
             for (const ContentPart& c : m.parts) {
                 if (!c.is_image) continue;
-                if (!mm) {
-                    if (opt.mmproj.empty()) throw std::invalid_argument("this server has no image encoder (start it with --mmproj <vision GGUF>)");
-                    mm = std::make_unique<dara::io::GgufCheckpoint>(opt.mmproj);
-                    if (qwen) {
-                        qvis = std::make_unique<dara::model::QwenVision>(*mm, opt.image_max_tokens);
-                        if (qvis->out_dim() != hidden) throw std::runtime_error("the mmproj does not match this model (projection width differs)");
-                    } else {
-                        gvis = std::make_unique<dara::model::GemmaVision>(*mm);
-                    }
-                }
+                if (!qvis && !gvis) throw std::invalid_argument("this server has no image encoder (load the model with vision on: --vision / --mmproj)");
                 const auto img = dara::io::load_image_rgb_from_memory(reinterpret_cast<const uint8_t*>(c.image.data()), c.image.size());
                 Img im;
                 if (qwen) {
                     const auto in = qvis->preprocess(img);
                     im.gh = in.merged_h(); im.gw = in.merged_w(); im.n = im.gh * im.gw;
-                    im.rows = qvis->encode(in);
+                    im.rows = with_scratch(qvis->scratch_bytes(in.n), [&] { return qvis->encode(in); });
                 } else {
                     const auto in = gvis->preprocess(img);
                     im.n = in.soft_tokens();
-                    im.rows = gvis->encode(in);
+                    im.rows = with_scratch(gvis->scratch_bytes(in.n), [&] { return gvis->encode(in); });
                 }
                 v.push_back(std::move(im));
             }
@@ -965,7 +983,9 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         const auto sz = std::filesystem::file_size(std::filesystem::u8path(o.mmproj), ec);
         if (ec) throw std::runtime_error("cannot read --mmproj " + o.mmproj);
         m.info.mmproj_bytes = static_cast<size_t>(sz);
-        ropt.extra_vram_bytes += static_cast<size_t>(sz) + (256u << 20);
+        // the encoder streams its weights from the file and borrows its working memory from the unused context while an image is encoded: between
+        // images it keeps only its resident parts (patch embedding, biases, norms: a few MB)
+        ropt.extra_vram_bytes += 24u << 20;
     }
     // Flash drafter: an explicit file, or the bundled drafter for this model when found next to dara.exe
     std::string flash_path = o.flash;
@@ -1073,6 +1093,21 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         m.info.placement = pr.plan;
         if (!flash_path.empty()) m.flash = std::make_unique<dara::model::FlashDrafter>(flash_path, *m.gguf, [g = m.gm.get()](int32_t t) { return g->embed_row_raw(t); }, m.gm->kv_capacity() + 16);
     }
+    if (!o.mmproj.empty()) {   // after the model: the encoder's resident parts come out of the reservation above
+        m.mm = std::make_unique<dara::io::GgufCheckpoint>(o.mmproj);
+        if (m.qwen) {
+            m.qvis = std::make_unique<dara::model::QwenVision>(*m.mm, o.image_max_tokens);
+            if (m.qvis->out_dim() != m.hidden) throw std::runtime_error("the mmproj does not match this model (projection width differs)");
+            m.info.image_scratch_bytes = m.qvis->scratch_bytes(4 * std::max(64, o.image_max_tokens));
+            m.info.vision_resident_bytes = m.qvis->resident_bytes();
+            m.info.vision_streamed = m.qvis->streaming();
+        } else {
+            m.gvis = std::make_unique<dara::model::GemmaVision>(*m.mm);
+            m.info.image_scratch_bytes = m.gvis->scratch_bytes(280 * 9);
+            m.info.vision_resident_bytes = m.gvis->resident_bytes();
+            m.info.vision_streamed = m.gvis->streaming();
+        }
+    }
     m.info.path = o.gguf;
     m.info.id = o.id.empty() ? u8s(std::filesystem::u8path(o.gguf).stem()) : o.id;
     m.info.file_bytes = static_cast<size_t>(std::filesystem::file_size(std::filesystem::u8path(o.gguf), ec));
@@ -1133,6 +1168,11 @@ GenResult Engine::chat(const std::vector<Message>& messages, const SampleParams&
         r.context.summary_cached = ci.summary_cached;
         r.timings.compact_ms = cms;
         r.timings.image_ms = ims;
+        if (ims > 0) {
+            r.timings.image_scratch_mb = m.last_image_need / 1048576.0;
+            r.timings.image_borrowed_mb = m.last_image_borrowed / 1048576.0;
+            r.timings.image_free_vram_mb = m.last_image_from_free / 1048576.0;
+        }
         for (const auto& im : imgs) r.usage.image_tokens += im.n;
         r.timings.total_ms = ms_since(t0);
     } catch (...) {

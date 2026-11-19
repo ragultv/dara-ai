@@ -349,6 +349,24 @@ void alloc_kv(const KvBuffers& b, KvFormat fmt, size_t cap, int kv_heads, int he
     }
 }
 
+void kv_tail_regions(const KvBuffers& b, KvFormat fmt, size_t cap, size_t from, std::vector<DeviceArena::Region>& out) {
+    // positions from a whole group of 32 on (Q4 keys and their per-channel scales are laid out per group of positions)
+    const size_t start = (from + kKiviGroup - 1) / kKiviGroup * kKiviGroup;
+    auto add = [&](void* p, size_t bytes, size_t positions) {
+        if (!p || !bytes || !positions || start >= positions) return;
+        size_t off = static_cast<size_t>((static_cast<unsigned long long>(bytes) * start + positions - 1) / positions);   // round up
+        off = (off + 255) & ~size_t(255);
+        if (off + 4096 < bytes) out.push_back({static_cast<uint8_t*>(p) + off, bytes - off, 0});
+    };
+    const size_t qpos = fmt == KvFormat::Q4 ? (cap + kKiviGroup - 1) / kKiviGroup * kKiviGroup : cap;   // Q4 keys: whole groups
+    add(b.Kc->p, b.Kc->n * sizeof(float), cap);
+    add(b.Vc->p, b.Vc->n * sizeof(float), cap);
+    add(b.Kq->p, b.Kq->n, qpos);
+    add(b.Kn->p, b.Kn->n * sizeof(float), qpos);
+    add(b.Vq->p, b.Vq->n, cap);
+    add(b.Vn->p, b.Vn->n * sizeof(float), cap);
+}
+
 void kv_rewound(KvFormat fmt, const KvBuffers& b, int kv_width, size_t old_held, size_t new_held, void* stream) {
     if (fmt != KvFormat::Q4 || new_held >= old_held) return;
     if (kv_width <= 0) kv_width = static_cast<int>(b.Krs->n * 32 / kKiviRing);   // from the ring's size

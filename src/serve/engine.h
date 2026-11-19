@@ -52,6 +52,9 @@ struct Timings {
     double queue_ms = 0;             // filled by the server: waiting for the engine
     double compact_ms = 0;           // context maintenance (summary generation)
     double image_ms = 0;             // image decode + encode
+    double image_scratch_mb = 0;     // device memory the image encoding used: ...
+    double image_borrowed_mb = 0;    // ... of which carved from the unused part of the context (no extra VRAM)
+    double image_free_vram_mb = 0;   // ... and of which taken from free VRAM
     double prefill_ms = 0;           // prompt tokens through the model (excluding cached ones)
     double ttft_ms = 0;              // request start in the engine -> first generated token
     double decode_ms = 0;            // first token -> last token
@@ -99,6 +102,9 @@ struct ModelInfo {
     bool vision = false;
     int image_max_tokens = 0;
     size_t weights_vram_bytes = 0;
+    size_t image_scratch_bytes = 0;  // device memory encoding one image at the largest size takes (borrowed from the unused context, else free VRAM)
+    size_t vision_resident_bytes = 0;   // VRAM the image encoder keeps between images
+    bool vision_streamed = false;       // the encoder streams its weights from the mmproj file
     std::string flash;               // drafter file in use ("" = none)
     std::string flash_note;          // why no drafter is loaded
     int spec_k = 0;

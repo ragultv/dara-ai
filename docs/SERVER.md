@@ -35,7 +35,7 @@ dara rm <id>
 | `--model <id or gguf>` | none | load this model at start. Without it the server starts empty and loads the model the first request names |
 | `--models-dir DIR` | `%LOCALAPPDATA%\Dara\models` | the model library |
 | `--host`, `--port` | `127.0.0.1`, `11435` | listen address |
-| `--vision` / `--mmproj <gguf>\|auto` | off | image input. **Costs VRAM**: the encoder's room is reserved when the context is sized (4 GB card: the 4B drops from 32/32 to 15/32 layers on the GPU; Nano from 131K to 32K context) |
+| `--vision` / `--mmproj <gguf>\|auto` | off | image input. Costs almost no VRAM or RAM and no context (see "Image input" below) |
 | `--flash auto\|on\|off\|<file>` | `auto` | Flash drafter. `auto` keeps it only if the model still fits fully in VRAM with it (4 GB card: on for Nano, off for the 4B, where it would cost layers and be slower) |
 | `--no-spec` | | no speculative decoding at all |
 | `--ctx auto\|N`, `--min-context N` | `auto`, `32768` | context size (as for `dara`) |
@@ -87,6 +87,29 @@ the first generated token to the last.
 VRAM; with the NVIDIA driver's NVML: utilization, temperature, power, clocks, P-state), `disk` (model / mmproj / drafter file sizes, free space on
 the model's volume), `model` (family, quant, layers on GPU, output head location, context, Flash, vision, placement), `context` (tokens held),
 `engine` (busy, queued, live tokens and tokens/s of the running request, totals, average prefill and decode speed), `last_request`.
+
+## Image input
+
+The image encoder (the mmproj file) does not live in VRAM. Its weights stay in the memory-mapped file and are streamed to the GPU in 8 MiB row chunks
+while an image is encoded (two slots, the next chunk copied while the current one is used: +2-3% encode time on a GTX 1650); the working memory of an
+encode is carved from the part of the K/V caches the conversation has not reached yet (positions past the held length), and only what does not fit there
+comes from free VRAM. Between images the encoder keeps 1-5 MB of VRAM.
+
+| 4 GB GTX 1650 | encoder in VRAM (before) | streamed |
+| --- | --- | --- |
+| Nano + images: context | 32K | **119,808** (with the Flash drafter loaded) |
+| Core 4B + images: layers on the GPU | 15 / 32 | **32 / 32** (same 32K context) |
+| encoder VRAM kept between images: Nano / 4B / 9B | 291 / 632 / 867 MiB | 1.1 / 4.3 / 4.9 MiB |
+| private RAM, Nano with images | 258 MB | 230 MB (the position tables are read from the mapped file) |
+| encode time, 1920x1080 photo, Nano / 4B | 1.54 / 1.51 s | 1.57 / 1.58 s |
+
+One image takes 110 MiB (Core 4B at the default 400-token budget), 120 MiB (Pro 9B) or 166 MiB (Nano) of working memory, plus 24 MiB for the weight
+stream and 16 MiB of pinned host memory while it runs. Every response reports what its images used (`timings.image_memory`: scratch, from the unused
+context, from free VRAM), `/dara/stats` the largest image (`model.image_scratch_max_mb`) and the resident part. If a conversation is so full and the
+GPU so short of memory that the scratch cannot be found, the request fails with a message saying so (shorten the conversation, lower
+`--image-max-tokens`, or load a smaller context).
+
+Embeddings are bit-identical to the resident encoder (tests/vision_stream_test.cu; the previous build's logits on image prompts match byte for byte).
 
 ## Flash and speculative decoding
 
