@@ -275,7 +275,7 @@ int main(int argc, char** argv) {
                         for (int q = 0; q < n && eq; ++q) eq = seq[j + q] == seq[n_sz - n + q];
                         if (!eq) continue;
                         for (int q = j + n; q < n_sz && static_cast<int>(out.size()) < limit; ++q) out.push_back(seq[q]);
-                        if (!out.empty()) break;
+                        if (static_cast<int>(out.size()) >= std::min(2, limit)) break; out.clear();   // too close to the end to copy enough: look further back
                     }
                 }
             };
@@ -339,7 +339,7 @@ int main(int argc, char** argv) {
                         for (int q = 0; q < n && eq; ++q) eq = seq[j + q] == seq[n_sz - n + q];
                         if (!eq) continue;
                         for (int q = j + n; q < n_sz && static_cast<int>(draft.size()) < limit; ++q) draft.push_back(seq[q]);
-                        if (!draft.empty()) break;
+                        if (static_cast<int>(draft.size()) >= std::min(2, limit)) break; draft.clear();   // too close to the end to copy enough: look further back
                     }
                 }
             };

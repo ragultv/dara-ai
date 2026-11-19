@@ -162,7 +162,8 @@ json context_json(const ContextInfo& c) {
 json spec_json(const SpecInfo& s, int decoded) {
     return {{"mode", s.mode.empty() ? json(nullptr) : json(s.mode)}, {"verify_steps", s.verify_steps}, {"drafted", s.drafted}, {"accepted", s.accepted},
             {"acceptance", s.drafted ? r2(100.0 * s.accepted / s.drafted) : 0.0}, {"model_passes", s.passes},
-            {"tokens_per_pass", s.passes ? r2(static_cast<double>(decoded) / s.passes) : 0.0}};
+            {"tokens_per_pass", s.passes ? r2(static_cast<double>(decoded) / s.passes) : 0.0},
+            {"note", s.note.empty() ? json(nullptr) : json(s.note)}, {"flash_stood_down_at_pass", s.stood_down_at >= 0 ? json(s.stood_down_at) : json(nullptr)}};
 }
 
 void add_dara_fields(json& j, const GenResult& r) {

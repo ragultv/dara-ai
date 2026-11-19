@@ -148,6 +148,7 @@ struct GpuLayerState {
     DevBuf<uint8_t> Kr;           // Q4: key ring, Q8 codes [kKiviRing][kv_width]
     DevBuf<float> Krs;            //     and their per-32 scales
     size_t kv_cap = 0;
+    int window = 0;               // attention: > 0 = sliding window of this many positions (the Flash drafter); 0 = full causal attention
 };
 inline AttnFmt attn_fmt(KvFormat f) {
     switch (f) {

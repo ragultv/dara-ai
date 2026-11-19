@@ -52,6 +52,14 @@ class Server:
             if "layers on GPU" in line: self.info = line.strip()
             if "listening" in line: self.ok = True; break
         if not self.ok: self.stop()
+        else:   # keep draining the server's log: a full pipe (4 KB on Windows) would block the server on its next log line
+            import threading
+
+            def drain():
+                for l in self.p.stderr:
+                    self.log.append(l.rstrip())
+                    del self.log[:-200]
+            threading.Thread(target=drain, daemon=True).start()
 
     def post(self, path, body):
         r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", json.dumps(body).encode(), {"Content-Type": "application/json"})
@@ -82,6 +90,10 @@ def phase_a(a, model, fmt, flash, rec, path):
     rec.setdefault("settings", {})
     for d in a.depths:
         if d > NATIVE[model]: break
+        done = rec["settings"].get(str(d))
+        if done is not None and "error" not in done:   # resume: measured in an earlier run
+            if not done.get("fits"): break
+            continue
         s = Server(a, model, fmt, flash, d)
         if not s.ok:
             err = next((l for l in reversed(s.log) if "ERROR" in l), s.log[-1] if s.log else "no output")
@@ -107,7 +119,8 @@ def phase_a(a, model, fmt, flash, rec, path):
 
 
 def phase_b(a, model, fmt, flash, rec, path):
-    fitting = [int(k) for k, v in rec.get("settings", {}).items() if v.get("fits") and "error" not in v]
+    if rec.get("fill", {}).get("complete"): return
+    fitting = [int(k) for k, v in rec.get("settings", {}).items() if v.get("fits") and "error" not in v and int(k) <= a.fill_cap.get(model, 1 << 30)]
     if not fitting:
         print("  B: nothing fits", flush=True)
         return
@@ -147,6 +160,7 @@ def phase_b(a, model, fmt, flash, rec, path):
             print(f"  B depth {row['prompt_tokens']:6d}: prefill {row['prefill_tps']:7.1f} tok/s ({row['prefill_new_tokens']} new), ttft {row['ttft_ms']:7.0f} ms, "
                   f"decode {row['decode_tps']:6.2f} tok/s, needle {'OK' if found else 'MISSED'}", flush=True)
             save(path, rec)
+        rec["fill"]["complete"] = True
     except Exception as e:  # noqa: BLE001
         rec["fill"]["error"] = str(e)[:300]
         print(f"  B failed: {e}", flush=True)
@@ -166,7 +180,12 @@ def main():
     ap.add_argument("--models-dir", default=os.path.join(ROOT, "models"))
     ap.add_argument("--port", type=int, default=11440)
     ap.add_argument("--reserve", type=int, default=0, help="--vram-reserve MB (0: the default)")
+    ap.add_argument("--fill-cap", nargs="*", default=["nano=131072", "4b=65536", "9b=32768"], help="largest context of the fill phase per tier")
     a = ap.parse_args()
+    a.fill_cap = {k: int(v) for k, v in (x.split("=") for x in a.fill_cap)}
+    if os.name == "nt":   # keep Windows awake while this runs (Modern Standby interrupts long runs; this does not change power settings)
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
     for model in a.models:
         for flash in a.flash:
             if flash == "on" and model not in HAS_DRAFTER: continue
