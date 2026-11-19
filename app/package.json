@@ -14,7 +14,7 @@
     "test": "npm run prebuild && vitest run",
     "test:watch": "vitest",
     "e2e": "npm run prebuild && playwright test",
-    "tauri": "tauri"
+    "tauri": "node tools/run-tauri.js"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.2.0",

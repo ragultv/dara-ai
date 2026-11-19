@@ -79,8 +79,20 @@ impl ServerManager {
     fn spawn_process(&self) -> Result<(), String> {
         let binary = match &self.binary_path {
             Some(path) => path,
-            None => return Err("dara.exe not found".to_string()),
+            None => return Err("dara backend engine not found".to_string()),
         };
+
+        // Guard: Prevent spawning the running executable as a sidecar
+        if let Ok(current) = std::env::current_exe() {
+            if let (Ok(c1), Ok(c2)) = (binary.canonicalize(), current.canonicalize()) {
+                if c1 == c2 {
+                    return Err(
+                        "Refusing to spawn current executable as backend sidecar (anti-recursion guard triggered)"
+                            .to_string(),
+                    );
+                }
+            }
+        }
 
         let (port_str, key_str) = {
             let conn = self.connection.lock().map_err(|e| e.to_string())?;
@@ -200,34 +212,50 @@ impl ServerManager {
     }
 
     fn locate_binary() -> Option<PathBuf> {
+        let current_exe_canon = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.canonicalize().ok());
+
+        let is_self = |p: &Path| -> bool {
+            if let (Some(ref cur), Ok(cand_canon)) = (&current_exe_canon, p.canonicalize()) {
+                return cur == &cand_canon;
+            }
+            false
+        };
+
+        // 1. Explicit override via environment variable
         if let Ok(env_path) = std::env::var("DARA_SIDECAR_PATH") {
             let p = PathBuf::from(env_path);
-            if p.exists() {
+            if p.exists() && !is_self(&p) {
                 return Some(p);
             }
         }
 
+        // 2. Standard relative paths from workspace/execution root
         let candidates = [
-            // Standard relative paths from dev / workspace root
+            "build/cuda/dara.exe",
             "../build/cuda/dara.exe",
             "../../build/cuda/dara.exe",
-            "build/cuda/dara.exe",
-            "dara.exe",
+            "../../../build/cuda/dara.exe",
+            "../../../../build/cuda/dara.exe",
         ];
 
         for c in candidates {
             let p = Path::new(c);
-            if p.exists() {
+            if p.exists() && !is_self(p) {
                 return Some(p.to_path_buf());
             }
         }
 
+        // 3. Search directory ancestors of current executable for build/cuda/dara.exe
         if let Ok(current_exe) = std::env::current_exe() {
-            if let Some(parent) = current_exe.parent() {
-                let p = parent.join("dara.exe");
-                if p.exists() {
-                    return Some(p);
+            let mut ancestor = current_exe.parent();
+            while let Some(dir) = ancestor {
+                let candidate = dir.join("build").join("cuda").join("dara.exe");
+                if candidate.exists() && !is_self(&candidate) {
+                    return Some(candidate);
                 }
+                ancestor = dir.parent();
             }
         }
 
@@ -267,5 +295,19 @@ mod tests {
         let conn = manager.get_connection().expect("connection must be ok");
         assert!(conn.base_url.starts_with("http://127.0.0.1:"));
         assert_eq!(conn.api_key.len(), 64);
+    }
+
+    #[test]
+    fn test_locate_binary_never_matches_current_exe() {
+        if let Some(binary) = ServerManager::locate_binary() {
+            if let Ok(current) = std::env::current_exe() {
+                let bin_canon = binary.canonicalize().unwrap_or(binary);
+                let cur_canon = current.canonicalize().unwrap_or(current);
+                assert_ne!(
+                    bin_canon, cur_canon,
+                    "locate_binary() must never return the running executable itself"
+                );
+            }
+        }
     }
 }
