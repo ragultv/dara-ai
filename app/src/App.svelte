@@ -13,6 +13,7 @@
   import SettingsPage from "./routes/SettingsPage.svelte";
   import KitPage from "./routes/KitPage.svelte";
   import Onboarding from "./routes/Onboarding.svelte";
+  import OptionsPage from "./routes/OptionsPage.svelte";
 
   onMount(() => {
     void serverStore.init();
@@ -114,6 +115,8 @@
           {/if}
         {:else if router.current === "models"}
           <ModelsPage />
+        {:else if router.current === "options"}
+          <OptionsPage />
         {:else if router.current === "monitor"}
           <MonitorPage />
         {:else if router.current === "settings"}

@@ -74,6 +74,46 @@ export function createMockServer(options: MockServerOptions = {}): {
       return;
     }
 
+    if (pathname.includes("/benchmark") && req.method === "POST") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "job-bm-1",
+          status: "running",
+          log: ["Initializing benchmark on GPU...", "Measuring INT8 prefill and decode speeds..."]
+        })
+      );
+      return;
+    }
+
+    if (pathname.startsWith("/dara/benchmarks/") && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "job-bm-1",
+          status: "done",
+          log: [
+            "Benchmark completed in 32s.",
+            "Measured decode: 26.5 tok/s (empty context)",
+            "Estimated decode: 22.8 tok/s (full context)"
+          ]
+        })
+      );
+      return;
+    }
+
+    if (pathname.startsWith("/dara/benchmarks/") && req.method === "DELETE") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: pathname.split("/").pop() ?? "job-bm-1",
+          status: "cancelled",
+          log: ["Benchmark cancelled by user."]
+        })
+      );
+      return;
+    }
+
     if (pathname === "/dara/stats") {
       const statsPath = path.join(samplesDir, "stats.json");
       const data = fs.readFileSync(statsPath, "utf-8");

@@ -9,7 +9,9 @@ import type {
   LoadStatus,
   Stats,
   ChatRequest,
-  ChatChunk
+  ChatChunk,
+  OptionsResponse,
+  BenchmarkJob
 } from "./types.ts";
 
 export interface ClientConfig {
@@ -254,6 +256,46 @@ export class DaraApiClient {
     }
 
     return parseSseStream(response.body.getReader());
+  }
+
+  async getModelOptions(modelId: string, signal?: AbortSignal): Promise<OptionsResponse> {
+    const opts: RequestInit = {
+      method: "GET"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<OptionsResponse>(`/dara/models/${modelId}/options`, opts);
+  }
+
+  async startBenchmark(modelId: string, signal?: AbortSignal): Promise<BenchmarkJob> {
+    const opts: RequestInit = {
+      method: "POST"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<BenchmarkJob>(`/dara/models/${modelId}/benchmark`, opts);
+  }
+
+  async getBenchmarkJob(jobId: string, signal?: AbortSignal): Promise<BenchmarkJob> {
+    const opts: RequestInit = {
+      method: "GET"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<BenchmarkJob>(`/dara/benchmarks/${jobId}`, opts);
+  }
+
+  async cancelBenchmark(jobId: string, signal?: AbortSignal): Promise<void> {
+    const opts: RequestInit = {
+      method: "DELETE"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    await this.request<undefined>(`/dara/benchmarks/${jobId}`, opts);
   }
 }
 
