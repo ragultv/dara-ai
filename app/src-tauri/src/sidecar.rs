@@ -105,6 +105,22 @@ impl ServerManager {
             (port, conn.api_key.clone())
         };
 
+        // Determine models directory and ensure it exists on disk
+        let models_dir = if let Ok(custom) = std::env::var("DARA_MODELS") {
+            PathBuf::from(custom)
+        } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            PathBuf::from(local_app_data).join("Dara").join("models")
+        } else {
+            PathBuf::from("models")
+        };
+
+        if let Err(e) = std::fs::create_dir_all(&models_dir) {
+            eprintln!(
+                "[Dara] Notice: Could not pre-create models directory {}: {e}",
+                models_dir.display()
+            );
+        }
+
         // Note: Never log key_str
         let mut cmd = Command::new(binary);
         cmd.args([
@@ -115,6 +131,8 @@ impl ServerManager {
             &port_str,
             "--api-key",
             &key_str,
+            "--models-dir",
+            &models_dir.to_string_lossy(),
         ]);
 
         let child = cmd.spawn().map_err(|e| {

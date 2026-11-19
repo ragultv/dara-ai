@@ -26,15 +26,17 @@
       error = null;
 
       // Update TPS history buffer
-      const currentTps =
-        data.engine?.live_tokens_per_second > 0
-          ? data.engine.live_tokens_per_second
-          : data.engine?.avg_decode_tokens_per_second > 0
-            ? data.engine.avg_decode_tokens_per_second
-            : null;
+      if (data.engine) {
+        const currentTps =
+          data.engine.live_tokens_per_second > 0
+            ? data.engine.live_tokens_per_second
+            : data.engine.avg_decode_tokens_per_second > 0
+              ? data.engine.avg_decode_tokens_per_second
+              : null;
 
-      if (currentTps !== null) {
-        tpsHistory = [...tpsHistory.slice(-119), currentTps];
+        if (currentTps !== null) {
+          tpsHistory = [...tpsHistory.slice(-119), currentTps];
+        }
       }
     } catch (err: unknown) {
       if (!stats) {
@@ -211,35 +213,63 @@
           </div>
         </div>
 
-        <div class="grid grid-cols-3 gap-3 pt-2 text-xs font-mono">
-          <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
-            <span class="text-text-subtle text-[11px] block">Live Decode</span>
-            <p class="text-sm font-bold text-primary mt-0.5">
-              {stats.engine.live_tokens_per_second > 0
-                ? stats.engine.live_tokens_per_second.toFixed(1)
-                : stats.engine.avg_decode_tokens_per_second.toFixed(1)}
-              <span class="text-[10px] font-sans text-text-muted">tok/s</span>
-            </p>
+        {#if stats.engine}
+          <div class="grid grid-cols-3 gap-3 pt-2 text-xs font-mono">
+            <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
+              <span class="text-text-subtle text-[11px] block">Live Decode</span>
+              <p class="text-sm font-bold text-primary mt-0.5">
+                {stats.engine.live_tokens_per_second > 0
+                  ? stats.engine.live_tokens_per_second.toFixed(1)
+                  : stats.engine.avg_decode_tokens_per_second.toFixed(1)}
+                <span class="text-[10px] font-sans text-text-muted">tok/s</span>
+              </p>
+            </div>
+            <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
+              <span class="text-text-subtle text-[11px] block">Avg Prefill</span>
+              <p class="text-sm font-bold text-text mt-0.5">
+                {stats.engine.avg_prefill_tokens_per_second.toFixed(1)}
+                <span class="text-[10px] font-sans text-text-muted">tok/s</span>
+              </p>
+            </div>
+            <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
+              <span class="text-text-subtle text-[11px] block">Completed</span>
+              <p class="text-sm font-bold text-text mt-0.5">{stats.engine.requests} reqs</p>
+            </div>
           </div>
-          <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
-            <span class="text-text-subtle text-[11px] block">Avg Prefill</span>
-            <p class="text-sm font-bold text-text mt-0.5">
-              {stats.engine.avg_prefill_tokens_per_second.toFixed(1)}
-              <span class="text-[10px] font-sans text-text-muted">tok/s</span>
-            </p>
-          </div>
-          <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
-            <span class="text-text-subtle text-[11px] block">Completed</span>
-            <p class="text-sm font-bold text-text mt-0.5">{stats.engine.requests} reqs</p>
-          </div>
-        </div>
 
-        <div
-          class="flex items-center justify-between text-xs text-text-subtle pt-1 border-t border-border"
-        >
-          <span>Engine Status: {stats.engine.busy ? "Generating (Busy)" : "Ready (Idle)"}</span>
-          <span>Errors: {stats.engine.errors}</span>
-        </div>
+          <div
+            class="flex items-center justify-between text-xs text-text-subtle pt-1 border-t border-border"
+          >
+            <span>Engine Status: {stats.engine.busy ? "Generating (Busy)" : "Ready (Idle)"}</span>
+            <span>Errors: {stats.engine.errors}</span>
+          </div>
+        {:else}
+          <div class="grid grid-cols-3 gap-3 pt-2 text-xs font-mono">
+            <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
+              <span class="text-text-subtle text-[11px] block">Live Decode</span>
+              <p class="text-sm font-bold text-text-muted mt-0.5">
+                0.0 <span class="text-[10px] font-sans text-text-muted">tok/s</span>
+              </p>
+            </div>
+            <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
+              <span class="text-text-subtle text-[11px] block">Avg Prefill</span>
+              <p class="text-sm font-bold text-text-muted mt-0.5">
+                0.0 <span class="text-[10px] font-sans text-text-muted">tok/s</span>
+              </p>
+            </div>
+            <div class="p-2.5 rounded-lg bg-surface-sunken border border-border">
+              <span class="text-text-subtle text-[11px] block">Completed</span>
+              <p class="text-sm font-bold text-text-muted mt-0.5">0 reqs</p>
+            </div>
+          </div>
+
+          <div
+            class="flex items-center justify-between text-xs text-text-subtle pt-1 border-t border-border"
+          >
+            <span>Engine Status: Ready (Idle)</span>
+            <span>Errors: 0</span>
+          </div>
+        {/if}
       </Card>
 
       <!-- 3. Loaded Model Hardware Placement -->
@@ -253,7 +283,7 @@
           {/if}
         </div>
 
-        {#if stats.model}
+        {#if stats.model && stats.context}
           <Meter
             label="Context Utilization"
             used={stats.context.held_tokens}
@@ -297,8 +327,10 @@
 
         <Meter
           label="Volume Free Space"
-          used={Math.round(stats.disk.volume_total_gb - stats.disk.volume_free_gb)}
-          capacity={Math.round(stats.disk.volume_total_gb)}
+          used={stats.disk.volume_total_gb > 0
+            ? Math.round(stats.disk.volume_total_gb - stats.disk.volume_free_gb)
+            : 0}
+          capacity={Math.max(1, Math.round(stats.disk.volume_total_gb))}
           unit="GB"
         />
 
