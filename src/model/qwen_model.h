@@ -58,6 +58,11 @@ struct ResidencyOptions {
     // Minimum auto context: when keeping everything in VRAM leaves less than this, the context is raised to it and the planner places what fits
     // (the 4B on 4 GB: 32K with the output head in host RAM instead of 21.5K fully resident). 0: always the fully-resident size (dara --min-context 0).
     size_t auto_min_context = 32768;
+    // Dry run: the constructor sizes everything and fills placement() / kv_capacity() exactly as a real load would, then returns before allocating
+    // anything on the GPU (the object is only good for those queries). assume_free_bytes: treat this much VRAM as free instead of asking the driver
+    // (what is free once this process's own model is unloaded); 0 = ask.
+    bool plan_only = false;
+    size_t assume_free_bytes = 0;
 };
 
 struct PlacementReport {
@@ -68,6 +73,7 @@ struct PlacementReport {
     size_t staging_bytes = 0, state_bytes = 0, workspace_bytes = 0;
     size_t vram_free_at_start = 0, vram_total = 0;
     bool hosted_pinned = true;        // false if any hosted layer fell back to pageable memory
+    bool head_on_cpu = false;         // the output head stays in host RAM (its VRAM went to layers / context)
 };
 
 struct RunStats {

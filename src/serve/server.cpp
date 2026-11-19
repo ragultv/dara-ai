@@ -29,10 +29,13 @@
 #include "httplib/httplib.h"
 #include "nlohmann/json.hpp"
 
+#include "core/version.h"
+#include "model/device_buffer.h"
 #include "serve/catalog.h"
 #include "serve/download.h"
 #include "serve/engine.h"
 #include "serve/metrics.h"
+#include "serve/options.h"
 
 #ifdef _WIN32
 #include <process.h>
@@ -217,6 +220,8 @@ struct Registry {
     std::shared_ptr<Engine> engine;
     std::string loaded_id;        // catalog id, or "" for a model loaded by path
     std::string loaded_flash_mode = "auto";
+    LoadSpec last_spec;           // what the loaded model was loaded with (the benchmark puts it back)
+    size_t held_vram = 0;         // VRAM the loaded model really holds: the drop in free memory across its load (counted buffers, graphs, scratch)
 
     std::shared_ptr<Engine> get() { std::lock_guard<std::mutex> lk(ptr_mu); return engine; }
 
@@ -226,6 +231,7 @@ struct Registry {
         { std::lock_guard<std::mutex> lk(ptr_mu); old = std::move(engine); loaded_id.clear(); }
         while (old && old.use_count() > 1) std::this_thread::sleep_for(std::chrono::milliseconds(5));   // a stats reader still holds it
         old.reset();   // frees the VRAM before anything else loads
+        held_vram = 0;
     }
 
     // engine_mu held. Throws ModelNotFound for a catalog model that is not installed.
@@ -259,7 +265,11 @@ struct Registry {
         if (!s.kv.empty()) eo.kv_format = s.kv;
         unload();
         std::fprintf(stderr, "loading %s (%s) ...\n", id.empty() ? eo.gguf.c_str() : id.c_str(), eo.gguf.c_str());
+        size_t fr0 = 0, fr1 = 0, tot = 0;
+        cudaMemGetInfo(&fr0, &tot);
         auto e = std::make_shared<Engine>(eo);
+        cudaMemGetInfo(&fr1, &tot);
+        held_vram = fr0 > fr1 ? fr0 - fr1 : 0;
         const ModelInfo& mi = e->info();
         std::fprintf(stderr, "model %s (%s, %s) | %s\n  context %zu tokens | layers on GPU %d/%d%s | load %.1f s | flash %s | vision %s\n", mi.id.c_str(),
                      mi.family.c_str(), mi.quant.c_str(), mi.gpu.c_str(), mi.context_capacity, mi.layers_gpu, mi.layers, mi.head_on_cpu ? ", output head in RAM" : "",
@@ -268,6 +278,7 @@ struct Registry {
         engine = std::move(e);
         loaded_id = id;
         loaded_flash_mode = eo.flash_mode;
+        last_spec = s;
     }
 
     // engine_mu held: the engine a request for `model` runs on (loads / switches for an installed catalog model)
@@ -366,24 +377,287 @@ json model_json(Registry& reg, Downloads& dl, const CatalogEntry& e, int64_t cre
     return {{"id", e.id}, {"object", "model"}, {"created", created}, {"owned_by", "dara"}, {"dara", d}};
 }
 
+// ---- options + benchmark ------------------------------------------------------------------------------------------------------------------------------
+
+// VRAM that would be free if this process held no model: what the driver reports plus what the loaded model really holds (measured as the drop in
+// free memory across its load: K/V caches, weights, drafter, graphs, scratch).
+size_t assumed_free_vram(const Registry& reg) {
+    size_t fr = 0, tot = 0;
+    cudaMemGetInfo(&fr, &tot);
+    return std::min(tot, fr + (reg.engine ? reg.held_vram : 0));
+}
+
+struct Planners {   // one ModelPlanner (parsed GGUF) per model file, kept for the next request
+    std::mutex mu;
+    std::map<std::string, std::unique_ptr<ModelPlanner>> m;
+    ModelPlanner& get(const std::string& path) {
+        auto it = m.find(path);
+        if (it == m.end()) it = m.emplace(path, std::make_unique<ModelPlanner>(path)).first;
+        return *it->second;
+    }
+};
+
+std::vector<std::string> split_csv(const std::string& s) {
+    std::vector<std::string> v;
+    size_t a = 0;
+    while (a <= s.size()) {
+        const size_t b = s.find(',', a);
+        std::string t = s.substr(a, b == std::string::npos ? std::string::npos : b - a);
+        if (!t.empty()) v.push_back(t);
+        if (b == std::string::npos) break;
+        a = b + 1;
+    }
+    return v;
+}
+
+OptionsRequest make_request(Registry& reg, const CatalogEntry& e, ModelPlanner& planner, const CalibrationStore& cal, bool vision, const std::vector<std::string>& formats,
+                            size_t assume_free) {
+    OptionsRequest rq;
+    rq.entry = &e;
+    rq.models_dir = reg.models_dir;
+    rq.planner = &planner;
+    rq.cal = &cal;
+    rq.machine = current_machine();
+    rq.assume_free_bytes = assume_free;
+    rq.vision = vision;
+    rq.formats = formats;
+    return rq;
+}
+
+json options_for(Registry& reg, Planners& pl, const CalibrationStore& cal, const CatalogEntry& e, bool vision, const std::vector<std::string>& formats) {
+    const std::string path = installed_path(reg.models_dir, e, *e.file("model"));
+    if (path.empty()) throw ModelNotFound("model '" + e.id + "' is not installed");
+    std::lock_guard<std::mutex> lk(pl.mu);
+    ModelPlanner& planner = pl.get(path);
+    return build_options(make_request(reg, e, planner, cal, vision, formats, assumed_free_vram(reg)));
+}
+
+struct BenchJob {
+    std::string id, model;
+    std::mutex mu;
+    std::string state = "queued", error, current;
+    std::vector<std::string> log;
+    size_t total = 0, done = 0;
+    std::atomic<bool> cancel{false};
+    std::thread th;
+    void note(const std::string& s) { std::lock_guard<std::mutex> lk(mu); log.push_back(s); std::fprintf(stderr, "  benchmark %s: %s\n", model.c_str(), s.c_str()); }
+};
+
+json bench_json(BenchJob& j) {
+    std::lock_guard<std::mutex> lk(j.mu);
+    json l = json::array();
+    for (const auto& s : j.log) l.push_back(s);
+    json o = {{"id", j.id}, {"model", j.model}, {"status", j.state}, {"current", j.current}, {"done", j.done}, {"total", j.total}, {"log", l}};
+    if (!j.error.empty()) o["error"] = j.error;
+    return o;
+}
+
+// A prompt of about `tokens` tokens (varied, deterministic text; `salt` keeps two prompts from sharing a prefix and so from hitting the prompt cache).
+std::string bench_text(Engine& eng, int tokens, int salt) {
+    static const char* s[] = {"The harbour town woke slowly as fishing boats returned with their nets half empty.",
+                              "A small team compared three designs for the bridge and chose the one that needed the least steel.",
+                              "Rain fell on the observatory roof while the astronomers argued about the missing comet.",
+                              "She kept a ledger of every seed she planted, noting the weather on each day.",
+                              "The library closed early on Thursdays, so students gathered in the courtyard to trade notes.",
+                              "Engineers measured the vibration of the old turbine and wrote three pages of cautious recommendations."};
+    std::string t;
+    for (int i = 0;; ++i) {
+        t += "Note " + std::to_string(salt * 100000 + i) + ": " + s[(i * 7 + salt) % 6] + " ";
+        if (i % 16 == 15) {
+            Message m; m.role = "user"; m.parts.push_back({false, t, ""});
+            if (eng.count_tokens({m}) >= tokens) break;
+        }
+    }
+    return t;
+}
+
+// Loads the configuration and measures it. The model is loaded by the caller's Registry (engine_mu held).
+bool measure_target(Registry& reg, const CatalogEntry& e, const BenchTarget& t, bool vision, const MachineKey& machine, CalibEntry& out, std::string& err) {
+    try {
+        LoadSpec s;
+        s.model = e.id; s.kv = t.kv; s.ctx = static_cast<long long>(t.context); s.flash = t.flash ? "on" : "off"; s.vision = vision ? 1 : 0;
+        reg.load(s);
+        auto eng = reg.get();
+        const ModelInfo& mi = eng->info();
+        SampleParams sp;
+        sp.temperature = 0;
+        sp.flash = t.flash ? 1 : 0;
+        auto ask = [&](const std::string& text, int max_tokens) {
+            Message m; m.role = "user"; m.parts.push_back({false, text, ""});
+            sp.max_tokens = max_tokens;
+            return eng->chat({m}, sp, nullptr);
+        };
+        GenResult r{};
+        for (int rep = 0; rep < 3; ++rep) {   // the first run warms the graphs and the GPU clocks; the best of the three is reported
+            GenResult x = ask("Explain how a hash map works, in detail.", 128);
+            if (rep == 0 || x.timings.decode_tps() > r.timings.decode_tps()) r = x;
+        }
+        if (r.timings.decoded < 32) { err = "the reply was too short to time"; return false; }
+        out = CalibEntry{};
+        out.machine = machine; out.model = e.id; out.kv = t.kv; out.flash = t.flash && !mi.flash.empty();
+        out.layers_gpu = mi.layers_gpu; out.head_cpu = mi.head_on_cpu; out.context = mi.context_capacity;
+        out.decode_tps = r.timings.decode_tps();
+        ask(bench_text(*eng, 600, 1), 1);
+        out.prefill_tps = ask(bench_text(*eng, 600, 2), 1).timings.prefill_tps();
+        out.power = current_power();
+        if (t.depth_probe && mi.context_capacity >= 12288) {
+            // Generation speed with ~6000 tokens held -> the per-token cost of the held context -> an estimate for a full context. Always plain decoding
+            // (no speculation, also on Flash configurations): the probe text is repetitive and would flatter the drafter, and with a long conversation
+            // Flash stands down anyway, so plain decoding is the speed of a full context for both.
+            sp.flash = 0;
+            double plain0 = 0;
+            for (int rep = 0; rep < 2; ++rep) plain0 = std::max(plain0, ask("Explain how a hash map works, in detail.", 96).timings.decode_tps());
+            const std::string prompt = bench_text(*eng, 6000, 3) + "\n\nWrite a long, detailed continuation of the notes above.";
+            GenResult d{};
+            for (int rep = 0; rep < 2; ++rep) {   // the second run finds the prompt in the prompt cache: only the speed is measured again
+                GenResult x = ask(prompt, 96);
+                if (rep == 0 || x.timings.decode_tps() > d.timings.decode_tps()) d = x;
+            }
+            const double ms0 = plain0 > 0 ? 1000.0 / plain0 : 0.0, msd = d.timings.decoded > 16 && d.timings.decode_tps() > 0 ? 1000.0 / d.timings.decode_tps() : 0.0;
+            const double held = d.usage.prompt_tokens + d.timings.decoded / 2.0;
+            const double slope = ms0 > 0 && msd > ms0 && held > 0 ? (msd - ms0) / held : 0.0;   // ms per held token
+            if (slope > 0) { out.full_est_tps = 1000.0 / (ms0 + slope * static_cast<double>(mi.context_capacity)); out.full_est_context = mi.context_capacity; }
+        }
+        out.measured_at = utc_now();
+        return true;
+    } catch (const std::exception& ex) {
+        err = ex.what();
+        return false;
+    }
+}
+
+// Runs the benchmark of one model. Holds the engine for its whole duration (requests queue), and puts the model that was loaded back at the end.
+void run_bench(Registry& reg, Planners& pl, CalibrationStore& cal, BenchJob& job, const CatalogEntry& e, bool vision, const std::vector<std::string>& formats, bool force,
+               bool verbose_cli) {
+    (void)verbose_cli;
+    { std::lock_guard<std::mutex> lk(job.mu); job.state = "running"; }
+    std::unique_lock<std::mutex> elk(reg.engine_mu);
+    const bool had = reg.get() != nullptr;
+    const LoadSpec prev = reg.last_spec;
+    try {
+        if (had) reg.unload();   // the plan below assumes the GPU is free of this process' model
+        const std::string path = installed_path(reg.models_dir, e, *e.file("model"));
+        if (path.empty()) throw ModelNotFound("model '" + e.id + "' is not installed");
+        std::vector<BenchTarget> targets;
+        {
+            std::lock_guard<std::mutex> lk(pl.mu);
+            ModelPlanner& planner = pl.get(path);
+            targets = bench_targets(make_request(reg, e, planner, cal, vision, formats, assumed_free_vram(reg)), !force);
+        }
+        { std::lock_guard<std::mutex> lk(job.mu); job.total = targets.size(); }
+        job.note(std::to_string(targets.size()) + " configuration(s) to measure" + (force ? "" : " (already measured ones are skipped)"));
+        const MachineKey machine = current_machine();
+        for (const BenchTarget& t : targets) {
+            if (job.cancel) break;
+            const std::string label = std::string(kv_format_name(t.kv)) + (t.flash ? " + Flash" : "") + ", " + std::to_string(t.context) + " tokens (" + t.why + ")";
+            { std::lock_guard<std::mutex> lk(job.mu); job.current = label; }
+            CalibEntry ce;
+            std::string err;
+            if (measure_target(reg, e, t, vision, machine, ce, err)) {
+                cal.put(ce);
+                const bool saved = cal.save();
+                auto num = [](double v, const char* f) { char b[32]; std::snprintf(b, sizeof b, f, v); return std::string(b); };
+                std::string msg = label + ": " + num(ce.decode_tps, "%.1f") + " tok/s generating, " + num(ce.prefill_tps, "%.0f") + " tok/s prompt";
+                if (ce.full_est_tps > 0) msg += ", about " + num(ce.full_est_tps, "%.1f") + " tok/s estimated with a full context";
+                if (!saved) msg += " (could not save calibration.json)";
+                job.note(msg);
+            } else {
+                job.note(label + ": skipped (" + err + ")");
+            }
+            std::lock_guard<std::mutex> lk(job.mu);
+            ++job.done;
+        }
+        std::lock_guard<std::mutex> lk(job.mu);
+        job.state = job.cancel ? "cancelled" : "done";
+        job.current.clear();
+    } catch (const std::exception& ex) {
+        std::lock_guard<std::mutex> lk(job.mu);
+        job.state = "failed";
+        job.error = ex.what();
+    }
+    if (had) {   // back to the model that was loaded
+        try { reg.load(prev); } catch (const std::exception& ex) { job.note(std::string("could not reload the previous model: ") + ex.what()); }
+    } else {
+        reg.unload();
+    }
+}
+
+struct Benchmarks {
+    std::mutex mu;
+    std::map<std::string, std::shared_ptr<BenchJob>> jobs;
+    uint64_t next = 0;
+    std::shared_ptr<BenchJob> running() {
+        for (auto& [k, j] : jobs) { std::lock_guard<std::mutex> lk(j->mu); if (j->state == "queued" || j->state == "running") return j; }
+        return nullptr;
+    }
+};
+
 std::string pull_usage() {
     return "usage: dara pull <model> [--no-vision] [--no-flash] [--models-dir DIR]\n"
            "       dara list [--models-dir DIR]\n"
            "       dara rm <model> [--models-dir DIR]\n"
+           "       dara options <model> [--vision on|off] [--formats q8,q4,k8v4,tq4]   what fits this GPU, with quality labels and measured speeds\n"
+           "       dara bench <model> [--formats q8,q4,k8v4,tq4] [--force] [--vision on|off]   measure speeds on this machine (a few minutes)\n"
            "models: " + Registry::ids() + " (short names: nano, 4b, 9b)\n";
 }
 
 }  // namespace
 
-// dara pull / list / rm
+// human-readable options (dara options)
+static void print_options(const json& o) {
+    auto place = [](const json& p) {
+        if (!p.value("ok", false)) return std::string("does not fit");
+        char b[96];
+        std::snprintf(b, sizeof b, "%d/%d layers, head %s", p["layers_gpu"].get<int>(), p["layers"].get<int>(), p["head"].get<std::string>().c_str());
+        return std::string(b);
+    };
+    auto speed = [](const json& p) {
+        if (!p.contains("speed") || p["speed"].value("source", "") != "measured") return std::string("not measured");
+        char b[96];
+        std::snprintf(b, sizeof b, "%.1f tok/s", p["speed"]["decode_tps_start"].get<double>());
+        std::string s = b;
+        if (p["speed"].contains("decode_tps_full_estimate")) { std::snprintf(b, sizeof b, " (about %.1f when full)", p["speed"]["decode_tps_full_estimate"].get<double>()); s += b; }
+        return s;
+    };
+    std::printf("%s on %s: %d MiB of VRAM, about %.0f MiB of it free for the model\n", o["name"].get<std::string>().c_str(), o["machine"]["gpu"].get<std::string>().c_str(),
+                static_cast<int>(o["machine"]["vram_total_mb"].get<uint64_t>()), o["machine"]["vram_free_assumed_mb"].get<double>());
+    std::printf("speeds: %s\n", o["calibration"]["note"].get<std::string>().c_str());
+    std::printf("native context %zu tokens; image input: %s\n\n", o["native_context"].get<size_t>(), o["vision"]["note"].get<std::string>().c_str());
+    std::map<std::string, json> fmt;
+    for (const json& f : o["formats"]) fmt[f["id"].get<std::string>()] = f;
+    for (const json& op : o["options"]) {
+        const std::string kv = op["kv"].get<std::string>();
+        const json& q = fmt[kv]["quality"];
+        const json& fast = op["fast"];
+        const bool partial = fast.value("ok", false) && !fast.value("fully_on_gpu", false);
+        std::printf("%-26s %-15s Flash %-3s | %s: %7s tokens, %-26s %s\n", fmt[kv]["name"].get<std::string>().c_str(), q["text"].get<std::string>().c_str(),
+                    op["flash"].get<bool>() ? "on" : "off", partial ? "smallest placement" : "fast profile", fast.value("ok", false) ? std::to_string(fast["context"].get<size_t>()).c_str() : "-",
+                    place(fast).c_str(), speed(fast).c_str());
+        std::string pts = "    by context:";
+        for (const json& p : op["points"]) {
+            if (!p.value("ok", false)) { pts += "  " + std::to_string(p.value("context", size_t{0}) / 1024) + "K: no"; continue; }
+            pts += "  " + std::to_string(p["requested_context"].get<size_t>() / 1024) + "K: " + std::to_string(p["layers_gpu"].get<int>()) + "/" + std::to_string(p["layers"].get<int>()) + (p["head"] == "cpu" ? "h" : "");
+        }
+        std::printf("%s\n", pts.c_str());
+    }
+    if (o.contains("recommended")) std::printf("\nrecommended: %s\n", o["recommended"]["reason"].get<std::string>().c_str());
+    std::printf("(\"N/M\" = layers on the GPU; \"h\" = the output head runs on the CPU)\n");
+}
+
+// dara pull / list / rm / options / bench
 int dara_models_main(int argc, char** argv) {
     if (argc < 1) { std::fprintf(stderr, "%s", pull_usage().c_str()); return 2; }
     const std::string cmd = argv[0];
     std::string models_dir = default_models_dir(), model;
     std::vector<std::string> kinds = {"model", "mmproj", "flash"};
+    std::vector<std::string> formats;
+    bool vision = true, force = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--models-dir" && i + 1 < argc) models_dir = argv[++i];
+        else if (a == "--formats" && i + 1 < argc) formats = split_csv(argv[++i]);
+        else if (a == "--vision" && i + 1 < argc) vision = std::string(argv[++i]) != "off";
+        else if (a == "--force") force = true;
         else if (a == "--no-vision") kinds.erase(std::remove(kinds.begin(), kinds.end(), "mmproj"), kinds.end());
         else if (a == "--no-flash") kinds.erase(std::remove(kinds.begin(), kinds.end(), "flash"), kinds.end());
         else if (model.empty() && a[0] != '-') model = a;
@@ -400,6 +674,23 @@ int dara_models_main(int argc, char** argv) {
     }
     const CatalogEntry* e = catalog_find(model);
     if (!e) { std::fprintf(stderr, "unknown model '%s'\n%s", model.c_str(), pull_usage().c_str()); return 2; }
+    if (cmd == "options" || cmd == "bench") {
+        Registry reg;
+        reg.models_dir = models_dir;
+        Planners pl;
+        CalibrationStore cal(CalibrationStore::default_path());
+        try {
+            if (cmd == "options") { print_options(options_for(reg, pl, cal, *e, vision, formats)); return 0; }
+            BenchJob job;
+            job.id = "cli"; job.model = e->id;
+            run_bench(reg, pl, cal, job, *e, vision, formats, force, true);
+            std::printf("\n%s (%zu of %zu configurations)%s%s\ncalibration file: %s\n", job.state.c_str(), job.done, job.total, job.error.empty() ? "" : ": ", job.error.c_str(), cal.path().c_str());
+            return job.state == "done" ? 0 : 1;
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "ERROR: %s%s\n", ex.what(), dynamic_cast<const ModelNotFound*>(&ex) ? (" (dara pull " + e->id + ")").c_str() : "");
+            return 1;
+        }
+    }
     if (cmd == "rm") {
         int n = 0;
         std::error_code ec;
@@ -681,6 +972,65 @@ int dara_serve_main(int argc, char** argv) {
         res.set_content(dump({{"status", "unloaded"}}), "application/json");
     });
 
+    // ---- options, benchmark, version ----
+    Planners planners;
+    Benchmarks benches;
+    CalibrationStore calib(CalibrationStore::default_path());
+    svr.Get("/dara/version", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content(dump({{"version", DARA_VERSION}, {"api", 1}, {"built", std::string(__DATE__) + " " + __TIME__}, {"calibration_file", calib.path()}}), "application/json");
+    });
+    svr.Get(R"(/dara/models/([^/]+)/options)", [&](const httplib::Request& req, httplib::Response& res) {
+        const CatalogEntry* ce = catalog_find(req.matches[1]);
+        if (!ce) { bad(res, 404, "unknown model '" + std::string(req.matches[1]) + "'", "model_not_found"); return; }
+        const std::string v = req.get_param_value("vision");
+        const bool vis = !(v == "false" || v == "0" || v == "off");
+        try { res.set_content(dump(options_for(reg, planners, calib, *ce, vis, split_csv(req.get_param_value("formats")))), "application/json"); }
+        catch (const ModelNotFound& ex) { not_found(res, ce->id, ex.what()); }
+        catch (const std::exception& ex) { bad(res, 500, ex.what(), "server_error"); }
+    });
+    svr.Post(R"(/dara/models/([^/]+)/benchmark)", [&](const httplib::Request& req, httplib::Response& res) {
+        const CatalogEntry* ce = catalog_find(req.matches[1]);
+        if (!ce) { bad(res, 404, "unknown model '" + std::string(req.matches[1]) + "'", "model_not_found"); return; }
+        if (installed_path(reg.models_dir, *ce, *ce->file("model")).empty()) { not_found(res, ce->id, "model '" + ce->id + "' is not installed"); return; }
+        std::vector<std::string> formats;
+        bool vis = true, force = false;
+        if (!req.body.empty()) {
+            try {
+                const json b = json::parse(req.body);
+                if (b.contains("formats") && b["formats"].is_array()) for (const json& f : b["formats"]) formats.push_back(f.get<std::string>());
+                vis = b.value("vision", true);
+                force = b.value("force", false);
+            } catch (const std::exception& ex) { bad(res, 400, std::string("invalid JSON: ") + ex.what(), "invalid_request_error"); return; }
+        }
+        std::shared_ptr<BenchJob> job;
+        {
+            std::lock_guard<std::mutex> lk(benches.mu);
+            if (auto r = benches.running()) { bad(res, 409, "a benchmark of '" + r->model + "' is already running (" + r->id + ")", "conflict"); return; }
+            job = std::make_shared<BenchJob>();
+            job->id = "bench-" + std::to_string(++benches.next);
+            job->model = ce->id;
+            benches.jobs[job->id] = job;
+            job->th = std::thread([&reg, &planners, &calib, job, ce, vis, formats, force] { run_bench(reg, planners, calib, *job, *ce, vis, formats, force, false); });
+        }
+        res.status = 202;
+        json j = bench_json(*job);
+        j["progress_url"] = "/dara/benchmarks/" + job->id;
+        res.set_content(dump(j), "application/json");
+    });
+    svr.Get(R"(/dara/benchmarks/([^/]+))", [&](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lk(benches.mu);
+        auto it = benches.jobs.find(req.matches[1]);
+        if (it == benches.jobs.end()) { bad(res, 404, "no such benchmark", "not_found"); return; }
+        res.set_content(dump(bench_json(*it->second)), "application/json");
+    });
+    svr.Delete(R"(/dara/benchmarks/([^/]+))", [&](const httplib::Request& req, httplib::Response& res) {
+        std::lock_guard<std::mutex> lk(benches.mu);
+        auto it = benches.jobs.find(req.matches[1]);
+        if (it == benches.jobs.end()) { bad(res, 404, "no such benchmark", "not_found"); return; }
+        it->second->cancel = true;
+        res.set_content(dump({{"id", it->first}, {"status", "cancelling"}}), "application/json");
+    });
+
     // ---- generation ----
     // Runs fn on the engine for `model` under the engine lock (loading / switching as needed).
     auto run_locked = [&](const std::string& model, const std::function<GenResult(Engine&)>& fn, GenResult& out, std::string& err, int& code) -> bool {
@@ -944,7 +1294,9 @@ int dara_serve_main(int argc, char** argv) {
     });
 
     std::fprintf(stderr, "Dara server listening on http://%s:%d  (OpenAI API at /v1, models at /v1/models, stats at /dara/stats)\n", host.c_str(), port);
-    if (!svr.listen(host, port)) {
+    const bool listened = svr.listen(host, port);
+    for (auto& [k, j] : benches.jobs) { j->cancel = true; if (j->th.joinable()) j->th.join(); }   // a benchmark still running holds the engine
+    if (!listened) {
         std::fprintf(stderr, "ERROR: cannot listen on %s:%d (port in use?)\n", host.c_str(), port);
         return 1;
     }

@@ -960,29 +960,33 @@ struct Engine::Impl {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
-Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
-    Impl& m = *impl_;
-    m.opt = o;
-    m.gguf = std::make_unique<dara::io::GgufCheckpoint>(o.gguf);
-    std::string arch;
-    for (const auto& kv : m.gguf->header().metadata) if (kv.first == "general.architecture") { arch = kv.second; break; }
-    if (arch != "qwen35" && arch != "gemma4") throw std::runtime_error("unsupported GGUF architecture '" + arch + "' (Dara runs qwen35 and gemma4)");
-    m.qwen = arch == "qwen35";
+// ---- residency options shared by loading a model and by the dry run (ModelPlanner) ------------------------------------------------------------------------
+namespace {
 
-    dara::model::ResidencyOptions ropt;
-    {
-        using dara::model::KvFormat;
-        const std::string& f = o.kv_format;
-        ropt.kv_format = f == "k8v4" ? KvFormat::K8V4 : f == "q4" ? KvFormat::Q4 : f == "tq4" ? KvFormat::TQ4 : f == "k16v8" ? KvFormat::K16V8 : f == "f32" ? KvFormat::F32 : KvFormat::Q8;
-        if (f != "q8" && f != "int8" && f != "k8v4" && f != "q4" && f != "tq4" && f != "k16v8" && f != "f32") throw std::invalid_argument("unknown K/V format '" + f + "' (q8, k8v4, q4, tq4, k16v8)");
-    }
+struct Residency {
+    dara::model::ResidencyOptions ropt, ropt_plain;   // ropt: with the drafter's VRAM; ropt_plain: without it (the "auto" fallback)
+    std::string flash_path, flash_note;
+    size_t mmproj_bytes = 0;
+};
+
+dara::model::KvFormat parse_kv_format(const std::string& f) {
+    using dara::model::KvFormat;
+    if (f != "q8" && f != "int8" && f != "k8v4" && f != "q4" && f != "tq4" && f != "k16v8" && f != "f32") throw std::invalid_argument("unknown K/V format '" + f + "' (q8, k8v4, q4, tq4, k16v8)");
+    return f == "k8v4" ? KvFormat::K8V4 : f == "q4" ? KvFormat::Q4 : f == "tq4" ? KvFormat::TQ4 : f == "k16v8" ? KvFormat::K16V8 : f == "f32" ? KvFormat::F32 : KvFormat::Q8;
+}
+
+Residency make_residency(const EngineOptions& o, const dara::io::GgufCheckpoint& gguf, bool qwen, const dara::model::QwenConfig* qcfg, bool verbose) {
+    Residency r;
+    dara::model::ResidencyOptions& ropt = r.ropt;
+    ropt.kv_format = parse_kv_format(o.kv_format);
     ropt.auto_min_context = o.min_context;
     ropt.safety_bytes = o.vram_reserve_mb << 20;
+    ropt.assume_free_bytes = o.assume_free_bytes;
     std::error_code ec;
     if (!o.mmproj.empty()) {   // the image encoder's weights and activations get VRAM when the context is sized
         const auto sz = std::filesystem::file_size(std::filesystem::u8path(o.mmproj), ec);
         if (ec) throw std::runtime_error("cannot read --mmproj " + o.mmproj);
-        m.info.mmproj_bytes = static_cast<size_t>(sz);
+        r.mmproj_bytes = static_cast<size_t>(sz);
         // the encoder streams its weights from the file and borrows its working memory from the unused context while an image is encoded: between
         // images it keeps only its resident parts (patch embedding, biases, norms: a few MB)
         ropt.extra_vram_bytes += 24u << 20;
@@ -992,11 +996,8 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
     if (o.flash == "auto") {
         flash_path.clear();
         std::string want;
-        if (!m.qwen) want = "drafter_nano_v2.dflash";
-        else {
-            const auto qc = dara::model::QwenConfig::from_gguf(*m.gguf);
-            if (qc.hidden == 2560) want = "drafter_4b_v2.dflash";   // Core 4B (no drafter is shipped for Pro 9B)
-        }
+        if (!qwen) want = "drafter_nano_v2.dflash";
+        else if (qcfg && qcfg->hidden == 2560) want = "drafter_4b_v2.dflash";   // Core 4B (no drafter is shipped for Pro 9B)
         if (!want.empty()) {
             const std::string dirs[] = {exe_dir() + "/flash", exe_dir(), "build/flash", u8s(std::filesystem::u8path(o.gguf).parent_path())};
             for (const auto& d : dirs) {
@@ -1005,29 +1006,50 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
             }
         }
     }
-    if (!o.spec || o.flash_mode == "off") { flash_path.clear(); m.info.flash_note = "turned off when the server started"; }
-    else if (flash_path.empty()) m.info.flash_note = m.qwen && dara::model::QwenConfig::from_gguf(*m.gguf).hidden != 2560 ? "no drafter exists for this model" : "drafter file not installed";
-    dara::model::ResidencyOptions ropt_plain = ropt;   // without the drafter's VRAM (the "auto" fallback)
+    if (!o.spec || o.flash_mode == "off") { flash_path.clear(); r.flash_note = "turned off when the server started"; }
+    else if (flash_path.empty()) r.flash_note = qwen && qcfg && qcfg->hidden != 2560 ? "no drafter exists for this model" : "drafter file not installed";
+    r.ropt_plain = ropt;   // without the drafter's VRAM (the "auto" fallback)
     if (!flash_path.empty()) {
         try {
             size_t fixed = 0, per = 0;
-            dara::model::FlashDrafter::vram_estimate(flash_path, *m.gguf, fixed, per);
+            dara::model::FlashDrafter::vram_estimate(flash_path, gguf, fixed, per);
             ropt.extra_vram_bytes += fixed;
             ropt.extra_bytes_per_token += per;
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "note: Flash drafter %s not used (%s)\n", flash_path.c_str(), e.what());
-            m.info.flash_note = std::string("drafter unusable: ") + e.what();
+            if (verbose) std::fprintf(stderr, "note: Flash drafter %s not used (%s)\n", flash_path.c_str(), e.what());
+            r.flash_note = std::string("drafter unusable: ") + e.what();
             flash_path.clear();
         }
     }
+    if (qwen && qcfg) {   // the prompt-cache checkpoint (a copy of the recurrent states); the speculative snapshot fits in the safety reserve, as in dara.exe
+        ropt.extra_vram_bytes += dara::model::QwenModel::device_checkpoint_bytes(*qcfg);
+        r.ropt_plain.extra_vram_bytes += dara::model::QwenModel::device_checkpoint_bytes(*qcfg);
+    }
+    r.flash_path = flash_path;
+    return r;
+}
 
+}  // namespace
+
+Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
+    Impl& m = *impl_;
+    m.opt = o;
+    m.gguf = std::make_unique<dara::io::GgufCheckpoint>(o.gguf);
+    std::string arch;
+    for (const auto& kv : m.gguf->header().metadata) if (kv.first == "general.architecture") { arch = kv.second; break; }
+    if (arch != "qwen35" && arch != "gemma4") throw std::runtime_error("unsupported GGUF architecture '" + arch + "' (Dara runs qwen35 and gemma4)");
+    m.qwen = arch == "qwen35";
+    std::error_code ec;
+    if (m.qwen) m.qcfg = dara::model::QwenConfig::from_gguf(*m.gguf);
+    Residency rs = make_residency(o, *m.gguf, m.qwen, m.qwen ? &m.qcfg : nullptr, true);
+    dara::model::ResidencyOptions& ropt = rs.ropt;
+    dara::model::ResidencyOptions& ropt_plain = rs.ropt_plain;
+    std::string flash_path = rs.flash_path;
+    m.info.mmproj_bytes = rs.mmproj_bytes;
+    m.info.flash_note = rs.flash_note;
     if (m.qwen) {
-        m.qcfg = dara::model::QwenConfig::from_gguf(*m.gguf);
         m.qtok = std::make_unique<dara::tokenizer::Tokenizer>(dara::tokenizer::Tokenizer::from_gguf(m.gguf->header()));
         m.qweights = std::make_unique<dara::model::GgufWeights>(*m.gguf, m.qcfg);
-        // the prompt-cache checkpoint (a copy of the recurrent states); the speculative snapshot fits in the safety reserve, as in dara.exe
-        ropt.extra_vram_bytes += dara::model::QwenModel::device_checkpoint_bytes(m.qcfg);
-        ropt_plain.extra_vram_bytes += dara::model::QwenModel::device_checkpoint_bytes(m.qcfg);
         m.gguf->release_string_arrays();
         m.qm = std::make_unique<dara::model::QwenModel>(m.qcfg, *m.qweights, o.kv, ropt);
         // --flash auto: the drafter only pays off when it does not push layers out of VRAM (measured: 4B on 4 GB, 30/32 layers with it is slower
@@ -1211,4 +1233,74 @@ GenResult Engine::complete(const std::string& prompt, const SampleParams& sp, co
     return r;
 }
 
+// ---- ModelPlanner ------------------------------------------------------------------------------------------------------------------------------------
+
+struct ModelPlanner::Impl {
+    std::unique_ptr<dara::io::GgufCheckpoint> gguf;
+    bool qwen = false;
+    dara::model::QwenConfig qcfg;
+    std::unique_ptr<dara::model::GgufWeights> qweights;
+    std::string arch;
+};
+
+ModelPlanner::ModelPlanner(const std::string& path) : impl_(std::make_unique<Impl>()) {
+    Impl& m = *impl_;
+    m.gguf = std::make_unique<dara::io::GgufCheckpoint>(path);
+    for (const auto& kv : m.gguf->header().metadata) if (kv.first == "general.architecture") { m.arch = kv.second; break; }
+    if (m.arch != "qwen35" && m.arch != "gemma4") throw std::runtime_error("unsupported GGUF architecture '" + m.arch + "' (Dara runs qwen35 and gemma4)");
+    m.qwen = m.arch == "qwen35";
+    if (m.qwen) {
+        m.qcfg = dara::model::QwenConfig::from_gguf(*m.gguf);
+        m.qweights = std::make_unique<dara::model::GgufWeights>(*m.gguf, m.qcfg);
+    }
+}
+
+ModelPlanner::~ModelPlanner() = default;
+const std::string& ModelPlanner::family() const { return impl_->arch; }
+int ModelPlanner::layers() const { return impl_->qwen ? impl_->qcfg.layers : 0; }
+
+PlanResult ModelPlanner::plan(const EngineOptions& o) {
+    Impl& m = *impl_;
+    PlanResult res;
+    try {
+        Residency rs = make_residency(o, *m.gguf, m.qwen, m.qwen ? &m.qcfg : nullptr, false);
+        rs.ropt.plan_only = rs.ropt_plain.plan_only = true;
+        res.flash_active = !rs.flash_path.empty();
+        res.flash_note = rs.flash_note;
+        const char* drop = "its VRAM would move model layers out of VRAM on this GPU (slower than without it); load with flash on to force it";
+        auto fill = [&](const dara::model::PlacementReport& pr, size_t context, size_t native, int layers) {
+            res.ok = true;
+            res.context = context;
+            res.native_context = native;
+            res.layers = layers;
+            res.layers_gpu = pr.resident_layers;
+            res.head_on_cpu = pr.head_on_cpu;
+            res.placement = pr.plan;
+            res.vram_total = pr.vram_total;
+            res.vram_free_assumed = pr.vram_free_at_start;
+            res.state_bytes = pr.state_bytes;
+        };
+        if (m.qwen) {
+            auto q = std::make_unique<dara::model::QwenModel>(m.qcfg, *m.qweights, o.kv, rs.ropt);
+            if (res.flash_active && o.flash_mode == "auto" && q->placement().resident_layers < m.qcfg.layers) {   // as Engine does: the drafter is dropped
+                q = std::make_unique<dara::model::QwenModel>(m.qcfg, *m.qweights, o.kv, rs.ropt_plain);
+                res.flash_active = false;
+                res.flash_note = drop;
+            }
+            fill(q->placement(), q->kv_capacity(), m.qcfg.context_length, m.qcfg.layers);
+        } else {
+            auto g = std::make_unique<dara::model::GemmaModel>(*m.gguf, o.kv, rs.ropt);
+            if (res.flash_active && o.flash_mode == "auto" && g->placement().resident_layers < g->config().layers) {
+                g = std::make_unique<dara::model::GemmaModel>(*m.gguf, o.kv, rs.ropt_plain);
+                res.flash_active = false;
+                res.flash_note = drop;
+            }
+            fill(g->placement(), g->kv_capacity(), g->config().context_length, g->config().layers);
+        }
+    } catch (const std::exception& e) {
+        res.ok = false;
+        res.error = e.what();
+    }
+    return res;
+}
 }  // namespace dara::serve

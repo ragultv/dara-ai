@@ -25,7 +25,7 @@ int dara_models_main(int argc, char** argv);  // src/serve/server.cpp: dara pull
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--probe") == 0) return dara_probe_main();   // memory-bandwidth ceiling of this GPU
     if (argc >= 2 && std::strcmp(argv[1], "serve") == 0) return dara_serve_main(argc - 1, argv + 1);
-    if (argc >= 2 && (std::strcmp(argv[1], "pull") == 0 || std::strcmp(argv[1], "list") == 0 || std::strcmp(argv[1], "rm") == 0))
+    if (argc >= 2 && (std::strcmp(argv[1], "pull") == 0 || std::strcmp(argv[1], "list") == 0 || std::strcmp(argv[1], "rm") == 0 || std::strcmp(argv[1], "options") == 0 || std::strcmp(argv[1], "bench") == 0))
         return dara_models_main(argc - 1, argv + 1);
     std::string gguf;
     bool info = false;
@@ -41,7 +41,8 @@ int main(int argc, char** argv) {
                      "  dara --info --gguf <model.gguf> prints the detected architecture\n"
                      "  dara --probe measures this GPU's memory bandwidth (the ceiling for decode speed)\n"
                      "  dara serve [--model <id or model.gguf>] [--port 11435] runs the HTTP server (OpenAI-compatible API, /dara/stats)\n"
-                     "  dara pull <dara-nano|dara-core-4b|dara-pro-9b>, dara list, dara rm <id> manage downloaded models\n");
+                     "  dara pull <dara-nano|dara-core-4b|dara-pro-9b>, dara list, dara rm <id> manage downloaded models\n"
+                     "  dara options <id>   what fits this GPU (context, layers on the GPU, quality, measured speeds); dara bench <id> measures the speeds\n");
         return 2;
     }
     std::string arch;

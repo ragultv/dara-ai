@@ -83,6 +83,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     report_.gpu = require_supported_gpu();
     size_t free_b = 0, total_b = 0;
     cuda_check(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    if (opt.assume_free_bytes) free_b = std::min(opt.assume_free_bytes, total_b);
 
     // ---- sizes ----------------------------------------------------------------------------------------------
     const int L = cfg.layers;
@@ -211,6 +212,17 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         throw std::runtime_error(why);
     }
     resident_ = resident;
+    if (opt.plan_only) {   // dry run: the placement a real load would make (see ResidencyOptions::plan_only)
+        report_.resident_layers = resident_;
+        report_.hosted_layers = L - resident_;
+        report_.head_on_cpu = head_on_cpu_;
+        report_.head_bytes = head_on_cpu_ ? 0 : head_bytes;
+        report_.state_bytes = state_bytes + kv_bytes;
+        report_.workspace_bytes = workspace;
+        report_.vram_free_at_start = free_b;
+        report_.vram_total = total_b;
+        return;
+    }
 
     // ---- load once: states, head, then every layer ------------------------------------------------------------
     for (int i = 0; i < L; ++i) {
@@ -268,6 +280,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     }
     report_.resident_layers = resident_;
     report_.hosted_layers = L - resident_;
+    report_.head_on_cpu = head_on_cpu_;
     report_.head_bytes = head_on_cpu_ ? 0 : head_.bytes;
     weights.embed_row(0);  // read the embedding table into host RAM now (cold load), not on the first token
     report_.embedding_host_bytes = weights.embedding_bytes();
