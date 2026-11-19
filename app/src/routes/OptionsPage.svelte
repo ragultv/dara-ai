@@ -164,14 +164,49 @@
       <p class="text-xs">Loading hardware options for {modelId}...</p>
     </div>
   {:else if error}
-    <div
-      role="alert"
-      class="p-6 rounded-xl bg-danger-subtle border border-danger text-sm text-danger"
-    >
-      <p class="font-bold">Failed to load model options</p>
-      <p class="text-xs mt-1">{error}</p>
-      <Button variant="secondary" size="sm" class="mt-4" onclick={loadOptions}>Try again</Button>
-    </div>
+    {#if error.toLowerCase().includes("not installed")}
+      <Card variant="surface" padding="lg" class="max-w-md mx-auto text-center space-y-4 my-8">
+        <div
+          class="w-12 h-12 rounded-xl bg-primary-subtle text-primary flex items-center justify-center mx-auto"
+        >
+          <svg
+            class="w-6 h-6"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+            />
+          </svg>
+        </div>
+        <div>
+          <h2 class="text-base font-bold text-text">Model Not Downloaded</h2>
+          <p class="text-xs text-text-muted mt-1 leading-relaxed">
+            Model <strong class="text-text font-mono">{modelId}</strong> must be downloaded before you
+            can configure GPU layers, K/V precision, and run hardware benchmarks.
+          </p>
+        </div>
+        <div class="flex justify-center gap-3 pt-2">
+          <Button variant="primary" size="sm" onclick={() => router.navigate("models")}>
+            Go to Models to Download
+          </Button>
+        </div>
+      </Card>
+    {:else}
+      <div
+        role="alert"
+        class="p-6 rounded-xl bg-danger-subtle border border-danger text-sm text-danger"
+      >
+        <p class="font-bold">Failed to load model options</p>
+        <p class="text-xs mt-1">{error}</p>
+        <Button variant="secondary" size="sm" class="mt-4" onclick={loadOptions}>Try again</Button>
+      </div>
+    {/if}
   {:else if optionsData}
     <!-- 1. Header with GPU Hardware Specs -->
     <header class="space-y-4 border-b border-border pb-6">
