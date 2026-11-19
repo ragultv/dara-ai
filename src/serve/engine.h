@@ -129,6 +129,7 @@ struct EngineOptions {
     std::string id;                         // model id reported by the API (default: the file name)
     size_t kv = 0;                          // 0: auto
     size_t min_context = 32768;
+    std::function<void(const std::string&, int, int)> progress;   // load progress (stage, done, total); optional
     size_t assume_free_bytes = 0;           // dry runs (ModelPlanner): treat this much VRAM as free instead of asking the driver (0 = ask)
     size_t vram_reserve_mb = 0;
     std::string kv_format = "q8";              // K/V cache: q8 (int8), k8v4, q4, tq4, k16v8             // VRAM the planner leaves free (0: the model's default; DARA_VRAM_SAFETY_MB overrides)

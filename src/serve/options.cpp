@@ -238,6 +238,7 @@ PlanResult plan_one(const Context& c, const std::string& kv, bool flash, size_t 
     q.flash_mode = flash ? "on" : "off";
     q.mmproj = c.mmproj_path;
     q.assume_free_bytes = c.rq.assume_free_bytes;
+    q.vram_reserve_mb = c.rq.vram_reserve_mb;
     return c.rq.planner->plan(q);
 }
 
@@ -273,6 +274,73 @@ std::vector<size_t> ladder(size_t native) {
 
 }  // namespace
 
+// The fast point of one (format, Flash) option.
+struct FastPoint { std::string kv; bool flash; PlanResult p; };
+
+namespace {
+
+// when nothing keeps 32K fully on the GPU: fully on the GPU first, then the most layers on the GPU (that decides speed), then the most context
+bool better_plan(const PlanResult& a, const PlanResult& b) {
+    const bool fa = a.layers_gpu == a.layers && !a.head_on_cpu, fb = b.layers_gpu == b.layers && !b.head_on_cpu;
+    if (fa != fb) return fa;
+    if (a.layers_gpu != b.layers_gpu) return a.layers_gpu > b.layers_gpu;
+    return a.context > b.context;
+}
+
+// The rule: the highest-quality format (high label) that keeps >= 32K tokens fully on the GPU, else the high-quality format that keeps the most layers on
+// the GPU, then the most context; Flash on only if it still keeps >= 32K tokens fully on the GPU. With flash_filter / kv_filter the choice is restricted.
+Recommendation pick_recommendation(const std::string& id, const std::vector<FastPoint>& fasts, int flash_filter, const std::string& kv_filter) {
+    Recommendation rec;
+    auto label_of = [&](const std::string& kv) { const QualityRow* r = quality_row(id, kv); return std::string(r ? r->label : "experimental"); };
+    const bool pool_flash = flash_filter == 1;   // the formats are chosen among the options without the drafter, unless it is forced on
+    auto allowed = [&](const FastPoint& f) { return f.p.ok && f.flash == pool_flash && (!kv_filter.empty() ? f.kv == kv_filter : format_info(f.kv)->recommendable); };
+    const FastPoint* pick = nullptr;
+    for (const FastPoint& f : fasts) {
+        if (!allowed(f) || label_of(f.kv) != "high") continue;
+        if (f.p.layers_gpu == f.p.layers && !f.p.head_on_cpu && f.p.context >= kDefaultContext) { pick = &f; break; }
+    }
+    if (!pick) for (const FastPoint& f : fasts) if (allowed(f) && label_of(f.kv) == "high" && (!pick || better_plan(f.p, pick->p))) pick = &f;
+    if (!pick) for (const FastPoint& f : fasts) if (allowed(f) && (!pick || better_plan(f.p, pick->p))) pick = &f;
+    if (!pick) return rec;
+    const FastPoint* with_flash = nullptr;
+    if (flash_filter != 1) for (const FastPoint& f : fasts) if (f.flash && f.kv == pick->kv && f.p.ok) with_flash = &f;
+    bool flash_on = flash_filter == 1;
+    if (flash_filter < 0 && with_flash && with_flash->p.flash_active && with_flash->p.layers_gpu == with_flash->p.layers && !with_flash->p.head_on_cpu &&
+        with_flash->p.context >= kDefaultContext)
+        flash_on = true;
+    const PlanResult& use = flash_on && with_flash ? with_flash->p : pick->p;
+    std::string reason = std::string(kv_format_name(pick->kv)) + ": " + (label_of(pick->kv) == "high" ? "high quality" : label_of(pick->kv) == "medium" ? "medium quality" : "lower quality") + ", ";
+    reason += std::to_string(use.context) + " tokens, ";
+    if (use.layers_gpu == use.layers && !use.head_on_cpu) reason += "every layer and the output head on the GPU";
+    else if (use.layers_gpu == use.layers) reason += "every layer on the GPU (the output head runs on the CPU)";
+    else reason += std::to_string(use.layers_gpu) + " of " + std::to_string(use.layers) + " layers on the GPU (the rest run on the CPU: this model does not fit this GPU fully)";
+    if (flash_filter == 1) reason += "; Flash on (asked for)";
+    else if (flash_filter == 0) reason += "; Flash off (asked for)";
+    else if (flash_on) reason += "; Flash keeps at least 32K tokens here, so it is on";
+    else if (with_flash) reason += "; Flash would limit the context to " + std::to_string(with_flash->p.context) + " tokens on this GPU, so it is off";
+    rec.ok = true;
+    rec.kv = pick->kv;
+    rec.flash = flash_on;
+    rec.context = use.context;
+    rec.reason = reason;
+    return rec;
+}
+
+}  // namespace
+
+Recommendation recommend(const OptionsRequest& rq, int flash_filter, const std::string& kv_filter) {
+    const Context c = make_context(rq);
+    std::vector<FastPoint> fasts;
+    for (const FormatInfo& fi : kFormats) {
+        if (!kv_filter.empty() ? kv_filter != fi.id : !fi.recommendable) continue;
+        for (int flash = 0; flash < 2; ++flash) {
+            if ((flash && c.flash_path.empty()) || (flash_filter == 0 && flash) || (flash_filter == 1 && !flash)) continue;
+            fasts.push_back({fi.id, flash == 1, plan_one(c, fi.id, flash == 1, 0)});
+        }
+    }
+    return pick_recommendation(rq.entry->id, fasts, flash_filter, kv_filter);
+}
+
 json build_options(const OptionsRequest& rq) {
     const Context c = make_context(rq);
     const std::string& id = rq.entry->id;
@@ -292,8 +360,7 @@ json build_options(const OptionsRequest& rq) {
     json formats = json::array();
     json options = json::array();
     size_t native = 0, free_assumed = 0;
-    struct Fast { std::string kv; bool flash; PlanResult p; };
-    std::vector<Fast> fasts;
+    std::vector<FastPoint> fasts;
     size_t covered = 0, total_fast = 0;
     for (const std::string& kv : wanted_formats(rq, false)) {
         const FormatInfo* fi = format_info(kv);
@@ -326,43 +393,10 @@ json build_options(const OptionsRequest& rq) {
     out["native_context"] = native;
     out["machine"]["vram_free_assumed_mb"] = mb(free_assumed);
 
-    // recommendation: the best-quality format (high label) whose fast profile reaches 32K tokens; else the high-quality one with the most context
-    // when nothing keeps 32K fully on the GPU: fully on the GPU first, then the most layers on the GPU (that decides speed), then the most context
-    auto better = [](const PlanResult& a, const PlanResult& b) {
-        const bool fa = a.layers_gpu == a.layers && !a.head_on_cpu, fb = b.layers_gpu == b.layers && !b.head_on_cpu;
-        if (fa != fb) return fa;
-        if (a.layers_gpu != b.layers_gpu) return a.layers_gpu > b.layers_gpu;
-        return a.context > b.context;
-    };
-    const Fast* pick = nullptr;
-    auto label_of = [&](const std::string& kv) { const QualityRow* r = quality_row(id, kv); return std::string(r ? r->label : "experimental"); };
-    for (const Fast& f : fasts) {
-        if (f.flash || !f.p.ok || label_of(f.kv) != "high" || !format_info(f.kv)->recommendable) continue;
-        if (f.p.layers_gpu == f.p.layers && !f.p.head_on_cpu && f.p.context >= kDefaultContext) { pick = &f; break; }
-    }
-    if (!pick)
-        for (const Fast& f : fasts) {
-            if (f.flash || !f.p.ok || label_of(f.kv) != "high" || !format_info(f.kv)->recommendable) continue;
-            if (!pick || better(f.p, pick->p)) pick = &f;
-        }
-    if (!pick)
-        for (const Fast& f : fasts) if (!f.flash && f.p.ok && format_info(f.kv)->recommendable && (!pick || better(f.p, pick->p))) pick = &f;
-    if (pick) {
-        std::string reason = std::string(kv_format_name(pick->kv)) + ": " + (label_of(pick->kv) == "high" ? "high quality" : "the best available") + ", ";
-        const Fast* with_flash = nullptr;
-        for (const Fast& f : fasts) if (f.flash && f.kv == pick->kv && f.p.ok) with_flash = &f;
-        bool flash_on = false;
-        if (with_flash && with_flash->p.flash_active && with_flash->p.layers_gpu == with_flash->p.layers && !with_flash->p.head_on_cpu && with_flash->p.context >= kDefaultContext) flash_on = true;
-        const PlanResult& use = flash_on ? with_flash->p : pick->p;
-        reason += std::to_string(use.context) + " tokens, ";
-        if (use.layers_gpu == use.layers && !use.head_on_cpu) reason += "every layer and the output head on the GPU";
-        else if (use.layers_gpu == use.layers) reason += "every layer on the GPU (the output head runs on the CPU)";
-        else reason += std::to_string(use.layers_gpu) + " of " + std::to_string(use.layers) + " layers on the GPU (the rest run on the CPU: this model does not fit this GPU fully)";
-        if (flash_on) reason += "; Flash keeps at least 32K tokens here, so it is on";
-        else if (with_flash && with_flash->p.ok) reason += "; Flash would limit the context to " + std::to_string(with_flash->p.context) + " tokens on this GPU, so it is off";
-        out["recommended"] = {{"kv", pick->kv}, {"flash", flash_on}, {"context", use.context}, {"reason", reason},
+    const Recommendation rec = pick_recommendation(id, fasts, -1, "");
+    if (rec.ok)
+        out["recommended"] = {{"kv", rec.kv}, {"flash", rec.flash}, {"context", rec.context}, {"reason", rec.reason},
                               {"rule", "highest-quality K/V format that keeps >= 32K tokens fully on the GPU (else the high-quality format with the most layers on the GPU, then the most context); Flash on only if it keeps >= 32K tokens fully on the GPU"}};
-    }
 
     // calibration status
     const size_t mine = rq.cal ? rq.cal->count(rq.machine, id) : 0, others = rq.cal ? rq.cal->count_other_machines(rq.machine, id) : 0;

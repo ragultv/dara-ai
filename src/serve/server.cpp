@@ -211,10 +211,34 @@ struct LoadSpec {
     std::string kv;               // K/V format (empty: the server default)
 };
 
+struct Planners {   // one ModelPlanner (parsed GGUF) per model file, kept for the next request
+    std::mutex mu;
+    std::map<std::string, std::unique_ptr<ModelPlanner>> m;
+    ModelPlanner& get(const std::string& path) {
+        auto it = m.find(path);
+        if (it == m.end()) it = m.emplace(path, std::make_unique<ModelPlanner>(path)).first;
+        return *it->second;
+    }
+};
+
+// Progress of the current / last model load (GET /dara/load, /health).
+struct LoadStatus {
+    std::string state = "idle";   // idle, queued, loading, ready, failed
+    std::string model, stage, error, source, reason;
+    int percent = 0, done = 0, total = 0;
+    std::chrono::steady_clock::time_point started{};
+    double seconds = 0;
+};
+
 struct Registry {
+    Registry() { base.kv_format = "auto"; base.vram_reserve_mb = 64; base.min_context = 0; }
+    Planners* planners = nullptr; // for resolving "auto" (set by the server)
+    std::mutex status_mu;
+    LoadStatus status;
+    json loaded_config;           // what the loaded model runs with, and why
     std::string models_dir;
     EngineOptions base;
-    bool default_vision = false;
+    bool default_vision = true;   // image input when the model's image encoder is installed (it costs a few MB now)
     std::mutex engine_mu;         // serialises generation and loading
     std::mutex ptr_mu;
     std::shared_ptr<Engine> engine;
@@ -234,10 +258,65 @@ struct Registry {
         held_vram = 0;
     }
 
+    void status_queue(const std::string& model) {
+        std::lock_guard<std::mutex> lk(status_mu);
+        status = LoadStatus{};
+        status.state = "queued"; status.model = model; status.stage = "waiting for the engine";
+    }
+    void status_stage(const std::string& stage, int done, int total) {
+        std::lock_guard<std::mutex> lk(status_mu);
+        status.stage = stage; status.done = done; status.total = total;
+        const double f = total > 0 ? static_cast<double>(done) / total : 0.0;
+        if (stage == "unloading the previous model") status.percent = 1;
+        else if (stage == "planning") status.percent = 3;
+        else if (stage == "loading layers") status.percent = 5 + static_cast<int>(80 * f);
+        else if (stage == "loading the Flash drafter") status.percent = 88;
+        else if (stage == "loading the image encoder") status.percent = 94;
+        status.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - status.started).count();
+    }
+    json status_json() {
+        std::lock_guard<std::mutex> lk(status_mu);
+        double secs = status.seconds;
+        if (status.state == "loading") secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - status.started).count();
+        json j = {{"state", status.state}, {"model", status.model}, {"stage", status.stage}, {"percent", status.percent}, {"seconds", r2(secs)}};
+        if (status.total > 0) { j["done"] = status.done; j["total"] = status.total; }
+        if (!status.error.empty()) j["error"] = status.error;
+        if (!status.reason.empty()) j["config"] = {{"source", status.source}, {"reason", status.reason}};
+        return j;
+    }
+
     // engine_mu held. Throws ModelNotFound for a catalog model that is not installed.
     void load(const LoadSpec& s) {
+        {
+            std::lock_guard<std::mutex> lk(status_mu);
+            status = LoadStatus{};
+            status.state = "loading"; status.model = s.model; status.stage = "starting";
+            status.started = std::chrono::steady_clock::now();
+        }
+        const bool had = get() != nullptr;
+        const LoadSpec prev = last_spec;
+        try {
+            load_impl(s);
+            std::lock_guard<std::mutex> lk(status_mu);
+            status.state = "ready"; status.stage = "ready"; status.percent = 100; status.done = status.total = 0;
+            status.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - status.started).count();
+        } catch (const std::exception& e) {
+            std::string err = e.what();
+            if (had && !get()) {   // the old model was unloaded to make room: put it back
+                try { load_impl(prev); err += " (the previous model was loaded again)"; } catch (const std::exception&) { err += " (the previous model could not be loaded again)"; }
+            }
+            std::lock_guard<std::mutex> lk(status_mu);
+            status.state = "failed"; status.error = err;
+            status.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - status.started).count();
+            throw;
+        }
+    }
+
+    void load_impl(const LoadSpec& s) {
         EngineOptions eo = base;
+        eo.progress = [this](const std::string& stage, int done, int total) { status_stage(stage, done, total); };
         std::string id;
+        const bool explicit_vision = s.vision == 1;
         const bool want_vision = s.vision < 0 ? default_vision : s.vision == 1;
         if (const CatalogEntry* e = catalog_find(s.model)) {
             id = e->id;
@@ -246,7 +325,7 @@ struct Registry {
             eo.id = e->id;
             if (want_vision) {
                 if (const CatalogFile* mf = e->file("mmproj")) eo.mmproj = installed_path(models_dir, *e, *mf);
-                if (eo.mmproj.empty()) std::fprintf(stderr, "note: %s has no installed image encoder; image input is off\n", e->id.c_str());
+                if (eo.mmproj.empty() && explicit_vision) std::fprintf(stderr, "note: %s has no installed image encoder; image input is off\n", e->id.c_str());
             }
             const CatalogFile* ff = e->file("flash");
             eo.flash = ff ? installed_path(models_dir, *e, *ff) : std::string();
@@ -263,7 +342,38 @@ struct Registry {
         else { eo.flash = s.flash; eo.flash_mode = "on"; }   // an explicit drafter file
         if (s.ctx >= 0) eo.kv = static_cast<size_t>(s.ctx);
         if (!s.kv.empty()) eo.kv_format = s.kv;
+        {   // refuse bad input before anything is unloaded
+            static const char* known[] = {"auto", "q8", "int8", "k8v4", "q4", "tq4", "k16v8", "f32"};
+            if (std::find_if(std::begin(known), std::end(known), [&](const char* k) { return eo.kv_format == k; }) == std::end(known))
+                throw std::invalid_argument("unknown K/V format '" + eo.kv_format + "' (auto, q8, k8v4, q4, tq4, k16v8)");
+        }
+        status_stage("unloading the previous model", 0, 0);
         unload();
+        // "auto": the configuration the options API recommends for this GPU right now (K/V format, Flash); the context stays automatic (the loader sizes the
+        // largest one that keeps everything on the GPU from the VRAM that is free at load time)
+        std::string source = "explicit", reason;
+        const bool kv_auto = eo.kv_format == "auto";
+        const bool flash_auto = eo.flash_mode == "auto";
+        const CatalogEntry* ce = catalog_find(s.model);
+        const bool has_drafter = ce && ce->file("flash") && !installed_path(models_dir, *ce, *ce->file("flash")).empty();
+        if (ce && planners && (kv_auto || (flash_auto && has_drafter))) {
+            try {
+                std::lock_guard<std::mutex> lk(planners->mu);
+                OptionsRequest rq;
+                rq.entry = ce; rq.models_dir = models_dir; rq.planner = &planners->get(eo.gguf);
+                rq.vision = !eo.mmproj.empty(); rq.vram_reserve_mb = eo.vram_reserve_mb;
+                const int ff = flash_auto ? -1 : (eo.flash_mode == "on" ? 1 : 0);
+                const Recommendation rec = recommend(rq, ff, kv_auto ? std::string() : eo.kv_format);
+                if (rec.ok) {
+                    if (kv_auto) eo.kv_format = rec.kv;
+                    if (flash_auto) eo.flash_mode = rec.flash ? "on" : "off";
+                    reason = rec.reason;
+                    source = (kv_auto && flash_auto) ? "recommended" : "partly recommended";
+                }
+            } catch (const std::exception& ex) { std::fprintf(stderr, "note: could not compute the recommended configuration (%s)\n", ex.what()); }
+        }
+        if (eo.kv_format == "auto") eo.kv_format = "q8";   // a model loaded by path, or no plan: INT8
+        { std::lock_guard<std::mutex> lk(status_mu); status.source = source; status.reason = reason; }
         std::fprintf(stderr, "loading %s (%s) ...\n", id.empty() ? eo.gguf.c_str() : id.c_str(), eo.gguf.c_str());
         size_t fr0 = 0, fr1 = 0, tot = 0;
         cudaMemGetInfo(&fr0, &tot);
@@ -279,6 +389,8 @@ struct Registry {
         loaded_id = id;
         loaded_flash_mode = eo.flash_mode;
         last_spec = s;
+        loaded_config = {{"kv", mi.kv_format}, {"flash", !mi.flash.empty()}, {"context", mi.context_capacity}, {"layers_on_gpu", mi.layers_gpu}, {"layers", mi.layers},
+                         {"head", mi.head_on_cpu ? "cpu" : "gpu"}, {"vision", mi.vision}, {"source", source}, {"reason", reason}};
     }
 
     // engine_mu held: the engine a request for `model` runs on (loads / switches for an installed catalog model)
@@ -286,8 +398,7 @@ struct Registry {
         const CatalogEntry* e = model.empty() ? nullptr : catalog_find(model);
         if (e && e->id != loaded_id) {   // (no engine reference may be held here: unload() waits for the others to go)
             LoadSpec s;
-            s.model = e->id;
-            s.flash = loaded_flash_mode;
+            s.model = e->id;   // everything else automatic: the new model gets its own recommended configuration
             load(s);
             return get();
         }
@@ -372,7 +483,7 @@ json model_json(Registry& reg, Downloads& dl, const CatalogEntry& e, int64_t cre
     json d = {{"name", e.name}, {"description", e.description}, {"family", e.family}, {"base_model", e.base_model}, {"quant", e.quant},
               {"status", status}, {"loaded", loaded}, {"download_size_mb", mb(total)}, {"files", files}, {"flash", flash}, {"vision", vision},
               {"fits_gpu", fits}, {"min_vram_mb", e.min_vram_mb}, {"full_vram_mb", e.full_vram_mb}, {"download", job}};
-    if (loaded) d["context"] = eng->info().context_capacity;
+    if (loaded) { d["context"] = eng->info().context_capacity; std::lock_guard<std::mutex> lk(reg.ptr_mu); d["config"] = reg.loaded_config; }
     if (!model_ok && job.is_null()) d["pull"] = {{"method", "POST"}, {"url", "/dara/models/pull"}, {"body", {{"model", e.id}}}};
     return {{"id", e.id}, {"object", "model"}, {"created", created}, {"owned_by", "dara"}, {"dara", d}};
 }
@@ -386,16 +497,6 @@ size_t assumed_free_vram(const Registry& reg) {
     cudaMemGetInfo(&fr, &tot);
     return std::min(tot, fr + (reg.engine ? reg.held_vram : 0));
 }
-
-struct Planners {   // one ModelPlanner (parsed GGUF) per model file, kept for the next request
-    std::mutex mu;
-    std::map<std::string, std::unique_ptr<ModelPlanner>> m;
-    ModelPlanner& get(const std::string& path) {
-        auto it = m.find(path);
-        if (it == m.end()) it = m.emplace(path, std::make_unique<ModelPlanner>(path)).first;
-        return *it->second;
-    }
-};
 
 std::vector<std::string> split_csv(const std::string& s) {
     std::vector<std::string> v;
@@ -420,6 +521,7 @@ OptionsRequest make_request(Registry& reg, const CatalogEntry& e, ModelPlanner& 
     rq.machine = current_machine();
     rq.assume_free_bytes = assume_free;
     rq.vision = vision;
+    rq.vram_reserve_mb = reg.base.vram_reserve_mb;
     rq.formats = formats;
     return rq;
 }
@@ -727,6 +829,9 @@ int dara_models_main(int argc, char** argv) {
 
 int dara_serve_main(int argc, char** argv) {
     Registry reg;
+    Planners planners;
+    reg.planners = &planners;
+    struct { std::mutex mu; std::thread th; } async_load;   // POST /dara/models/load with "async": true
     reg.models_dir = default_models_dir();
     LoadSpec initial;
     std::string host = "127.0.0.1", api_key;
@@ -741,6 +846,7 @@ int dara_serve_main(int argc, char** argv) {
         else if (a == "--port") port = std::atoi(next().c_str());
         else if (a == "--mmproj") { const std::string v = next(); if (v == "auto") reg.default_vision = true; else { initial.mmproj = v; reg.default_vision = true; } }
         else if (a == "--vision") reg.default_vision = true;
+        else if (a == "--no-vision") reg.default_vision = false;
         else if (a == "--flash") initial.flash = next();
         else if (a == "--no-spec") reg.base.spec = false;
         else if (a == "--spec") reg.base.spec_k = std::atoi(next().c_str());
@@ -844,8 +950,11 @@ int dara_serve_main(int argc, char** argv) {
         auto e = reg.get();
         json j = {{"status", "ok"}, {"model", e ? json(e->info().id) : json(nullptr)}, {"queued", queued.load()}};
         if (e) j["busy"] = e->stats().busy;
+        const json ld = reg.status_json();
+        if (ld["state"] == "loading" || ld["state"] == "queued") j["loading"] = ld;
         res.set_content(dump(j), "application/json");
     });
+    svr.Get("/dara/load", [&](const httplib::Request&, httplib::Response& res) { res.set_content(dump(reg.status_json()), "application/json"); });
 
     // ---- models: catalog, downloads, loading ----
     auto list_models = [&](const httplib::Request&, httplib::Response& res) {
@@ -954,6 +1063,19 @@ int dara_serve_main(int argc, char** argv) {
             if (b.contains("ctx")) { const json& c = b["ctx"]; s.ctx = c.is_string() ? 0 : c.get<long long>(); }
         } catch (const std::exception& ex) { bad(res, 400, ex.what(), "invalid_request_error"); return; }
         if (s.model.empty()) { bad(res, 400, "\"model\" is required", "invalid_request_error"); return; }
+        bool async = false;
+        try { async = json::parse(req.body).value("async", false); } catch (...) {}
+        if (async) {   // return at once; poll GET /dara/load (a UI shows the progress)
+            if (const CatalogEntry* ce = catalog_find(s.model); ce && installed_path(reg.models_dir, *ce, *ce->file("model")).empty()) { not_found(res, s.model, "model '" + ce->id + "' is not installed"); return; }
+            std::lock_guard<std::mutex> lk(async_load.mu);
+            { const std::string st = reg.status_json()["state"]; if (st == "queued" || st == "loading") { bad(res, 409, "a model is already loading", "conflict"); return; } }
+            if (async_load.th.joinable()) async_load.th.join();   // the previous (finished) one
+            reg.status_queue(s.model);
+            async_load.th = std::thread([&reg, s] { std::lock_guard<std::mutex> elk(reg.engine_mu); try { reg.load(s); } catch (const std::exception&) {} });
+            res.status = 202;
+            res.set_content(dump(reg.status_json()), "application/json");
+            return;
+        }
         ++queued;
         std::lock_guard<std::mutex> lk(reg.engine_mu);
         --queued;
@@ -964,6 +1086,7 @@ int dara_serve_main(int argc, char** argv) {
                                   {"load_seconds", r2(mi.load_seconds)}, {"flash", {{"active", !mi.flash.empty()}, {"note", mi.flash_note}}}, {"vision", mi.vision}, {"kv_format", mi.kv_format}}),
                             "application/json");
         } catch (const ModelNotFound& ex) { not_found(res, s.model, ex.what()); }
+        catch (const std::invalid_argument& ex) { bad(res, 400, ex.what(), "invalid_request_error"); }
         catch (const std::exception& ex) { bad(res, 500, ex.what(), "server_error"); }
     });
     svr.Post("/dara/models/unload", [&](const httplib::Request&, httplib::Response& res) {
@@ -973,7 +1096,6 @@ int dara_serve_main(int argc, char** argv) {
     });
 
     // ---- options, benchmark, version ----
-    Planners planners;
     Benchmarks benches;
     CalibrationStore calib(CalibrationStore::default_path());
     svr.Get("/dara/version", [&](const httplib::Request&, httplib::Response& res) {
@@ -1295,6 +1417,7 @@ int dara_serve_main(int argc, char** argv) {
 
     std::fprintf(stderr, "Dara server listening on http://%s:%d  (OpenAI API at /v1, models at /v1/models, stats at /dara/stats)\n", host.c_str(), port);
     const bool listened = svr.listen(host, port);
+    { std::lock_guard<std::mutex> lk(async_load.mu); if (async_load.th.joinable()) async_load.th.join(); }
     for (auto& [k, j] : benches.jobs) { j->cancel = true; if (j->th.joinable()) j->th.join(); }   // a benchmark still running holds the engine
     if (!listened) {
         std::fprintf(stderr, "ERROR: cannot listen on %s:%d (port in use?)\n", host.c_str(), port);

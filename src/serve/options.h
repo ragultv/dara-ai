@@ -74,10 +74,22 @@ struct OptionsRequest {
     MachineKey machine;
     size_t assume_free_bytes = 0;      // VRAM to treat as free (0 = ask the driver)
     bool vision = true;                // include the image encoder (a few MB reserved; used when its mmproj is installed)
+    size_t vram_reserve_mb = 0;        // the server's VRAM reserve (0 = each model's default)
     std::vector<std::string> formats;  // empty: every format
 };
 
 nlohmann::json build_options(const OptionsRequest& rq);
+
+// The configuration `dara serve` uses when the user does not choose one: the same rule build_options reports as "recommended".
+struct Recommendation {
+    bool ok = false;
+    std::string kv;
+    bool flash = false;
+    size_t context = 0;       // the fast context (the loader sizes it again at load time, from the VRAM free then)
+    std::string reason;
+};
+// flash_filter: -1 choose, 0 only without the drafter, 1 only with it. kv_filter: "" choose, else only this format.
+Recommendation recommend(const OptionsRequest& rq, int flash_filter = -1, const std::string& kv_filter = "");
 
 // A configuration the benchmark should measure (distinct placements only).
 struct BenchTarget {
