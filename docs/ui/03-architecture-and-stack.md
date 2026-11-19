@@ -9,7 +9,7 @@
 | Tailwind CSS v4 at build time, tokens via `@theme` mapping to `tokens.css` | Utility classes without a runtime; tokens stay the single color source |
 | System font stack | No font files to load |
 | No UI kit with a large runtime (no MUI, no Ant); accessible headless primitives are allowed and recommended for Dialog/Popover/Menu/Tooltip/Select (Radix UI or React Aria), plus Zustand for state; keep the tree of dependencies small | Memory and bundle size |
-| One SQLite database owned by the Rust side (`rusqlite`, bundled) at `%LOCALAPPDATA%\Dara\dara.db`, reached only through typed Tauri commands (see 08-database.md) | Conversations, settings and per-model config must survive restarts and updates; the WebView gets no raw SQL; not `localStorage` (can be cleared) |
+| One SQLite database owned by the **server** (`dara.exe`) at `%LOCALAPPDATA%\Dara\dara.db`, reached through the `/dara/` HTTP endpoints (see 08-database.md) | Conversations, settings and per-model config must survive restarts and updates and be available to every client (app, CLI); the WebView gets no file or SQL access; not `localStorage` (can be cleared) |
 
 Budget: server + UI under 300 MB RAM total. Measure in Milestone 0 (see 07) with the WebView idle on Chat and again after a 50-message conversation; record the numbers in `app/PERF.md`. If the UI exceeds about 115 MB, stop and report before adding features.
 
@@ -23,7 +23,7 @@ Dara.exe (Tauri)                    dara.exe serve  (sidecar, same install folde
  └─ WebView (React UI) ── fetch ──▶ server
 ```
 
-- The Rust side starts `dara.exe serve --host 127.0.0.1 --port <p> --api-key <random>` as a Tauri sidecar, passes `{baseUrl, apiKey}` to the UI through a Tauri command (never through the URL, never logged), watches the process, and kills it on quit. If the port is busy, pick the next free port.
+- The Rust side starts `dara.exe serve --host 127.0.0.1 --port <p>` as a Tauri sidecar with the random key in the `DARA_API_KEY` environment variable, passes `{baseUrl, apiKey}` to the UI through a Tauri command (never through the URL, never logged), watches the process, and kills it on quit. If the port is busy, pick the next free port.
 - If a Dara server is already running (user started it), the UI may attach to it: ask for the base URL and key in Settings. The sidecar is the default.
 - The UI talks to the server only with `fetch` and Server-Sent Events. No Tauri command carries chat data.
 - The server loads the recommended configuration by default (`--kv-format auto --flash auto`). The UI changes it only through `/dara/models/load` when the user chooses to.
@@ -59,7 +59,7 @@ Keep `tokens.css` in `docs/ui/` as the source; copy it into the app at build tim
 - Connection store: `{status: 'starting'|'ready'|'offline'|'error', baseUrl, apiKey}`. Every request goes through `api/client.ts`, which adds the `Authorization: Bearer` header, a timeout, an `AbortSignal`, and turns error bodies `{error:{message,type,code?,download?}}` into a typed `ApiError`.
 - Polling: `/dara/stats` every 1 s only while the Monitor page or the footer pill is visible; `/dara/load` every 300 ms only during a load; `/dara/models/pull/{job}` every 500 ms (or the SSE stream) during a download; stop on `document.hidden`.
 - Streaming chat: read the SSE with `fetch` + `ReadableStream`; batch updates with `requestAnimationFrame` (not one React render per token); keep the raw text in a plain string and render Markdown on a throttle (every 50 to 80 ms) to avoid O(n^2) re-parsing in long replies; abort with `AbortController` on Stop (the server stops generating when the connection closes).
-- Conversations live in the SQLite database (08-database.md), loaded and saved through Tauri commands; the React stores are a cache of the active conversation. Images are files in the Dara attachments folder, not base64 in the database. Keep only the active conversation's messages in memory; load others on demand.
+- Conversations live in the SQLite database (08-database.md), loaded and saved through the `/dara/conversations` endpoints; the React stores are a cache of the active conversation. Images are uploaded as attachments (files owned by the server), not kept as base64. Keep only the active conversation's messages in memory; load others on demand.
 - Long lists (long conversations, model logs) must be virtualized or windowed once past about 200 items.
 
 ## Performance rules

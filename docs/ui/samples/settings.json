@@ -1,0 +1,15 @@
+{
+  "app.minimize_to_tray": true,
+  "app.start_at_login": false,
+  "chat.max_tokens": 4096,
+  "chat.system_prompt": "",
+  "chat.temperature": 0.7,
+  "defaults.flash": "auto",
+  "defaults.kv": "auto",
+  "defaults.vision": true,
+  "defaults.vram_reserve_mb": 64,
+  "server.allow_lan": false,
+  "server.models_dir": null,
+  "server.port": 11435,
+  "theme": "system"
+}

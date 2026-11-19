@@ -28,6 +28,7 @@ Rules for the client:
 | Chat | `POST /dara/tokenize` | `{messages}` or `{text}` returns a token count (for the draft counter) |
 | Monitor | `GET /dara/stats` | GPU, engine, model, ram, disk, downloads, last request, uptime |
 | About | `GET /dara/version` | `{version, api, built, calibration_file}`; show `api` mismatch as "update the app" |
+| Data (history, settings, per-model config) | `/dara/conversations`, `/dara/messages`, `/dara/attachments`, `/dara/settings`, `/dara/model-configs`, `/dara/search`, `/dara/store`, `/dara/data` | Full table, payloads and usage rules in [08-database.md](08-database.md); samples `conversation.json`, `conversations.json`, `settings.json`, `search.json`, `model-configs.json`, `store-info.json` |
 | Dev only | `GET /metrics` | Prometheus text; not used by the UI |
 
 ### Chat request
@@ -80,6 +81,5 @@ Connection refused or a closed stream mid-reply: mark the server offline, keep t
 ## Not in the backend yet (do not build UI that depends on these)
 
 - Host-header validation and an API key from the environment (planned; see [05-security.md](05-security.md)).
-- Server-side saved conversations: the UI stores them locally.
 - Prompt cache controls beyond `cache_write: false` (see [../BACKLOG.md](../BACKLOG.md)).
 - Flash drafters for the 9B, and public download hosting for the drafters (the `flash` file download may fail until released; show the server's error).

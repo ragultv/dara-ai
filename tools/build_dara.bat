@@ -6,6 +6,8 @@ rem The CUDA runtime is linked statically: dara.exe needs only the NVIDIA driver
 rem   DARA_CUDA  CUDA toolkit folder (default D:\tools\cuda\13.1.1; tools\install_cuda_redist.py installs one without admin rights)
 rem   Visual Studio 2022 (any edition with the C++ x64 tools) is found with vswhere.
 setlocal
+rem   DARA_OUT   output exe (default build\cuda\dara.exe); set another name while dara.exe is running
+if not defined DARA_OUT set DARA_OUT=build\cuda\dara.exe
 if not defined DARA_CUDA set DARA_CUDA=D:\tools\cuda\13.1.1
 set "CUDA=%DARA_CUDA%"
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -30,6 +32,8 @@ set G=src\model\gemma_model.cu src\model\gemma_ops_cuda.cu src\tokenizer\gemma_t
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% -c tools\qwen_generate.cu -Dmain=dara_qwen_main -o build\cuda\dara_obj\qwen_driver.obj || exit /b 1
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% -c tools\nano_generate.cu -Dmain=dara_nano_main -o build\cuda\dara_obj\nano_driver.obj || exit /b 1
 "%CUDA%\bin\nvcc.exe" %NVFLAGS% -c tests\bw_probe.cu -Dmain=dara_probe_main -o build\cuda\dara_obj\bw_probe.obj || exit /b 1
-set S=src\serve\engine.cu src\serve\server.cpp src\serve\metrics.cpp src\serve\catalog.cpp src\serve\download.cpp src\serve\options.cpp
-"%CUDA%\bin\nvcc.exe" %NVFLAGS% tools\dara.cu build\cuda\dara_obj\qwen_driver.obj build\cuda\dara_obj\nano_driver.obj build\cuda\dara_obj\bw_probe.obj %S% src\model\flash_drafter.cu src\tokenizer\unicode.cpp %Q% %G% %M% %C% %K% -o build\cuda\dara.exe -cudart static || exit /b 1
-echo built build\cuda\dara.exe
+rem SQLite (third_party\sqlite, public domain) is compiled once with the C compiler; FTS5 gives the chat search
+cl /nologo /O2 /MT /c /DSQLITE_ENABLE_FTS5 /DSQLITE_THREADSAFE=1 /DSQLITE_OMIT_LOAD_EXTENSION /DSQLITE_DQS=0 /DSQLITE_DEFAULT_MEMSTATUS=0 /DSQLITE_OMIT_DEPRECATED third_party\sqlite\sqlite3.c /Fobuild\cuda\dara_obj\sqlite3.obj || exit /b 1
+set S=src\serve\engine.cu src\serve\server.cpp src\serve\store.cpp src\serve\metrics.cpp src\serve\catalog.cpp src\serve\download.cpp src\serve\options.cpp
+"%CUDA%\bin\nvcc.exe" %NVFLAGS% tools\dara.cu build\cuda\dara_obj\qwen_driver.obj build\cuda\dara_obj\nano_driver.obj build\cuda\dara_obj\bw_probe.obj build\cuda\dara_obj\sqlite3.obj %S% src\model\flash_drafter.cu src\tokenizer\unicode.cpp %Q% %G% %M% %C% %K% -o %DARA_OUT% -cudart static || exit /b 1
+echo built %DARA_OUT%

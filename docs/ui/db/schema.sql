@@ -1,4 +1,4 @@
--- Dara app database, schema version 1. File: %LOCALAPPDATA%\Dara\dara.db (SQLite, WAL). Owned by the app's Rust side; see docs/ui/08-database.md.
+-- Dara app database, schema version 1. File: %LOCALAPPDATA%\Dara\dara.db (SQLite, WAL). Owned by the Dara server (src/serve/store.cpp); embedded by tools/gen_store_schema.py. See docs/ui/08-database.md.
 -- Applied with PRAGMA user_version = 1. Forward-only migrations live next to this file as 0002_*.sql, ...
 PRAGMA foreign_keys = ON;
 
