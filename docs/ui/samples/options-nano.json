@@ -1,0 +1,997 @@
+{
+  "calibration": {
+    "entries": 0,
+    "entries_from_other_machines": 0,
+    "entries_measured_on_battery": 0,
+    "fast_options": 4,
+    "fast_options_measured": 0,
+    "file": "D:\\darap-ai\\build\\calib_api.json",
+    "note": "Speeds are measured once on your machine: run the benchmark.",
+    "run": {
+      "method": "POST",
+      "url": "/dara/models/dara-nano/benchmark"
+    },
+    "status": "none"
+  },
+  "family": "gemma4",
+  "flash": {
+    "available": true,
+    "installed": true,
+    "note": ""
+  },
+  "formats": [
+    {
+      "bits_per_value": 9.0,
+      "caveat": "",
+      "description": "8-bit keys and values: the reference quality.",
+      "id": "q8",
+      "name": "INT8 (default)",
+      "quality": {
+        "checked_on": "5 workloads against the FP32 reference (english, code, structured, 1.5K and 8K-token prompts)",
+        "label": "high",
+        "min_top1_of_128": 128.0,
+        "text": "High quality",
+        "worst_clear_errors_of_128": 0.0,
+        "worst_kl": 0.00152
+      },
+      "recommendable": true
+    },
+    {
+      "bits_per_value": 6.5,
+      "caveat": "",
+      "description": "Keys stay 8-bit, values are 4-bit: about 1.4x the context of INT8.",
+      "id": "k8v4",
+      "name": "INT8 keys + 4-bit values",
+      "quality": {
+        "checked_on": "5 workloads against the FP32 reference (english, code, structured, 1.5K and 8K-token prompts)",
+        "label": "medium",
+        "min_top1_of_128": 126.0,
+        "text": "Medium quality",
+        "worst_clear_errors_of_128": 1.0,
+        "worst_kl": 0.02416
+      },
+      "recommendable": true
+    },
+    {
+      "bits_per_value": 5.0,
+      "caveat": "",
+      "description": "4-bit keys (one scale per channel) and values; the newest 128 positions stay 8-bit: about 1.75x the context of INT8.",
+      "id": "q4",
+      "name": "Q4 (KIVI-style)",
+      "quality": {
+        "checked_on": "5 workloads against the FP32 reference (english, code, structured, 1.5K and 8K-token prompts)",
+        "label": "medium",
+        "min_top1_of_128": 126.0,
+        "text": "Medium quality",
+        "worst_clear_errors_of_128": 1.0,
+        "worst_kl": 0.01817
+      },
+      "recommendable": true
+    },
+    {
+      "bits_per_value": 4.1,
+      "caveat": "Never chosen automatically: it has no batched prompt-attention kernel yet, so long prompts are processed more slowly; its speed has not been measured.",
+      "description": "Rotated 4-bit codes: the smallest cache.",
+      "id": "tq4",
+      "name": "TurboQuant 4-bit",
+      "quality": {
+        "checked_on": "5 workloads against the FP32 reference (english, code, structured, 1.5K and 8K-token prompts)",
+        "label": "medium",
+        "min_top1_of_128": 121.0,
+        "text": "Medium quality",
+        "worst_clear_errors_of_128": 4.0,
+        "worst_kl": 0.0403
+      },
+      "recommendable": false
+    }
+  ],
+  "machine": {
+    "dara": "0.1.0-dev",
+    "driver": 13010,
+    "gpu": "NVIDIA GeForce GTX 1650",
+    "vram_free_assumed_mb": 3290.75,
+    "vram_total_mb": 4095
+  },
+  "model": "dara-nano",
+  "name": "Dara Nano",
+  "native_context": 131072,
+  "notes": [
+    "Speeds are generation speeds with an empty context; they fall as the conversation fills (see decode_tps_full_estimate where measured).",
+    "A smaller context keeps more of the model on the GPU: that is what makes the fast profile fast."
+  ],
+  "options": [
+    {
+      "fast": {
+        "all_layers_on_gpu": true,
+        "context": 131072,
+        "flash_active": false,
+        "fully_on_gpu": true,
+        "head": "gpu",
+        "kv_cache_mb": 1296.0,
+        "layers": 35,
+        "layers_gpu": 35,
+        "ok": true,
+        "speed": {
+          "source": "not_measured"
+        }
+      },
+      "flash": false,
+      "kv": "q8",
+      "points": [
+        {
+          "all_layers_on_gpu": true,
+          "context": 4096,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 40.5,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 4096,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 8192,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 81.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 8192,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 16384,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 162.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 16384,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 32768,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 324.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 32768,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 65536,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 648.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 65536,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 131072,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 1296.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 131072,
+          "speed": {
+            "source": "not_measured"
+          }
+        }
+      ]
+    },
+    {
+      "fast": {
+        "all_layers_on_gpu": true,
+        "context": 131072,
+        "flash_active": true,
+        "fully_on_gpu": true,
+        "head": "gpu",
+        "kv_cache_mb": 1296.0,
+        "layers": 35,
+        "layers_gpu": 35,
+        "ok": true,
+        "speed": {
+          "source": "not_measured"
+        }
+      },
+      "flash": true,
+      "kv": "q8",
+      "points": [
+        {
+          "all_layers_on_gpu": true,
+          "context": 4096,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 40.5,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 4096,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 8192,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 81.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 8192,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 16384,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 162.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 16384,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 32768,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 324.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 32768,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 65536,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 648.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 65536,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 131072,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 1296.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 131072,
+          "speed": {
+            "source": "not_measured"
+          }
+        }
+      ]
+    },
+    {
+      "fast": {
+        "all_layers_on_gpu": true,
+        "context": 131072,
+        "flash_active": false,
+        "fully_on_gpu": true,
+        "head": "gpu",
+        "kv_cache_mb": 1008.0,
+        "layers": 35,
+        "layers_gpu": 35,
+        "ok": true,
+        "speed": {
+          "source": "not_measured"
+        }
+      },
+      "flash": false,
+      "kv": "k8v4",
+      "points": [
+        {
+          "all_layers_on_gpu": true,
+          "context": 4096,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 31.5,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 4096,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 8192,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 63.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 8192,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 16384,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 126.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 16384,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 32768,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 252.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 32768,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 65536,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 504.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 65536,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 131072,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 1008.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 131072,
+          "speed": {
+            "source": "not_measured"
+          }
+        }
+      ]
+    },
+    {
+      "fast": {
+        "all_layers_on_gpu": true,
+        "context": 131072,
+        "flash_active": true,
+        "fully_on_gpu": true,
+        "head": "gpu",
+        "kv_cache_mb": 1008.0,
+        "layers": 35,
+        "layers_gpu": 35,
+        "ok": true,
+        "speed": {
+          "source": "not_measured"
+        }
+      },
+      "flash": true,
+      "kv": "k8v4",
+      "points": [
+        {
+          "all_layers_on_gpu": true,
+          "context": 4096,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 31.5,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 4096,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 8192,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 63.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 8192,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 16384,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 126.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 16384,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 32768,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 252.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 32768,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 65536,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 504.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 65536,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 131072,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 1008.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 131072,
+          "speed": {
+            "source": "not_measured"
+          }
+        }
+      ]
+    },
+    {
+      "fast": {
+        "all_layers_on_gpu": true,
+        "context": 131072,
+        "flash_active": false,
+        "fully_on_gpu": true,
+        "head": "gpu",
+        "kv_cache_mb": 720.0,
+        "layers": 35,
+        "layers_gpu": 35,
+        "ok": true,
+        "speed": {
+          "source": "not_measured"
+        }
+      },
+      "flash": false,
+      "kv": "q4",
+      "points": [
+        {
+          "all_layers_on_gpu": true,
+          "context": 4096,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 22.5,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 4096,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 8192,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 45.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 8192,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 16384,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 90.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 16384,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 32768,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 180.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 32768,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 65536,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 360.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 65536,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 131072,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 720.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 131072,
+          "speed": {
+            "source": "not_measured"
+          }
+        }
+      ]
+    },
+    {
+      "fast": {
+        "all_layers_on_gpu": true,
+        "context": 131072,
+        "flash_active": true,
+        "fully_on_gpu": true,
+        "head": "gpu",
+        "kv_cache_mb": 720.0,
+        "layers": 35,
+        "layers_gpu": 35,
+        "ok": true,
+        "speed": {
+          "source": "not_measured"
+        }
+      },
+      "flash": true,
+      "kv": "q4",
+      "points": [
+        {
+          "all_layers_on_gpu": true,
+          "context": 4096,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 22.5,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 4096,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 8192,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 45.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 8192,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 16384,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 90.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 16384,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 32768,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 180.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 32768,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 65536,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 360.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 65536,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 131072,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 720.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 131072,
+          "speed": {
+            "source": "not_measured"
+          }
+        }
+      ]
+    },
+    {
+      "fast": {
+        "all_layers_on_gpu": true,
+        "context": 131072,
+        "flash_active": false,
+        "fully_on_gpu": true,
+        "head": "gpu",
+        "kv_cache_mb": 591.0,
+        "layers": 35,
+        "layers_gpu": 35,
+        "ok": true,
+        "speed": {
+          "source": "not_measured"
+        }
+      },
+      "flash": false,
+      "kv": "tq4",
+      "points": [
+        {
+          "all_layers_on_gpu": true,
+          "context": 4096,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 18.47,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 4096,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 8192,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 36.94,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 8192,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 16384,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 73.88,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 16384,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 32768,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 147.75,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 32768,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 65536,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 295.5,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 65536,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 131072,
+          "flash_active": false,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 591.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 131072,
+          "speed": {
+            "source": "not_measured"
+          }
+        }
+      ]
+    },
+    {
+      "fast": {
+        "all_layers_on_gpu": true,
+        "context": 131072,
+        "flash_active": true,
+        "fully_on_gpu": true,
+        "head": "gpu",
+        "kv_cache_mb": 591.0,
+        "layers": 35,
+        "layers_gpu": 35,
+        "ok": true,
+        "speed": {
+          "source": "not_measured"
+        }
+      },
+      "flash": true,
+      "kv": "tq4",
+      "points": [
+        {
+          "all_layers_on_gpu": true,
+          "context": 4096,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 18.47,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 4096,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 8192,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 36.94,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 8192,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 16384,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 73.88,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 16384,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 32768,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 147.75,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 32768,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 65536,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 295.5,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 65536,
+          "speed": {
+            "source": "not_measured"
+          }
+        },
+        {
+          "all_layers_on_gpu": true,
+          "context": 131072,
+          "flash_active": true,
+          "fully_on_gpu": true,
+          "head": "gpu",
+          "kv_cache_mb": 591.0,
+          "layers": 35,
+          "layers_gpu": 35,
+          "ok": true,
+          "requested_context": 131072,
+          "speed": {
+            "source": "not_measured"
+          }
+        }
+      ]
+    }
+  ],
+  "recommended": {
+    "context": 131072,
+    "flash": true,
+    "kv": "q8",
+    "reason": "INT8 (default): high quality, 131072 tokens, every layer and the output head on the GPU; Flash keeps at least 32K tokens here, so it is on",
+    "rule": "highest-quality K/V format that keeps >= 32K tokens fully on the GPU (else the high-quality format with the most layers on the GPU, then the most context); Flash on only if it keeps >= 32K tokens fully on the GPU"
+  },
+  "vision": {
+    "included": true,
+    "note": "The image encoder streams its weights from disk and borrows its working memory from the unused context: it costs about 24 MB.",
+    "requested": true,
+    "reserved_mb": 24
+  }
+}
