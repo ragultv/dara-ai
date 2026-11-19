@@ -77,6 +77,11 @@ public:
     // token ids there must be the pad id (the per-layer token table reads it); the soft tokens also feed the per-layer projection.
     void add_soft_tokens(size_t start, int n, std::vector<float> rows);
     void clear_soft_tokens() { soft_.clear(); }
+    // Device ranges of the K/V caches holding positions >= from (unused while `from` positions are held): scratch to borrow (DeviceArena).
+    void kv_tail_regions(size_t from, std::vector<DeviceArena::Region>& out) {
+        for (int l = 0; l < cfg_.layers; ++l)
+            if (cfg_.owns_kv(l)) dara::model::kv_tail_regions(kv_[l].bufs(), opt_.kv_format, capacity_, from, out);
+    }
     size_t kv_capacity() const { return capacity_; }   // positions the caches hold (the auto choice when constructed with 0)
     // long forward calls run in pieces of this many tokens (multiple of the prefill chunk): bounds the per-call device buffers
     int forward_piece_tokens() const { const int c = opt_.max_chunk_tokens > 0 ? opt_.max_chunk_tokens : 1; return c * (256 / c > 0 ? 256 / c : 1); }
@@ -106,6 +111,9 @@ private:
         DevBuf<float> K, V;            // KvFormat::F32:  [capacity][kv_heads*head_dim]
         DevBuf<uint8_t> Kq, Vq;        // KvFormat::TQ4:  packed codes [capacity][kv_heads][head_dim/2]
         DevBuf<float> Kn, Vn;          //                 and norms [capacity][kv_heads]
+        DevBuf<uint8_t> Kr;            // KvFormat::Q4:   key ring (kv4.h)
+        DevBuf<float> Krs;
+        KvBuffers bufs() { return {&K, &V, &Kq, &Vq, &Kn, &Vn, &Kr, &Krs}; }
     };
 
     void start_copy(int layer);
@@ -127,6 +135,8 @@ private:
     ScratchPool pool_;
     std::vector<uint8_t> embd_;        // token_embd (Q4_K etc.) in host RAM for row gathers
     std::vector<uint8_t> pli_table_;   // per_layer_token_embd in host RAM (empty if it did not fit: rows are then read on demand)
+    const uint8_t* embd_p_ = nullptr;  // token_embd rows: the memory-mapped GGUF (or embd_ with DARA_EMBD_RAM=1)
+    const uint8_t* pli_p_ = nullptr;   // per_layer_token_embd rows: mapped (or pli_table_); null: read_rows from the file
     uint32_t embd_type_ = 0, pli_type_ = 0;
     int resident_ = 0;
     size_t pos_ = 0;

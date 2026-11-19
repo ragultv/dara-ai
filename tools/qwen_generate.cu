@@ -52,6 +52,7 @@ int main(int argc, char** argv) {
     float flash_min_p = 0.0f;   // --flash-min-p P: draft only while the drafter's cumulative probability stays >= P
     std::string flash_path;   // --flash <drafter.bin>: Dara Flash speculative decoding (trained drafter), up to --spec K draft tokens (default 4)
     int force_resident = -1;  // -1: the planner decides how many layers live in VRAM
+    size_t min_context = 32768;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { if (i + 1 >= argc) { std::fprintf(stderr, "missing value for %s\n", a.c_str()); std::exit(2); } return argv[++i]; };
@@ -80,7 +81,8 @@ int main(int argc, char** argv) {
         else if (a == "--bench") { bench = true; restore_test = false; }
         else if (a == "--logits-last") { logits_last = std::atoi(next().c_str()); restore_test = false; }
         else if (a == "--chunk") chunk_tokens = std::atoi(next().c_str());   // prefill chunk size (default: the model's, 64)
-        else if (a == "--kv-mode") { const std::string m = next(); if (m == "tq4") kv_format = KvFormat::TQ4; else if (m == "q8") kv_format = KvFormat::Q8; else if (m == "k16v8") kv_format = KvFormat::K16V8; else if (m == "f32") kv_format = KvFormat::F32; else { std::fprintf(stderr, "--kv-mode must be f32, q8 or tq4\n"); return 2; } }
+        else if (a == "--min-context") min_context = static_cast<size_t>(std::atoll(next().c_str()));   // auto context floor (default 32768; 0 = fully-resident size)
+        else if (a == "--kv-mode") { const std::string m = next(); if (m == "tq4") kv_format = KvFormat::TQ4; else if (m == "q8") kv_format = KvFormat::Q8; else if (m == "k16v8") kv_format = KvFormat::K16V8; else if (m == "f32") kv_format = KvFormat::F32; else if (m == "k8v4") kv_format = KvFormat::K8V4; else if (m == "q4") kv_format = KvFormat::Q4; else { std::fprintf(stderr, "--kv-mode must be q8, k8v4, q4, tq4, k16v8 or f32\n"); return 2; } }
         else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
     }
     const bool chat_mode = !chat_user.empty();
@@ -92,7 +94,9 @@ int main(int argc, char** argv) {
 
     try {
         // GGUF is the only supported model format: weights, configuration AND tokenizer all come from the .gguf file.
+        dara::core::memtrace("start");
         dara::io::GgufCheckpoint gguf(gguf_path);
+        dara::core::memtrace("gguf header parsed");
         const QwenConfig cfg = QwenConfig::from_gguf(gguf);
         std::unique_ptr<dara::tokenizer::Tokenizer> tokenizer;
         try { tokenizer = std::make_unique<dara::tokenizer::Tokenizer>(dara::tokenizer::Tokenizer::from_gguf(gguf.header())); }
@@ -160,11 +164,15 @@ int main(int argc, char** argv) {
         ResidencyOptions ropt;
         ropt.force_resident_layers = force_resident;
         ropt.kv_format = kv_format;
+        ropt.auto_min_context = min_context;
         if (chunk_tokens > 0) ropt.max_chunk_tokens = chunk_tokens;
         if (!flash_path.empty()) {   // leave room for the drafter (loaded after the model): its weights and its K/V per context position
             FlashDrafter::vram_estimate(flash_path, gguf, ropt.extra_vram_bytes, ropt.extra_bytes_per_token);
         }
+        gguf.release_string_arrays();   // the tokenizer holds its own copy of the vocabulary and merges
+        dara::core::memtrace("tokenizer + prompt ready");
         QwenModel model(cfg, *weights, kv, ropt);  // cold load: disk -> host images -> VRAM slabs, once
+        dara::core::memtrace("model loaded");
         if (kv == 0) std::printf("context: %zu tokens (auto: the most that keeps the model in VRAM)\n", model.kv_capacity());
         kv = model.kv_capacity();
         if (!images.empty()) {   // each run of <|image_pad|> takes one image's tokens (embeddings + 3D rotary positions)
@@ -262,7 +270,7 @@ int main(int argc, char** argv) {
                         for (int q = 0; q < n && eq; ++q) eq = seq[j + q] == seq[n_sz - n + q];
                         if (!eq) continue;
                         for (int q = j + n; q < n_sz && static_cast<int>(out.size()) < limit; ++q) out.push_back(seq[q]);
-                        if (!out.empty()) break;
+                        if (static_cast<int>(out.size()) >= std::min(2, limit)) break; out.clear();   // too close to the end to copy enough: look further back
                     }
                 }
             };
@@ -319,7 +327,7 @@ int main(int argc, char** argv) {
                         for (int q = 0; q < n && eq; ++q) eq = seq[j + q] == seq[n_sz - n + q];
                         if (!eq) continue;
                         for (int q = j + n; q < n_sz && static_cast<int>(draft.size()) < limit; ++q) draft.push_back(seq[q]);
-                        if (!draft.empty()) break;
+                        if (static_cast<int>(draft.size()) >= std::min(2, limit)) break; draft.clear();   // too close to the end to copy enough: look further back
                     }
                 }
             };
@@ -378,6 +386,7 @@ int main(int argc, char** argv) {
         const long dec_tokens = static_cast<long>(seq.size() - prompt.size()) - 1;  // the first token came from the prefill
         if (stream) { const std::string tail = stream->flush(); generated_text += tail; if (text_mode && !tail.empty()) std::fwrite(tail.data(), 1, tail.size(), stdout); }
         if (text_mode) std::printf("\n--- end (%s) ---\n", hit_eos ? "stopped at end-of-sequence" : "token limit");
+        dara::core::memtrace("after generation");
         n_new = static_cast<int>(seq.size() - prompt.size());  // tokens actually generated
         if (tokenizer) { std::ofstream f(out + ".text.txt", std::ios::binary); f << prompt_text << generated_text; }
 

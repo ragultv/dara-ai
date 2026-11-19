@@ -10,6 +10,7 @@
 //
 // Activation layout per vector (K a multiple of 256):  q[K] int8 | d[K/32] float scale per 32 values | s[K/16] int32 sum of the int8 values per 16 values.
 #include <climits>
+#include <cstdlib>
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -106,6 +107,74 @@ q_q8_gemv_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t* 
     if (lane == 0) y[row] = acc;
 }
 
+// R rows per warp: the warp walks the R rows' (block, 16-byte chunk) units as one stream, so rows whose unit count (8 per block) is not a multiple of 32
+// leave no lanes idle (Nano: 1536 columns = 6 blocks = 48 units, 2 rows = 3 full warp steps; 4B: 2560 = 10 blocks, 2 rows = 5 steps). Same arithmetic
+// per unit as q_q8_gemv_kernel, different summation order across lanes.
+template <bool Q5, int R>
+__global__ void __launch_bounds__(kWarpsPerBlock * 32)
+q_q8_rows_kernel(const uint8_t* __restrict__ W, size_t row_bytes, const int8_t* __restrict__ qa, const float* __restrict__ da, const int* __restrict__ sa,
+                 float* __restrict__ y, size_t rows, int nblk) {
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    const size_t row0 = (static_cast<size_t>(blockIdx.x) * kWarpsPerBlock + warp) * R;
+    if (row0 >= rows) return;
+    constexpr int kBlockBytes = Q5 ? kQ5KBlockBytes : kQ4KBlockBytes;
+    constexpr int kQsOff = Q5 ? 48 : 16;
+    const int U = nblk * 8, total = R * U;
+    float acc[R];
+#pragma unroll
+    for (int r = 0; r < R; ++r) acc[r] = 0.0f;
+    for (int u = lane; u < total; u += 32) {
+        const int r = u / U, w8 = u - r * U;
+        if (row0 + r >= rows) break;
+        const int b = w8 >> 3, q = w8 & 7, g = q >> 1, half = q & 1;
+        const int sh0 = 8 * ((2 * g) & 3), sh1 = 8 * ((2 * g + 1) & 3);
+        const bool hi_pair = g >= 2;
+        const uint8_t* blk = W + (row0 + r) * row_bytes + static_cast<size_t>(b) * kBlockBytes;
+        const uint4 hdr = __ldg(reinterpret_cast<const uint4*>(blk));
+        const uint4 qs = __ldg(reinterpret_cast<const uint4*>(blk + kQsOff + 16 * q));
+        uint4 qh = make_uint4(0, 0, 0, 0);
+        if (Q5) qh = __ldg(reinterpret_cast<const uint4*>(blk + 16 + 16 * half));
+        const int8_t* ap = qa + static_cast<size_t>(b) * 256 + 64 * g + 16 * half;
+        const uint4 alo = *reinterpret_cast<const uint4*>(ap), ahi = *reinterpret_cast<const uint4*>(ap + 32);
+        const float dlo = da[b * 8 + 2 * g], dhi = da[b * 8 + 2 * g + 1];
+        const int slo = sa[b * 16 + 4 * g + half], shi = sa[b * 16 + 4 * g + 2 + half];
+        const float d = __half2float(__ushort_as_half(static_cast<unsigned short>(hdr.x & 0xffffu)));
+        const float dmin = __half2float(__ushort_as_half(static_cast<unsigned short>(hdr.x >> 16)));
+        const uint32_t a0 = (hdr.y >> sh0) & 0xffu, a1 = (hdr.z >> sh0) & 0xffu, a2 = (hdr.w >> sh0) & 0xffu;
+        const uint32_t b0 = (hdr.y >> sh1) & 0xffu, b1 = (hdr.z >> sh1) & 0xffu, b2 = (hdr.w >> sh1) & 0xffu;
+        const uint32_t s0 = hi_pair ? ((a2 & 0xFu) | ((a0 >> 6) << 4)) : (a0 & 63u);
+        const uint32_t m0 = hi_pair ? ((a2 >> 4) | ((a1 >> 6) << 4)) : (a1 & 63u);
+        const uint32_t s1 = hi_pair ? ((b2 & 0xFu) | ((b0 >> 6) << 4)) : (b0 & 63u);
+        const uint32_t m1 = hi_pair ? ((b2 >> 4) | ((b1 >> 6) << 4)) : (b1 & 63u);
+        const uint32_t wv[4] = {qs.x, qs.y, qs.z, qs.w};
+        const uint32_t h4[4] = {qh.x, qh.y, qh.z, qh.w};
+        const uint32_t al[4] = {alo.x, alo.y, alo.z, alo.w}, ah[4] = {ahi.x, ahi.y, ahi.z, ahi.w};
+        int plo = 0, phi = 0;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            uint32_t lo = wv[i] & 0x0F0F0F0Fu, hi = (wv[i] >> 4) & 0x0F0F0F0Fu;
+            if (Q5) {
+                lo |= ((h4[i] >> (2 * g)) & 0x01010101u) << 4;
+                hi |= ((h4[i] >> (2 * g + 1)) & 0x01010101u) << 4;
+            }
+            plo = __dp4a(static_cast<int>(lo), static_cast<int>(al[i]), plo);
+            phi = __dp4a(static_cast<int>(hi), static_cast<int>(ah[i]), phi);
+        }
+        float v = fmaf(dlo, fmaf(d * small2f(s0), static_cast<float>(plo), -(dmin * small2f(m0)) * static_cast<float>(slo)), 0.0f);
+        v = fmaf(dhi, fmaf(d * small2f(s1), static_cast<float>(phi), -(dmin * small2f(m1)) * static_cast<float>(shi)), v);
+#pragma unroll
+        for (int rr = 0; rr < R; ++rr) if (rr == r) acc[rr] += v;
+    }
+#pragma unroll
+    for (int r = 0; r < R; ++r) {
+        float v = acc[r];
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
+        if (lane == 0 && row0 + r < rows) y[row0 + r] = v;
+    }
+}
+
 template <bool Q5>
 int launch_q8(const void* dW, size_t ld_blocks, const void* scratch, size_t K, int T, int t, float* dy, size_t rows, void* stream) {
     constexpr size_t block_bytes = Q5 ? kQ5KBlockBytes : kQ4KBlockBytes;
@@ -116,6 +185,19 @@ int launch_q8(const void* dW, size_t ld_blocks, const void* scratch, size_t K, i
     const int8_t* q = reinterpret_cast<const int8_t*>(base) + static_cast<size_t>(t) * K;
     const float* d = reinterpret_cast<const float*>(base + static_cast<size_t>(T) * K) + static_cast<size_t>(t) * (K / 32);
     const int* s = reinterpret_cast<const int*>(base + static_cast<size_t>(T) * K + static_cast<size_t>(T) * (K / 32) * sizeof(float)) + static_cast<size_t>(t) * (K / 16);
+    // rows whose 8-units-per-block count is not a multiple of 32 (1536 / 2560 columns): 2 rows per warp (DARA_Q8_ROWS=1 forces one row per warp)
+    static const int force_rows = [] { const char* e = std::getenv("DARA_Q8_ROWS"); return e ? std::atoi(e) : 0; }();
+    const int nblk = static_cast<int>(K / 256);
+    int R = 1;
+    while (R < 4 && (R * nblk * 8) % 32 != 0) R *= 2;
+    if (force_rows > 0) R = force_rows;
+    if (R > 1) {
+        const size_t warps = (rows + R - 1) / R;
+        const unsigned g = static_cast<unsigned>((warps + kWarpsPerBlock - 1) / kWarpsPerBlock);
+        if (R == 2) q_q8_rows_kernel<Q5, 2><<<g, kWarpsPerBlock * 32, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * block_bytes, q, d, s, dy, rows, nblk);
+        else q_q8_rows_kernel<Q5, 4><<<g, kWarpsPerBlock * 32, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * block_bytes, q, d, s, dy, rows, nblk);
+        return static_cast<int>(cudaGetLastError());
+    }
     const unsigned blocks = static_cast<unsigned>((rows + kWarpsPerBlock - 1) / kWarpsPerBlock);
     q_q8_gemv_kernel<Q5><<<blocks, kWarpsPerBlock * 32, 0, static_cast<cudaStream_t>(stream)>>>(static_cast<const uint8_t*>(dW), ld_blocks * block_bytes, q, d, s, dy, rows,
                                                                                             static_cast<int>(K / 256));

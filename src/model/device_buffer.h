@@ -1,6 +1,7 @@
 #pragma once
 // RAII device buffers with allocation accounting. Every device allocation made through these types is counted, so a
 // run can report its peak device memory by category (the memory-accounting gate), not just what nvidia-smi shows.
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -55,11 +56,53 @@ inline std::string require_supported_gpu() {
 // 0 (the default) disables it. Used by the allocation-failure tests; costs one relaxed atomic load per allocation.
 inline std::atomic<long>& alloc_fault_countdown() { static std::atomic<long> c{0}; return c; }
 
+// Borrowed device memory: while an arena is active, allocations are carved from its regions (memory that is allocated but holds nothing
+// needed right now -- e.g. the unused tail of the K/V caches while an image is encoded) before falling back to cudaMalloc. Freeing an
+// arena allocation is a no-op; everything allocated from an arena must be released before the arena is deactivated.
+struct DeviceArena {
+    struct Region { uint8_t* p; size_t size; size_t used; };
+    std::vector<Region> regions;
+    size_t borrowed = 0, peak = 0, fallback = 0;   // bytes taken from regions now / at most; bytes that had to come from cudaMalloc
+    void* alloc(size_t bytes) {
+        bytes = (bytes + 255) & ~size_t(255);
+        Region* best = nullptr;   // best fit: the region with the least room left that still holds the request
+        size_t best_room = ~size_t(0), best_off = 0;
+        for (Region& r : regions) {
+            const size_t off = (r.used + 255) & ~size_t(255);
+            if (off + bytes > r.size) continue;
+            const size_t room = r.size - off - bytes;
+            if (room < best_room) { best = &r; best_room = room; best_off = off; }
+        }
+        if (!best) return nullptr;
+        best->used = best_off + bytes;
+        borrowed += bytes;
+        peak = std::max(peak, borrowed);
+        return best->p + best_off;
+    }
+    bool owns(const void* p) const {
+        for (const Region& r : regions) if (p >= r.p && p < r.p + r.size) return true;
+        return false;
+    }
+    size_t capacity() const { size_t s = 0; for (const Region& r : regions) s += r.size; return s; }
+};
+inline DeviceArena*& active_arena() { static DeviceArena* a = nullptr; return a; }
+// Activates `a` for the lifetime of the guard (not nestable).
+struct ArenaScope {
+    explicit ArenaScope(DeviceArena& a) { active_arena() = &a; }
+    ~ArenaScope() { active_arena() = nullptr; }
+    ArenaScope(const ArenaScope&) = delete;
+    ArenaScope& operator=(const ArenaScope&) = delete;
+};
+
 // Raw counted allocation, freed by the deleter; used for matrices whose element type varies.
 inline void* counted_malloc(size_t bytes) {
     {
         long c = alloc_fault_countdown().load(std::memory_order_relaxed);
         if (c > 0 && alloc_fault_countdown().fetch_sub(1) == 1) throw std::runtime_error("cudaMalloc: injected device allocation failure (out of memory)");
+    }
+    if (DeviceArena* a = active_arena()) {
+        if (void* q = a->alloc(bytes)) return q;
+        a->fallback += bytes;
     }
     void* p = nullptr;
     cuda_check(cudaMalloc(&p, bytes), "cudaMalloc");
@@ -67,7 +110,10 @@ inline void* counted_malloc(size_t bytes) {
     return p;
 }
 inline void counted_free(void* p, size_t bytes) {
-    if (p) { cudaFree(p); device_stats().sub(bytes); }
+    if (!p) return;
+    if (DeviceArena* a = active_arena(); a && a->owns(p)) return;   // borrowed: released with the arena
+    cudaFree(p);
+    device_stats().sub(bytes);
 }
 
 template <class T> struct DevBuf {

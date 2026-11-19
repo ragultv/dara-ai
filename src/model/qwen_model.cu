@@ -83,6 +83,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     report_.gpu = require_supported_gpu();
     size_t free_b = 0, total_b = 0;
     cuda_check(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    if (opt.assume_free_bytes) free_b = std::min(opt.assume_free_bytes, total_b);
 
     // ---- sizes ----------------------------------------------------------------------------------------------
     const int L = cfg.layers;
@@ -95,6 +96,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
             state_bytes += (static_cast<size_t>(cfg.v_heads) * cfg.k_dim * cfg.v_dim + static_cast<size_t>(cfg.k_heads * cfg.k_dim * 2 + cfg.v_heads * cfg.v_dim) * (cfg.conv_kernel - 1)) * sizeof(float);
         } else {
             kv_per_token += 2 * static_cast<size_t>(cfg.kv_heads) * kv_bytes_per_head_vector(opt.kv_format, cfg.head_dim);
+            if (opt.kv_format == KvFormat::Q4) state_bytes += kivi_ring_bytes(static_cast<size_t>(cfg.kv_heads) * cfg.head_dim);
         }
     }
     const size_t head_bytes = weights.head_bytes();
@@ -104,7 +106,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(128 * kMiB, total_b / 32);
     if (const char* e = std::getenv("DARA_VRAM_SAFETY_MB")) safety = static_cast<size_t>(std::atoll(e)) * kMiB;   // tuning / experiments
     const bool auto_ctx = kv_capacity == 0;
-    const AttnFmt afmt = opt.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
+    const AttnFmt afmt = attn_fmt(opt.kv_format);
     // VRAM that grows with the context outside the K/V caches: the caller's per-position extra (drafter K/V) and, in auto mode, the
     // scratch the pool grows into at long contexts (prefill attention scores, split-KV partials).
     auto ctx_extra = [&](size_t ctx) -> size_t {
@@ -134,14 +136,15 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     const auto sys = dara::core::query_system_memory();
     const size_t ram_margin = 1536 * kMiB;
     const char* ce = std::getenv("DARA_CPU_DECODE");
-    const bool cpu_mode = !(ce && ce[0] == '0') && cpu_decode_available() && cpu_decode_supports(opt.kv_format);
+    const bool cpu_mode = !(ce && ce[0] == '0') && cpu_decode_available() && cpu_decode_supports(KvFormat::Q8);   // other formats: hosted layers keep Q8 K/V
     struct Planned { dara::core::PlacementPlan plan; size_t staging = 0; bool head_cpu = false; };
     auto make_plan = [&](size_t ctx) {
         Planned r;
         dara::core::PlacementRequest req;
         req.model = man;
-        req.kv_mode = opt.kv_format == KvFormat::TQ4 ? dara::core::KvMode::TQ4 : kv_q8_values(opt.kv_format) ? dara::core::KvMode::Q8 : dara::core::KvMode::F32;
-        req.tq_overhead = opt.kv_format == KvFormat::K16V8 ? 0.5 + 2.0 / 32 : opt.kv_format == KvFormat::Q8 ? 4.0 / 32 : 4.0 / cfg.head_dim;   // K16V8: avg 1.5 B + V scales  // Q8: one float scale per 32 values; TQ4: the per-vector float norm
+        // bytes per cached value of the chosen format, expressed as the planner's 4-bit mode (0.5 B) + overhead (every format but F32)
+        req.kv_mode = opt.kv_format == KvFormat::F32 ? dara::core::KvMode::F32 : dara::core::KvMode::TQ4;
+        req.tq_overhead = static_cast<double>(kv_bytes_per_head_vector(opt.kv_format, cfg.head_dim)) / cfg.head_dim - 0.5;
         req.context_tokens = ctx;
         req.vision_resident = false;
         req.budget.vram_total = total_b;
@@ -184,6 +187,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
             size_t a = lo / step, b = native / step;
             while (a < b) { const size_t m = (a + b + 1) / 2; if (fully_resident(m * step)) a = m; else b = m - 1; }
             kv_capacity = a * step;
+            if (kv_capacity < opt.auto_min_context) kv_capacity = std::min(native, opt.auto_min_context);   // minimum context over full residency
         } else {
             kv_capacity = std::min(native, opt.auto_partial_context);
         }
@@ -208,6 +212,17 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         throw std::runtime_error(why);
     }
     resident_ = resident;
+    if (opt.plan_only) {   // dry run: the placement a real load would make (see ResidencyOptions::plan_only)
+        report_.resident_layers = resident_;
+        report_.hosted_layers = L - resident_;
+        report_.head_on_cpu = head_on_cpu_;
+        report_.head_bytes = head_on_cpu_ ? 0 : head_bytes;
+        report_.state_bytes = state_bytes + kv_bytes;
+        report_.workspace_bytes = workspace;
+        report_.vram_free_at_start = free_b;
+        report_.vram_total = total_b;
+        return;
+    }
 
     // ---- load once: states, head, then every layer ------------------------------------------------------------
     for (int i = 0; i < L; ++i) {
@@ -221,38 +236,39 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
             s.S = DevBuf<float>(static_cast<size_t>(d.v_heads) * d.k_dim * d.v_dim);
         } else {
             s.kv_cap = kv_capacity;
-            s.kv_format = opt.kv_format;
-            if (kv_q8_values(opt.kv_format)) {
-                if (cfg.head_dim % 128 != 0) throw std::invalid_argument("INT8 KV: head_dim must be a multiple of 128");
-                const size_t vals = kv_capacity * static_cast<size_t>(cfg.kv_heads) * cfg.head_dim;
-                const bool k16 = opt.kv_format == KvFormat::K16V8;
-                s.Kq = DevBuf<uint8_t>(k16 ? vals * 2 : vals); s.Vq = DevBuf<uint8_t>(vals);
-                if (!k16) s.Kn = DevBuf<float>(vals / 32);
-                s.Vn = DevBuf<float>(vals / 32);
-            } else if (opt.kv_format == KvFormat::TQ4) {
-                if (!tq_supported_head_dim(cfg.head_dim) || kv_capacity > static_cast<size_t>(kTqMaxPositions)) throw std::invalid_argument("TurboQuant KV: unsupported head dimension or capacity above kTqMaxPositions");
-                const size_t codes = kv_capacity * static_cast<size_t>(cfg.kv_heads) * (cfg.head_dim / 2), norms = kv_capacity * static_cast<size_t>(cfg.kv_heads);
-                s.Kq = DevBuf<uint8_t>(codes); s.Vq = DevBuf<uint8_t>(codes);
-                s.Kn = DevBuf<float>(norms); s.Vn = DevBuf<float>(norms);
-            } else {
-                const size_t kvw = static_cast<size_t>(cfg.kv_heads) * cfg.head_dim;
-                s.Kc = DevBuf<float>(kv_capacity * kvw);
-                s.Vc = DevBuf<float>(kv_capacity * kvw);
-            }
+            // layers decoded on the CPU keep Q8 K/V when the chosen format has no CPU kernels (the CPU path supports F32 and Q8)
+            s.kv_format = (i >= resident_ && cpu_mode && !cpu_decode_supports(opt.kv_format)) ? KvFormat::Q8 : opt.kv_format;
+            if (s.kv_format != KvFormat::F32 && cfg.head_dim % 128 != 0) throw std::invalid_argument("quantized KV: head_dim must be a multiple of 128");
+            if (s.kv_format == KvFormat::TQ4 && (!tq_supported_head_dim(cfg.head_dim) || ([] { const char* e = std::getenv("DARA_ATTN_REF"); return e && e[0] == '1'; }() && kv_capacity > static_cast<size_t>(kTqMaxPositions))))
+                throw std::invalid_argument("TurboQuant KV: unsupported head dimension, or capacity above kTqMaxPositions in reference mode");
+            alloc_kv({&s.Kc, &s.Vc, &s.Kq, &s.Vq, &s.Kn, &s.Vn, &s.Kr, &s.Krs}, s.kv_format, kv_capacity, cfg.kv_heads, cfg.head_dim);
         }
         states_.push_back(std::move(s));
     }
     if (head_on_cpu_) {
+        // CPU head: read from the memory-mapped model file (hot pages every token; no private copy). DARA_EMBD_RAM=1 keeps a private copy.
         dara::kernels::QuantType hq;
-        head_host_ = weights.read_output_head(&hq);
-        const size_t rb = head_host_.size() / static_cast<size_t>(cfg_.vocab);
-        head_cpu_ = HostMatrix{head_host_.data(), hq, static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden), rb};
+        static const bool ram = [] { const char* e = std::getenv("DARA_EMBD_RAM"); return e && e[0] == '1'; }();
+        size_t hb = 0;
+        const uint8_t* mp = ram ? nullptr : weights.map_output_head(&hq, &hb);
+        if (!mp) { head_host_ = weights.read_output_head(&hq); mp = head_host_.data(); hb = head_host_.size(); }
+        const size_t rb = hb / static_cast<size_t>(cfg_.vocab);
+        head_cpu_ = HostMatrix{mp, hq, static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden), rb};
     } else {
-        head_ = weights.load_output_head();
+        // Q6_K head (the largest single matrix: 521 MB per token on the 4B): planar copy for the aligned int8 kernel. DARA_Q6_PLANAR=0 or the FP32
+        // reference path (DARA_INT8=0) keep the GGUF layout.
+        static const bool planar = [] { const char* e = std::getenv("DARA_Q6_PLANAR"); return !(e && e[0] == '0'); }();
+        dara::kernels::QuantType hq = dara::kernels::QuantType::Q4_K;
+        std::vector<uint8_t> raw;
+        if (planar && int8_enabled()) raw = weights.read_output_head(&hq);
+        if (!raw.empty() && hq == dara::kernels::QuantType::Q6_K) head_ = upload_q6k_planar(raw.data(), static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden));
+        else if (!raw.empty()) head_ = upload_quant_raw(hq, raw.data(), static_cast<size_t>(cfg_.vocab), static_cast<size_t>(cfg_.hidden));
+        else head_ = weights.load_output_head();
     }
     layers_.reserve(L);
     report_.hosted_pinned = true;
     for (int i = 0; i < L; ++i) {
+        if (opt.progress) opt.progress("loading layers", i, L);
         layers_.push_back(weights.load_layer_packed(i));
         PackedLayer& p = layers_.back();
         if (i < resident_) {
@@ -265,6 +281,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     }
     report_.resident_layers = resident_;
     report_.hosted_layers = L - resident_;
+    report_.head_on_cpu = head_on_cpu_;
     report_.head_bytes = head_on_cpu_ ? 0 : head_.bytes;
     weights.embed_row(0);  // read the embedding table into host RAM now (cold load), not on the first token
     report_.embedding_host_bytes = weights.embedding_bytes();
@@ -305,16 +322,17 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
         h_pos_ = static_cast<int64_t*>(hp);
     }
     if (const char* e = std::getenv("DARA_NO_GRAPH")) use_graphs_ = !(e[0] == '1');
+    if (const char* e = std::getenv("DARA_LAYER_PROF")) if (e[0] == '1' || e[0] == '2') use_graphs_ = false;   // profiling times every operation: eager steps
     reserve_pool();  // size every scratch slot for the largest chunk now, so a captured graph never sees an allocation or a moved buffer
     {   // CPU decode of hosted layers (DARA_CPU_DECODE=0 disables; DARA_CPU_THREADS overrides the thread count)
         const char* e = std::getenv("DARA_CPU_DECODE");
         const bool want = !(e && e[0] == '0');
-        if (want && (resident_ < cfg_.layers || head_on_cpu_) && cpu_decode_available() && cpu_decode_supports(opt.kv_format)) {
+        if (want && (resident_ < cfg_.layers || head_on_cpu_) && cpu_decode_available() && cpu_decode_supports(KvFormat::Q8)) {
             const char* th = std::getenv("DARA_CPU_THREADS");
             cpu_ = std::make_unique<CpuDecoder>(th ? std::atoi(th) : 0);
             for (int l = resident_; l < cfg_.layers; ++l) {
                 cpu_w_.push_back(CpuDecoder::make_weights(layers_[l]));
-                cpu_s_.push_back(CpuDecoder::make_state(cpu_w_.back(), kv_capacity, opt.kv_format));
+                cpu_s_.push_back(CpuDecoder::make_state(cpu_w_.back(), kv_capacity, states_[l].kv_format));   // hosted layers: Q8 (or F32)
             }
             report_.plan += " + CPU decode of the " + std::to_string(cfg_.layers - resident_) + " hosted layers (" + std::to_string(cpu_->threads()) + " threads)";
             if (head_on_cpu_) report_.plan += ", output head in host RAM, 1 staging arena";
@@ -339,7 +357,7 @@ void QwenModel::reserve_pool() {
     pool_.get<float>(10, C * std::max(CD, QR)); pool_.get<float>(11, C * std::max(VD, KV)); pool_.get<float>(12, C * std::max(VH, KV));
     pool_.get<float>(13, C * std::max(VH, OW)); pool_.get<float>(14, std::max(CD, C * OW)); pool_.get<float>(15, C * std::max(VD, OW));
     pool_.get<int64_t>(16, C);
-    pool_.get<float>(17, 8 * attn_splitkv_scratch_floats_per_token(opt_.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt_.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt_.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32, cfg_.heads, cfg_.head_dim, static_cast<int>(kv_capacity_)));  // split-KV partials
+    pool_.get<float>(17, 8 * attn_splitkv_scratch_floats_per_token(attn_fmt(opt_.kv_format), cfg_.heads, cfg_.head_dim, static_cast<int>(kv_capacity_)));  // split-KV partials
 }
 
 void QwenModel::release_raw() {
@@ -383,6 +401,59 @@ void QwenModel::restore(const Checkpoint& c) {
     for (size_t i = 0; i < states_.size(); ++i) gpu_layer_restore(states_[i], c.layers[i]);
     pos_ = c.pos;
     cpu_current_ = false;   // the GPU copy is the restored one
+}
+
+void QwenModel::save_device(DeviceCheckpoint& c) {
+    if (cpu_current_) sync_hosted_to_gpu();   // the GPU copy of the hosted layers' states is the one saved
+    const size_t L = states_.size();
+    c.conv.resize(L);
+    c.S.resize(L);
+    c.layer_pos.resize(L);
+    for (size_t i = 0; i < L; ++i) {
+        const GpuLayerState& s = states_[i];
+        c.layer_pos[i] = s.pos;
+        if (s.kind != LayerKind::DeltaNet) continue;
+        if (c.conv[i].n != s.conv_state.n) c.conv[i] = DevBuf<float>(s.conv_state.n);
+        if (c.S[i].n != s.S.n) c.S[i] = DevBuf<float>(s.S.n);
+        cuda_check(cudaMemcpyAsync(c.conv[i].p, s.conv_state.p, s.conv_state.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "checkpoint conv");
+        cuda_check(cudaMemcpyAsync(c.S[i].p, s.S.p, s.S.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "checkpoint S");
+    }
+    cuda_check(cudaStreamSynchronize(0), "checkpoint");
+    c.pos = pos_;
+    c.valid = true;
+}
+
+void QwenModel::restore_device(const DeviceCheckpoint& c) {
+    if (!c.valid || c.layer_pos.size() != states_.size()) throw std::invalid_argument("device checkpoint does not match this model");
+    for (size_t i = 0; i < states_.size(); ++i) {
+        GpuLayerState& s = states_[i];
+        if (s.kind != LayerKind::DeltaNet) kv_rewound(s.kv_format, {&s.Kc, &s.Vc, &s.Kq, &s.Vq, &s.Kn, &s.Vn, &s.Kr, &s.Krs}, 0, s.pos, c.layer_pos[i]);
+        s.pos = c.layer_pos[i];   // attention layers: the K/V cache simply rewinds to this length
+        if (s.kind != LayerKind::DeltaNet) continue;
+        cuda_check(cudaMemcpyAsync(s.conv_state.p, c.conv[i].p, s.conv_state.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "restore conv");
+        cuda_check(cudaMemcpyAsync(s.S.p, c.S[i].p, s.S.n * sizeof(float), cudaMemcpyDeviceToDevice, 0), "restore S");
+    }
+    cuda_check(cudaStreamSynchronize(0), "restore");
+    pos_ = c.pos;
+    cpu_current_ = false;   // the GPU copy is the restored one (the hosted layers' CPU copy is refreshed on the next CPU step)
+    images_.erase(std::remove_if(images_.begin(), images_.end(), [&](const ImageSpan& sp) { return sp.start >= pos_; }), images_.end());
+}
+
+void QwenModel::reset() {
+    for (GpuLayerState& s : states_) {
+        s.pos = 0;
+        if (s.kind != LayerKind::DeltaNet) continue;
+        cuda_check(cudaMemsetAsync(s.conv_state.p, 0, s.conv_state.n * sizeof(float), 0), "reset conv");
+        cuda_check(cudaMemsetAsync(s.S.p, 0, s.S.n * sizeof(float), 0), "reset S");
+    }
+    cuda_check(cudaStreamSynchronize(0), "reset");
+    for (size_t i = 0; i < cpu_s_.size(); ++i) {   // hosted layers decoded on the CPU: their host state restarts too
+        std::fill(cpu_s_[i].conv.begin(), cpu_s_[i].conv.end(), 0.0f);
+        std::fill(cpu_s_[i].S.begin(), cpu_s_[i].S.end(), 0.0f);
+    }
+    pos_ = 0;
+    cpu_current_ = false;
+    images_.clear();
 }
 
 void QwenModel::snapshot() {

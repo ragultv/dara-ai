@@ -12,6 +12,7 @@
 
 #include "kernels/quant.h"
 #include "model/attention.h"
+#include "model/attn_splitkv.h"
 #include "model/deltanet.h"
 #include "model/device_buffer.h"
 #include "model/layer.h"
@@ -25,6 +26,8 @@ struct DeviceMatrix {
     size_t rows = 0, cols = 0;
     size_t ld = 0;               // row stride: elements (BF16) or blocks (quantized)
     size_t bytes = 0;
+    bool q6_planar = false;      // Q6_K repacked into aligned planes (upload_q6k_planar): only the int8 GEMV reads it
+    bool f16 = false;            // FP16 weights (upload_f16_*): tensor-core GEMM (vision encoders)
 };
 
 // Exact when the values are BF16-representable (checkpoint-derived weights); otherwise rounds to nearest-even.
@@ -33,6 +36,11 @@ DeviceMatrix upload_bf16_matrix(const std::vector<float>& host, size_t rows, siz
 DeviceMatrix upload_bf16_raw(const uint16_t* bits, size_t rows, size_t cols);
 // Uploads raw quantized blocks (GGUF layout) of the given format; `row_blocks` blocks per row, rows tightly packed.
 DeviceMatrix upload_quant_raw(dara::kernels::QuantType t, const void* blocks, size_t rows, size_t cols);
+// Q6_K GGUF blocks, repacked into the planar layout the int8 head kernel reads at full bandwidth. Needs int8_enabled(); matvec_multi_cuda only.
+DeviceMatrix upload_q6k_planar(const void* blocks, size_t rows, size_t cols);
+// FP16 weights for the tensor-core GEMM (matvec_multi_cuda; cols a multiple of 32): raw F16 bits, or floats rounded to fp16 (exact for F16-origin values).
+DeviceMatrix upload_f16_raw(const uint16_t* bits, size_t rows, size_t cols);
+DeviceMatrix upload_f16_matrix(const std::vector<float>& host, size_t rows, size_t cols);
 // y = M x (FP32 accumulation). Returns cudaError_t as int.
 int matvec_cuda(const DeviceMatrix& m, const float* d_x, float* d_y, void* stream = nullptr);
 // y[t*ldy ..] = M x[t*ldx ..] for t < nt: quantized weights are read once per group of up to 8 vectors, and every output is bitwise
@@ -76,15 +84,52 @@ struct GpuLayerWeights {
 // Per-sequence state of one layer (stays resident while weights stream).
 // KV cache storage format (per model, chosen at construction). F32 is the validation reference; TQ4 is the 4-bit TurboQuant-style cache
 // (tq_kv.h): ~4.1 bits per value, lossy, so it is gated on quality (logit error / agreement) instead of bitwise identity.
-enum class KvFormat { F32, TQ4, Q8, K16V8 };   // K16V8: FP16 keys + Q8 values   // Q8: int8 codes + a float scale per 32 values (attn_splitkv.h)
-inline const char* to_string(KvFormat f) { return f == KvFormat::F32 ? "f32" : f == KvFormat::TQ4 ? "tq4" : f == KvFormat::Q8 ? "q8" : "k16v8"; }
-inline bool kv_q8_values(KvFormat f) { return f == KvFormat::Q8 || f == KvFormat::K16V8; }   // values stored as int8 + per-32 scales
-// Bytes of KV cache per position per kv head for a given format and head dim.
-inline size_t kv_bytes_per_head_vector(KvFormat f, int head_dim) {
-    // per head vector, averaged over K and V (callers count 2 vectors per position)
-    if (f == KvFormat::K16V8) return (static_cast<size_t>(head_dim) * 3 + static_cast<size_t>(head_dim) / 32 * 4 + 1) / 2;
-    return f == KvFormat::F32 ? static_cast<size_t>(head_dim) * 4 : f == KvFormat::TQ4 ? static_cast<size_t>(head_dim) / 2 + 4 : static_cast<size_t>(head_dim) + static_cast<size_t>(head_dim) / 32 * 4;
+// K/V cache formats.
+//   F32    reference
+//   Q8     int8 codes + a float scale per 32 values (attn_splitkv.h)                       ~9 bits per value
+//   K16V8  FP16 keys + Q8 values                                                           ~12.5
+//   TQ4    TurboQuant: rotated 4-bit codes + a norm per head vector (tq_kv.h)              ~4.1
+//   K8V4   Q8 keys + 4-bit values (per token, groups of 32 values: fp16 scale + minimum)   ~6.5
+//   Q4     KIVI-style: keys 4-bit per channel (groups of 32 positions: fp16 scale + minimum per channel), values as K8V4's, and the newest
+//          >= kKiviResidual positions' keys kept as Q8 in a small ring until their group is quantized (kv4.h)          ~5
+enum class KvFormat { F32, TQ4, Q8, K16V8, K8V4, Q4 };
+inline const char* to_string(KvFormat f) {
+    switch (f) {
+        case KvFormat::F32: return "f32";
+        case KvFormat::TQ4: return "tq4";
+        case KvFormat::Q8: return "q8";
+        case KvFormat::K16V8: return "k16v8";
+        case KvFormat::K8V4: return "k8v4";
+        case KvFormat::Q4: return "q4";
+    }
+    return "?";
 }
+inline bool kv_q8_values(KvFormat f) { return f == KvFormat::Q8 || f == KvFormat::K16V8; }   // values stored as int8 + per-32 scales
+inline bool kv_v4_values(KvFormat f) { return f == KvFormat::K8V4 || f == KvFormat::Q4; }      // values stored as 4-bit + per-32 (scale, min)
+// Bytes of KV cache per position per kv head for a given format and head dim (per head vector, averaged over K and V: callers count 2 vectors
+// per position). Q4's key ring is a fixed cost per layer (kivi_ring_bytes), not counted here.
+inline size_t kv_bytes_per_head_vector(KvFormat f, int head_dim) {
+    const size_t d = static_cast<size_t>(head_dim);
+    switch (f) {
+        case KvFormat::F32: return d * 4;
+        case KvFormat::TQ4: return d / 2 + 4;
+        case KvFormat::Q8: return d + d / 32 * 4;
+        case KvFormat::K16V8: return (d * 3 + d / 32 * 4 + 1) / 2;
+        case KvFormat::K8V4: return ((d + d / 32 * 4) + (d / 2 + d / 32 * 4) + 1) / 2;
+        case KvFormat::Q4: return ((d / 2 + d / 8) + (d / 2 + d / 32 * 4) + 1) / 2;   // keys: per-channel (scale, min) per 32 positions = d/8 bytes per position
+    }
+    return d * 4;
+}
+// Q4 (KIVI-style) key handling: positions older than the newest kKiviResidual (rounded down to whole groups of kKiviGroup) are 4-bit; the rest live
+// as Q8 in a ring of kKiviRing positions. frontier(p) = first position still in the ring when p positions are held.
+constexpr int kKiviGroup = 32, kKiviResidual = 128, kKiviRing = 1024;
+#if defined(__CUDACC__)
+#define DARA_HD __host__ __device__
+#else
+#define DARA_HD
+#endif
+DARA_HD inline int kivi_frontier(int held) { return held > kKiviResidual ? ((held - kKiviResidual) / kKiviGroup) * kKiviGroup : 0; }
+inline size_t kivi_ring_bytes(size_t kv_width) { return static_cast<size_t>(kKiviRing) * kv_width + static_cast<size_t>(kKiviRing) * kv_width / 32 * 4; }
 
 struct GpuLayerState {
     LayerKind kind = LayerKind::DeltaNet;
@@ -98,8 +143,32 @@ struct GpuLayerState {
     KvFormat kv_format = KvFormat::F32;
     DevBuf<uint8_t> Kq, Vq;       // attention (KvFormat::TQ4): packed 4-bit codes [position][kv_heads][head_dim/2]; (Q8): int8 codes [position][kv_heads][head_dim]
     DevBuf<float> Kn, Vn;         //                             and per-head-vector norms [position][kv_heads]; (Q8): scales [position][kv_heads][head_dim/32]
+                                  // (K8V4 / Q4 values): 4-bit codes [position][kv_width/2], Vn = half2 (scale, min) per 32 values
+                                  // (Q4 keys): 4-bit codes [position][kv_width/2], Kn = half2 (scale, min) [position/32][kv_width]
+    DevBuf<uint8_t> Kr;           // Q4: key ring, Q8 codes [kKiviRing][kv_width]
+    DevBuf<float> Krs;            //     and their per-32 scales
     size_t kv_cap = 0;
+    int window = 0;               // attention: > 0 = sliding window of this many positions (the Flash drafter); 0 = full causal attention
 };
+inline AttnFmt attn_fmt(KvFormat f) {
+    switch (f) {
+        case KvFormat::TQ4: return AttnFmt::TQ4;
+        case KvFormat::Q8: return AttnFmt::Q8;
+        case KvFormat::K16V8: return AttnFmt::K16V8;
+        case KvFormat::K8V4: return AttnFmt::K8V4;
+        case KvFormat::Q4: return AttnFmt::Q4;
+        default: return AttnFmt::F32;
+    }
+}
+// Allocates the K/V buffers of one attention layer (any format). kv_width = kv_heads * head_dim.
+struct KvBuffers { DevBuf<float>* Kc; DevBuf<float>* Vc; DevBuf<uint8_t>* Kq; DevBuf<uint8_t>* Vq; DevBuf<float>* Kn; DevBuf<float>* Vn; DevBuf<uint8_t>* Kr; DevBuf<float>* Krs; };
+void alloc_kv(const KvBuffers& b, KvFormat fmt, size_t capacity, int kv_heads, int head_dim);
+// Q4 keys after the held length drops from `old_held` to `new_held` (prompt cache / rewind): groups at or after the new frontier that were quantized
+// go back into the ring, so the ring again covers [frontier(new_held), new_held). No-op for other formats. kv_width 0: derived from the ring.
+void kv_rewound(KvFormat fmt, const KvBuffers& b, int kv_width, size_t old_held, size_t new_held, void* stream = nullptr);
+// Appends the device ranges of these K/V buffers that hold positions >= from (nothing needed while rom positions are held): borrowed as scratch
+// (DeviceArena) while an image is encoded. capacity = the buffers' position capacity.
+void kv_tail_regions(const KvBuffers& b, KvFormat fmt, size_t capacity, size_t from, std::vector<DeviceArena::Region>& out);
 struct GpuLayerCheckpoint {
     std::vector<float> conv, S;  // DeltaNet state copy (empty for attention layers)
     size_t length = 0;           // tokens processed (attention: the KV length to truncate back to)
