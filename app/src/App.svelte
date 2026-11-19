@@ -4,6 +4,7 @@
   import { modelsStore } from "./lib/stores/models.svelte.ts";
   import { router } from "./lib/router/router.svelte.ts";
   import LeftRail from "./lib/shell/LeftRail.svelte";
+  import Header from "./lib/shell/Header.svelte";
   import StatusPill from "./lib/shell/StatusPill.svelte";
   import Toast from "./lib/ui/Toast.svelte";
   import Button from "./lib/ui/Button.svelte";
@@ -24,7 +25,7 @@
   });
 </script>
 
-<div class="h-screen w-screen flex flex-col bg-bg text-text overflow-hidden select-none">
+<div class="h-screen w-screen flex flex-col bg-bg text-text overflow-hidden">
   {#if router.current !== "kit" && serverStore.isStarting}
     <!-- Splash Screen: Starting the engine -->
     <main
@@ -35,21 +36,11 @@
       <div class="flex flex-col items-center text-center space-y-6 max-w-sm">
         <!-- Dara geometric mark -->
         <div class="relative flex items-center justify-center w-20 h-20">
-          <svg
-            class="w-16 h-16"
-            viewBox="0 0 64 64"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-            aria-hidden="true"
-          >
-            <rect x="8" y="8" width="18" height="48" rx="6" fill="var(--color-primary)" />
-            <path
-              d="M26 8H38C49.0457 8 58 16.9543 58 28V36C58 47.0457 49.0457 56 38 56H26V8Z"
-              fill="var(--color-primary)"
-              fill-opacity="0.85"
-            />
-            <circle cx="36" cy="32" r="8" fill="var(--color-bg)" />
-          </svg>
+          <img
+            src="/dara.png"
+            alt="Dara logo"
+            class="w-16 h-16 object-contain"
+          />
         </div>
 
         <div class="space-y-2">
@@ -105,26 +96,34 @@
       <!-- Left Rail Navigation -->
       <LeftRail />
 
-      <!-- Route Workspace Area -->
-      <main class="flex-1 flex flex-col overflow-y-auto bg-bg" id="main-content">
-        {#if router.current === "chat"}
-          {#if !modelsStore.hasInstalledModels && modelsStore.models.length > 0}
-            <Onboarding />
-          {:else}
-            <ChatPage />
+      <div class="flex-1 flex flex-col overflow-hidden">
+        <!-- Top Header with Model Loader -->
+        <Header />
+
+        <!-- Route Workspace Area -->
+        <main
+          class="flex-1 flex flex-col {router.current === 'chat' ? 'overflow-hidden' : 'overflow-y-auto'} bg-bg"
+          id="main-content"
+        >
+          {#if router.current === "chat"}
+            {#if !modelsStore.hasInstalledModels && modelsStore.models.length > 0}
+              <Onboarding />
+            {:else}
+              <ChatPage />
+            {/if}
+          {:else if router.current === "models"}
+            <ModelsPage />
+          {:else if router.current === "options"}
+            <OptionsPage />
+          {:else if router.current === "monitor"}
+            <MonitorPage />
+          {:else if router.current === "settings"}
+            <SettingsPage />
+          {:else if router.current === "kit"}
+            <KitPage />
           {/if}
-        {:else if router.current === "models"}
-          <ModelsPage />
-        {:else if router.current === "options"}
-          <OptionsPage />
-        {:else if router.current === "monitor"}
-          <MonitorPage />
-        {:else if router.current === "settings"}
-          <SettingsPage />
-        {:else if router.current === "kit"}
-          <KitPage />
-        {/if}
-      </main>
+        </main>
+      </div>
     </div>
 
     <!-- Status Pill Footer Bar -->

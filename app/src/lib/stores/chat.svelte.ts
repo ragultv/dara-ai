@@ -148,6 +148,7 @@ class ChatStore {
   async sendMessage(text: string, images: string[] = [], modelId?: string): Promise<void> {
     if (!text.trim() && images.length === 0) return;
     if (this.isGenerating) return;
+    this.isGenerating = true;
 
     // Ensure active conversation exists
     let convId = this.activeConversationId;
@@ -158,7 +159,10 @@ class ChatStore {
     }
 
     const currentConv = this.conversations.find((c) => c.id === convId);
-    if (!currentConv) return;
+    if (!currentConv) {
+      this.isGenerating = false;
+      return;
+    }
 
     // If first message in thread, auto-title
     if (currentConv.messages.length === 0 && text.trim()) {
@@ -279,19 +283,33 @@ class ChatStore {
         }
       }
 
-      // If stream ended without timings chunk, compute elapsed fallback
-      if (!receivedTimings && this.tokenBuffer.length > 0) {
-        const elapsedSec = (performance.now() - startTime) / 1000;
-        const estimatedTokens = Math.max(1, Math.round(this.tokenBuffer.length / 3.8));
-        const estimatedTps = elapsedSec > 0 ? estimatedTokens / elapsedSec : 0;
-        assistantMsg.stats = {
-          decodeTokensPerSecond: Math.round(estimatedTps * 10) / 10,
-          totalTokens: estimatedTokens,
-          totalMs: Math.round(elapsedSec * 1000)
-        };
-      }
-
       this.flushBufferImmediate(convId, assistantMsgId);
+
+      // Ensure every completed message has valid telemetry (use timings or calculate elapsed fallback)
+      const elapsedSec = Math.max(0.1, (performance.now() - startTime) / 1000);
+      const fullContent = assistantMsg.content || this.tokenBuffer;
+      const count = assistantMsg.stats?.totalTokens ?? Math.max(1, Math.round(fullContent.length / 3.8));
+      const calcTps = Math.round((count / elapsedSec) * 10) / 10;
+
+      if (!assistantMsg.stats) {
+        assistantMsg.stats = {
+          decodeTokensPerSecond: calcTps,
+          totalTokens: count,
+          totalMs: Math.round(elapsedSec * 1000),
+          decodeMs: Math.round(elapsedSec * 1000)
+        };
+      } else {
+        if (!assistantMsg.stats.decodeTokensPerSecond || assistantMsg.stats.decodeTokensPerSecond <= 0) {
+          assistantMsg.stats.decodeTokensPerSecond = calcTps;
+        }
+        if (!assistantMsg.stats.totalTokens) {
+          assistantMsg.stats.totalTokens = count;
+        }
+        if (!assistantMsg.stats.totalMs) {
+          assistantMsg.stats.totalMs = Math.round(elapsedSec * 1000);
+        }
+      }
+      this.currentTps = assistantMsg.stats.decodeTokensPerSecond;
     } catch (err: unknown) {
       if (this.abortController?.signal.aborted) {
         assistantMsg.interrupted = true;
@@ -334,24 +352,34 @@ class ChatStore {
     }
   }
 
-  regenerate(modelId?: string): void {
+  regenerate(messageId?: string, modelId?: string): void {
     const conv = this.activeConversation;
     if (!conv || conv.messages.length === 0 || this.isGenerating) return;
 
-    // Remove last assistant message
-    const last = conv.messages[conv.messages.length - 1];
-    if (last && last.role === "assistant") {
-      conv.messages.pop();
+    let targetIdx = conv.messages.length - 1;
+    if (messageId) {
+      const found = conv.messages.findIndex((m) => m.id === messageId);
+      if (found !== -1) targetIdx = found;
     }
 
-    // Find previous user message
-    const prevUser = [...conv.messages].reverse().find((m) => m.role === "user");
-    if (!prevUser) return;
+    // Find the user message associated with this assistant response
+    let userIdx = -1;
+    for (let i = targetIdx; i >= 0; i--) {
+      if (conv.messages[i]?.role === "user") {
+        userIdx = i;
+        break;
+      }
+    }
+    if (userIdx === -1) return;
 
-    // Resend
-    const text = prevUser.content;
-    const images = prevUser.images ?? [];
-    conv.messages.pop(); // Remove user message to re-trigger
+    const userMsg = conv.messages[userIdx];
+    if (!userMsg) return;
+
+    const text = userMsg.content;
+    const images = userMsg.images ?? [];
+
+    // Cleanly truncate the thread up to this user message
+    conv.messages = conv.messages.slice(0, userIdx);
     void this.sendMessage(text, images, modelId);
   }
 

@@ -2,10 +2,7 @@
   import { onMount } from "svelte";
   import { modelsStore } from "../lib/stores/models.svelte.ts";
   import { router } from "../lib/router/router.svelte.ts";
-  import Card from "../lib/ui/Card.svelte";
-  import Badge from "../lib/ui/Badge.svelte";
-  import Button from "../lib/ui/Button.svelte";
-  import ProgressBar from "../lib/ui/ProgressBar.svelte";
+  import Icon from "../lib/ui/Icon.svelte";
 
   onMount(() => {
     void modelsStore.fetchModels();
@@ -13,15 +10,13 @@
 
   async function handleDownloadAndLoad(modelId: string) {
     await modelsStore.downloadModel(modelId, ["model"]);
-    // Monitor until download finishes then auto-load
     const checkInterval = setInterval(async () => {
       const job = modelsStore.downloads[modelId];
       if (job && job.status === "done") {
         clearInterval(checkInterval);
         await modelsStore.loadModel(modelId);
-        // Once loaded, redirect to chat
         const loadCheck = setInterval(() => {
-          if (modelsStore.loadProgress?.state === "ready") {
+          if (modelsStore.loadProgress?.state === "ready" || modelsStore.loadedModel) {
             clearInterval(loadCheck);
             router.navigate("chat");
           }
@@ -31,30 +26,12 @@
   }
 </script>
 
-<div
-  class="flex-1 flex flex-col items-center justify-center p-8 max-w-4xl mx-auto space-y-8 text-left"
->
+<div class="flex-1 flex flex-col items-center justify-center p-8 max-w-5xl mx-auto space-y-8 text-left">
   <header class="text-center space-y-3 max-w-xl">
-    <div
-      class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-primary-subtle text-primary mx-auto mb-2"
-    >
-      <svg
-        class="w-8 h-8"
-        viewBox="0 0 64 64"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        aria-hidden="true"
-      >
-        <rect x="8" y="8" width="18" height="48" rx="6" fill="var(--color-primary)" />
-        <path
-          d="M26 8H38C49.0457 8 58 16.9543 58 28V36C58 47.0457 49.0457 56 38 56H26V8Z"
-          fill="var(--color-primary)"
-          fill-opacity="0.85"
-        />
-        <circle cx="36" cy="32" r="8" fill="var(--color-bg)" />
-      </svg>
+    <div class="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-primary/10 border border-primary/25 text-primary mx-auto mb-2 shadow-sm">
+      <Icon name="bot" size={28} />
     </div>
-    <h1 class="text-3xl font-bold tracking-tight text-text">Welcome to Dara</h1>
+    <h1 class="text-3xl font-bold tracking-tight text-text">Welcome to Dara Studio</h1>
     <p class="text-sm text-text-muted leading-relaxed">
       Dara runs intelligent language models directly on your Windows GPU. Choose a model below to
       download and begin chatting privately offline.
@@ -62,16 +39,14 @@
   </header>
 
   {#if modelsStore.error}
-    <div
-      role="alert"
-      class="w-full p-4 rounded-xl bg-danger-subtle border border-danger text-xs text-danger font-medium"
-    >
-      {modelsStore.error}
+    <div role="alert" class="w-full max-w-md p-4 rounded-xl bg-danger/10 border border-danger/30 text-xs text-danger font-medium flex items-center gap-2">
+      <Icon name="alert-circle" size={16} />
+      <span>{modelsStore.error}</span>
     </div>
   {/if}
 
   <!-- 3 Model Tiers Grid -->
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-5 w-full">
     {#each modelsStore.models as model (model.id)}
       {@const job = modelsStore.downloads[model.id]}
       {@const isDownloading = Boolean(
@@ -81,36 +56,31 @@
           job.status === "queued" ||
           job.status === "downloading")
       )}
-      {@const isLoading = modelsStore.loadingModelId === model.id}
       {@const isRecommended = model.dara.fits_gpu === "full" || model.id === "dara-nano"}
 
-      <Card
-        variant={isRecommended ? "raised" : "surface"}
-        padding="lg"
-        class="flex flex-col justify-between space-y-5 relative {isRecommended
-          ? 'border-primary border-2 shadow-sm'
-          : ''}"
+      <div
+        class="flex flex-col justify-between bg-surface border rounded-xl p-5 transition-all shadow-sm {isRecommended
+          ? 'border-primary/60 ring-1 ring-primary/40 bg-surface-raised'
+          : 'border-border hover:border-primary/30'}"
       >
         <div class="space-y-4">
           <div class="flex items-center justify-between">
-            <h2 class="text-lg font-bold text-text">{model.dara.name}</h2>
+            <h2 class="text-base font-bold text-text">{model.dara.name}</h2>
             {#if isRecommended}
-              <Badge variant="success">Recommended</Badge>
+              <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-success/10 text-success border border-success/20">
+                Recommended
+              </span>
             {/if}
           </div>
 
-          <p class="text-xs text-text-muted leading-relaxed min-h-[48px]">
+          <p class="text-xs text-text-muted leading-relaxed min-h-[44px]">
             {model.dara.description}
           </p>
 
-          <div
-            class="p-3 rounded-lg bg-surface-sunken border border-border space-y-1.5 text-xs font-mono"
-          >
+          <div class="p-3 rounded-xl bg-surface-sunken border border-border space-y-1.5 text-xs font-mono">
             <div class="flex justify-between">
               <span class="text-text-subtle">Download:</span>
-              <span class="font-medium text-text"
-                >{(model.dara.download_size_mb / 1024).toFixed(1)} GB</span
-              >
+              <span class="font-medium text-text">{(model.dara.download_size_mb / 1024).toFixed(1)} GB</span>
             </div>
             <div class="flex justify-between">
               <span class="text-text-subtle">GPU Fit:</span>
@@ -123,45 +93,40 @@
           </div>
         </div>
 
-        <div class="space-y-3 pt-2">
+        <div class="space-y-3 pt-4">
           {#if isDownloading && job}
-            <div class="space-y-1.5">
-              <ProgressBar
-                value={job.percent}
-                max={100}
-                showPercent={true}
-                label="Downloading..."
-              />
-              <div class="flex justify-between text-[11px] font-mono text-text-subtle">
-                <span>{job.mb_per_second.toFixed(1)} MB/s</span>
-                <span>ETA: {job.eta_seconds}s</span>
+            <div class="space-y-2">
+              <div class="flex justify-between text-xs font-mono">
+                <span class="font-bold text-text truncate max-w-[140px]">{job.file || "Downloading..."}</span>
+                <span class="font-bold text-primary">{job.percent.toFixed(1)}%</span>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                class="w-full text-danger hover:text-danger"
+              <div class="h-2 w-full bg-surface-sunken rounded-full overflow-hidden border border-border">
+                <div class="h-full bg-primary transition-all duration-300 rounded-full" style="width: {Math.max(2, job.percent)}%"></div>
+              </div>
+              <div class="flex justify-between text-[10px] font-mono text-text-subtle">
+                <span>{job.mb_per_second.toFixed(1)} MB/s</span>
+                <span>{job.eta_seconds > 0 ? Math.round(job.eta_seconds) + "s ETA" : ""}</span>
+              </div>
+              <button
+                type="button"
                 onclick={() => modelsStore.cancelDownload(model.id)}
+                class="w-full py-1 text-center text-[11px] font-semibold text-danger hover:underline cursor-pointer"
               >
                 Cancel
-              </Button>
-            </div>
-          {:else if isLoading}
-            <div class="space-y-1.5">
-              <ProgressBar label="Loading model into VRAM..." />
-              <p class="text-xs text-center text-text-muted animate-pulse">Initializing weights</p>
+              </button>
             </div>
           {:else}
-            <Button
-              variant={isRecommended ? "primary" : "secondary"}
-              size="md"
-              class="w-full font-semibold"
+            <button
+              type="button"
               onclick={() => handleDownloadAndLoad(model.id)}
+              class="w-full h-9 px-4 rounded-lg bg-primary hover:bg-primary-hover text-white text-xs font-semibold transition-all cursor-pointer shadow-sm flex items-center justify-center gap-2"
             >
-              Download & Start
-            </Button>
+              <Icon name="download" size={14} />
+              <span>Download & Start</span>
+            </button>
           {/if}
         </div>
-      </Card>
+      </div>
     {/each}
   </div>
 </div>

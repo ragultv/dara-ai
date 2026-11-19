@@ -5,10 +5,10 @@
 | Choice | Why |
 | --- | --- |
 | Tauri 2 (Rust shell, system WebView2) | A window costs tens of MB, not the 150+ MB of a bundled Chromium. The 300 MB budget (server + UI) rules out Electron |
-| Svelte 5 + Vite + TypeScript (strict) | Small runtime, no virtual DOM, fine-grained reactivity for token streaming |
+| React 19 + Vite + TypeScript (strict) | Largest ecosystem and component choice, best tooling and AI-agent support; the runtime is about 45 KB gzipped, small next to the WebView. Chosen by the project owner over Svelte; Milestone 0 measures its RAM cost |
 | Tailwind CSS v4 at build time, tokens via `@theme` mapping to `tokens.css` | Utility classes without a runtime; tokens stay the single color source |
 | System font stack | No font files to load |
-| No UI kit with a large runtime (no MUI, no Ant); small headless helpers (e.g. `bits-ui`) are allowed if needed for Dialog/Popover a11y | Memory and bundle size |
+| No UI kit with a large runtime (no MUI, no Ant); accessible headless primitives are allowed and recommended for Dialog/Popover/Menu/Tooltip/Select (Radix UI or React Aria), plus Zustand for state; keep the tree of dependencies small | Memory and bundle size |
 | Local storage in SQLite via `tauri-plugin-sql`, or JSON files for the first milestone | Conversations must survive restarts; keep it simple |
 
 Budget: server + UI under 300 MB RAM total. Measure in Milestone 0 (see 07) with the WebView idle on Chat and again after a 50-message conversation; record the numbers in `app/PERF.md`. If the UI exceeds about 115 MB, stop and report before adding features.
@@ -20,7 +20,7 @@ Dara.exe (Tauri)                    dara.exe serve  (sidecar, same install folde
  ├─ Rust: spawn/stop sidecar        ├─ OpenAI-compatible API  http://127.0.0.1:11435
  │        pick port, API key        ├─ /dara/* (models, options, stats, load progress)
  │        tray, autostart           └─ GPU, models, K/V cache
- └─ WebView (Svelte UI) ── fetch ──▶ server
+ └─ WebView (React UI) ── fetch ──▶ server
 ```
 
 - The Rust side starts `dara.exe serve --host 127.0.0.1 --port <p> --api-key <random>` as a Tauri sidecar, passes `{baseUrl, apiKey}` to the UI through a Tauri command (never through the URL, never logged), watches the process, and kills it on quit. If the port is busy, pick the next free port.
@@ -34,13 +34,13 @@ Dara.exe (Tauri)                    dara.exe serve  (sidecar, same install folde
 app/
   AGENTS.md                 agent guidance (points to docs/ui)
   PERF.md                   measured memory/startup numbers
-  package.json, vite.config.ts, tsconfig.json, svelte.config.js
+  package.json, vite.config.ts, tsconfig.json, vite.config.ts uses @vitejs/plugin-react
   src-tauri/                Rust: sidecar, tray, capabilities, tauri.conf.json
   src/
     app.css                 @import docs tokens + Tailwind theme mapping
     lib/
       api/                  client.ts (fetch wrapper), sse.ts, types.ts (from docs/ui/dara-api.d.ts), errors.ts
-      stores/               server.svelte.ts (connection), models, load, stats, settings, conversations
+      stores/               server.ts (connection), models, load, stats, settings, conversations (Zustand stores)
       ui/                   design-system components (Button, Dialog, ...)
       features/             chat/, models/, options/, monitor/, settings/, onboarding/
       markdown/             sanitized renderer
@@ -54,10 +54,11 @@ Keep `tokens.css` in `docs/ui/` as the source; copy it into the app at build tim
 
 ## State
 
-- Svelte 5 runes (`$state`, `$derived`, `$effect`) in `*.svelte.ts` stores. No global event bus. Server data is fetched by stores; components only read stores and call store methods.
+- Zustand stores (one per concern) for server data and settings; local component state with `useState`/`useReducer`. No global event bus. Components read stores through narrow selectors (`useStore(s => s.x)`), never the whole store, so a change re-renders only what uses it.
+- Never keep high-frequency data (streaming tokens, live tok/s, stats ticks) in a store that many components select from. The streaming message has its own small store/subscription and only the streaming message component re-renders; finished messages are `React.memo`'d and keyed by id.
 - Connection store: `{status: 'starting'|'ready'|'offline'|'error', baseUrl, apiKey}`. Every request goes through `api/client.ts`, which adds the `Authorization: Bearer` header, a timeout, an `AbortSignal`, and turns error bodies `{error:{message,type,code?,download?}}` into a typed `ApiError`.
 - Polling: `/dara/stats` every 1 s only while the Monitor page or the footer pill is visible; `/dara/load` every 300 ms only during a load; `/dara/models/pull/{job}` every 500 ms (or the SSE stream) during a download; stop on `document.hidden`.
-- Streaming chat: read the SSE with `fetch` + `ReadableStream`; batch DOM updates with `requestAnimationFrame` (not one render per token); keep the raw text in a plain string and render Markdown on a throttle (every 50 to 80 ms) to avoid O(n^2) re-parsing in long replies; abort with `AbortController` on Stop (the server stops generating when the connection closes).
+- Streaming chat: read the SSE with `fetch` + `ReadableStream`; batch updates with `requestAnimationFrame` (not one React render per token); keep the raw text in a plain string and render Markdown on a throttle (every 50 to 80 ms) to avoid O(n^2) re-parsing in long replies; abort with `AbortController` on Stop (the server stops generating when the connection closes).
 - Conversations: `{id, title, createdAt, messages[{id, role, content, images?, stats?}], settings}`. Store images as files, not base64 in the database. Keep only the active conversation's messages in memory; load others on demand.
 - Long lists (long conversations, model logs) must be virtualized or windowed once past about 200 items.
 

@@ -42,7 +42,7 @@ Rules for the client:
 }
 ```
 
-Optional: `model` (a Dara id loads/switches to it), `top_k`, `top_p`, `min_p`, `repeat_penalty`, `seed`, `stop`, `cache_write: false`. Image: a user message `content` array `[{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}, {"type":"text","text":"..."}]`. The API is stateless: every request carries the whole message history (including earlier images); the server reuses the shared prefix from its cache (see `cached_tokens`), so resending is cheap.
+`max_tokens`: no server-side cap other than the context; omitted means the server default (1024). Check `choices[0].finish_reason`: `length` = hit `max_tokens` or the end of the context. Optional: `model` (a Dara id loads/switches to it), `top_k`, `top_p`, `min_p`, `repeat_penalty`, `seed`, `stop`, `cache_write: false`. Image: a user message `content` array `[{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}, {"type":"text","text":"..."}]`. The API is stateless: every request carries the whole message history (including earlier images); the server reuses the shared prefix from its cache (see `cached_tokens`), so resending is cheap.
 
 ### Chat response and stream
 

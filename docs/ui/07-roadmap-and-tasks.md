@@ -4,7 +4,7 @@ Work one milestone at a time. Each ends with its acceptance criteria met, checks
 
 ## M0: Scaffold and the memory spike
 
-- Create `app/` with Tauri 2 + Svelte 5 + Vite + TypeScript (strict) + Tailwind v4; ESLint, Prettier, Vitest, Playwright configured; `prebuild` copies `docs/ui/tokens.css`.
+- Create `app/` with Tauri 2 + React 19 + Vite + TypeScript (strict) + Tailwind v4 + Zustand; ESLint, Prettier, Vitest, Playwright configured; `prebuild` copies `docs/ui/tokens.css`.
 - Rust: spawn `dara.exe serve` as a sidecar on `127.0.0.1` with a random API key and free port; pass `{baseUrl, apiKey}` to the UI; stop it on quit; restart on crash (max 3 times, then show an error).
 - UI: splash "Starting the engine", then show `GET /health` and the loaded model name.
 - Fake server in `app/mocks` that serves `docs/ui/samples` (used by tests and dev without a GPU).

@@ -28,7 +28,7 @@ The app is a local program that talks to a local server which runs the user's mo
 - Capabilities (`src-tauri/capabilities/*.json`): grant only what is used: window controls, the tray, `core:event`, the sidecar spawn permission scoped to `dara.exe` with the fixed argument pattern, `dialog:open` for the models-folder picker, `autostart` if the setting exists, `opener` limited to `https://` links the user clicks. No `fs:*` wide scopes (scope to the app data and models directories), no `shell:execute` for arbitrary commands, no `http` plugin (the UI uses the WebView's fetch to loopback only).
 - `tauri.conf.json` CSP (adjust ports as needed):
   `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'`
-  (`'unsafe-inline'` for styles only, needed by Svelte transitions; never for scripts.) No remote scripts, fonts or images, ever.
+  (`'unsafe-inline'` for styles only, needed by some UI libraries' inline styles; never for scripts.) No remote scripts, fonts or images, ever.
 - Disable devtools in release builds. Disable navigation and `window.open` except to allowed `https://` links through the opener plugin.
 - Single instance: a second launch focuses the first window.
 - Release builds are code-signed; updates (when added) are signed and verified by the updater.
@@ -60,7 +60,7 @@ The server validates requests, but the UI also checks: image type and size (png/
 ## Security checklist for every PR touching network, rendering or Tauri config
 
 - [ ] No new Tauri permission without a reason in the PR description
-- [ ] No `{@html}` / `innerHTML` with anything but sanitized output
+- [ ] No `dangerouslySetInnerHTML` / `innerHTML` with anything but sanitized output
 - [ ] No secrets or message content in logs, URLs or storage
 - [ ] New remote host? There should be none; if so, it needs sign-off and a CSP change
 - [ ] `npm audit` / `cargo audit` clean
