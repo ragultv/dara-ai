@@ -1,5 +1,13 @@
 import { ApiError } from "./errors.ts";
-import type { Health, ModelList } from "./types.ts";
+import type {
+  Health,
+  ModelList,
+  DownloadJob,
+  PullRequest,
+  LoadRequest,
+  LoadStatus,
+  Stats
+} from "./types.ts";
 
 export interface ClientConfig {
   baseUrl: string;
@@ -120,6 +128,88 @@ export class DaraApiClient {
       opts.signal = signal;
     }
     return this.request<ModelList>("/v1/models", opts);
+  }
+
+  async pullModel(req: PullRequest, signal?: AbortSignal): Promise<DownloadJob> {
+    const opts: RequestInit = {
+      method: "POST",
+      body: JSON.stringify(req)
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<DownloadJob>("/dara/models/pull", opts);
+  }
+
+  async getPullProgress(jobId: string, signal?: AbortSignal): Promise<DownloadJob> {
+    const opts: RequestInit = {
+      method: "GET"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<DownloadJob>(`/dara/models/pull/${jobId}`, opts);
+  }
+
+  async cancelPull(jobId: string, signal?: AbortSignal): Promise<void> {
+    const opts: RequestInit = {
+      method: "DELETE"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    await this.request<undefined>(`/dara/models/pull/${jobId}`, opts);
+  }
+
+  async loadModel(req: LoadRequest, signal?: AbortSignal): Promise<LoadStatus> {
+    const opts: RequestInit = {
+      method: "POST",
+      body: JSON.stringify({ ...req, async: true })
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<LoadStatus>("/dara/models/load", opts);
+  }
+
+  async getLoadStatus(signal?: AbortSignal): Promise<LoadStatus> {
+    const opts: RequestInit = {
+      method: "GET"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<LoadStatus>("/dara/load", opts);
+  }
+
+  async unloadModel(signal?: AbortSignal): Promise<void> {
+    const opts: RequestInit = {
+      method: "POST"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    await this.request<undefined>("/dara/models/unload", opts);
+  }
+
+  async deleteModel(modelId: string, signal?: AbortSignal): Promise<void> {
+    const opts: RequestInit = {
+      method: "DELETE"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    await this.request<undefined>(`/dara/models/${modelId}`, opts);
+  }
+
+  async getStats(signal?: AbortSignal): Promise<Stats> {
+    const opts: RequestInit = {
+      method: "GET"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<Stats>("/dara/stats", opts);
   }
 }
 

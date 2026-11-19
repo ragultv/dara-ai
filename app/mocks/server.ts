@@ -98,6 +98,93 @@ export function createMockServer(options: MockServerOptions = {}): {
       return;
     }
 
+    if (pathname === "/dara/models/pull" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        let model = "dara-nano";
+        try {
+          const parsed = JSON.parse(body);
+          if (parsed.model) model = parsed.model;
+        } catch {
+          // ignore
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "job-pull-123",
+            model,
+            status: "downloading",
+            file: "model",
+            files_done: 0,
+            files_total: 1,
+            completed_bytes: 540000000,
+            total_bytes: 800000000,
+            percent: 67.5,
+            mb_per_second: 34.2,
+            eta_seconds: 7,
+            seconds: 14
+          })
+        );
+      });
+      return;
+    }
+
+    if (pathname.startsWith("/dara/models/pull/") && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: "job-pull-123",
+          model: "dara-nano",
+          status: "done",
+          file: "model",
+          files_done: 1,
+          files_total: 1,
+          completed_bytes: 800000000,
+          total_bytes: 800000000,
+          percent: 100,
+          mb_per_second: 35.0,
+          eta_seconds: 0,
+          seconds: 22
+        })
+      );
+      return;
+    }
+
+    if (pathname.startsWith("/dara/models/pull/") && req.method === "DELETE") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (pathname === "/dara/models/load" && req.method === "POST") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          state: "ready",
+          stage: "ready",
+          percent: 100,
+          model: "dara-nano",
+          seconds: 2.1
+        })
+      );
+      return;
+    }
+
+    if (pathname === "/dara/models/unload" && req.method === "POST") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (pathname.startsWith("/dara/models/") && req.method === "DELETE") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     if (pathname === "/v1/chat/completions" && req.method === "POST") {
       let body = "";
       req.on("data", (chunk) => {
