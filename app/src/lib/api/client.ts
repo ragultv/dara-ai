@@ -8,6 +8,7 @@ import type {
   LoadRequest,
   LoadStatus,
   Stats,
+  VersionInfo,
   ChatRequest,
   ChatChunk,
   OptionsResponse,
@@ -215,6 +216,16 @@ export class DaraApiClient {
       opts.signal = signal;
     }
     return this.request<Stats>("/dara/stats", opts);
+  }
+
+  async getVersion(signal?: AbortSignal): Promise<VersionInfo> {
+    const opts: RequestInit = {
+      method: "GET"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    return this.request<VersionInfo>("/dara/version", opts);
   }
 
   async streamChat(
