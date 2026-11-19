@@ -17,7 +17,7 @@ The app is a local program that talks to a local server which runs the user's mo
 
 ## Server connection
 
-1. The Tauri side generates a 32-byte random key (CSPRNG) per run, starts `dara.exe serve --host 127.0.0.1 --port <p> --api-key <key>` and hands `{baseUrl, apiKey}` to the UI via one Tauri command. The key is never written to disk. Backend gap: the key is currently passed on the command line (visible to other processes of the same user in the process list); the server should read `DARA_API_KEY` from the environment. Until then, use it and track the gap (docs/BACKLOG.md).
+1. The Tauri side generates a 32-byte random key (CSPRNG) per run, starts `dara.exe serve --host 127.0.0.1 --port <p> --api-key <key>` and hands `{baseUrl, apiKey}` to the UI via one Tauri command. The key is never written to disk. Pass the key in the `DARA_API_KEY` environment variable of the sidecar process (the server reads it; `--api-key` on the command line is visible to other processes of the same user in the process list, so do not use it in the app).
 2. Every `fetch` sends `Authorization: Bearer <key>`. `/health` too.
 3. Allowed browser origins: `tauri://localhost`, `http(s)://tauri.localhost`, and the Vite dev origin in development only (`--cors-origin http://localhost:1420`). No wildcard, ever.
 4. Backend gap: validate the `Host` header (accept only `127.0.0.1:<port>` and `localhost:<port>`) to stop DNS rebinding even if the key leaked. Track it; do not build around its absence.
@@ -43,7 +43,7 @@ The app is a local program that talks to a local server which runs the user's mo
 ## Data and privacy
 
 - Everything stays on the machine. No analytics, crash reporting or update pings without an explicit, off-by-default setting that says what is sent.
-- Conversations, settings and images are stored in the SQLite database and attachments folder under `%LOCALAPPDATA%\Dara` (see 08-database.md), readable only by the user (default Windows ACLs). The WebView has no SQL or file-system access; the Rust commands validate every input. "Delete all" removes them for real (files and database), with a confirm.
+- Conversations, settings and images are stored in the SQLite database and attachments folder under `%LOCALAPPDATA%\Dara` (see 08-database.md), readable only by the user (default Windows ACLs). The database belongs to the server: the WebView has no SQL or file-system access, and the server validates every input (parameterized SQL, size limits, image type sniffed from the bytes, server-generated file names). Anyone holding the API key can read the history, which is why the key is per run and the server listens on loopback only. "Delete all" removes them for real (files and database), with a confirm.
 - Do not log message content or the API key, even in development logs. Logs hold events and error codes only.
 - Copied diagnostics (Monitor, errors) contain versions, GPU name, VRAM, configuration and error text; paths are reduced to file names.
 

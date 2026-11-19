@@ -135,3 +135,29 @@ export interface Stats {
   last_request: (ChatStats & Record<string, unknown>) | null;
   ram?: Record<string, number>; process?: Record<string, number>;
 }
+
+// ---- app database (docs/ui/08-database.md) ----
+export interface StoreInfo { path: string; attachments_dir: string; schema_version: number; size_bytes: number; conversations: number; messages: number; attachments: number; settings: number; note?: string }
+export type Settings = Record<string, unknown>;
+export interface Attachment { id: string; mime: "image/png" | "image/jpeg" | "image/webp"; bytes: number; url: string; width: number | null; height: number | null }
+export interface StoredMessage {
+  id: string; conversation_id: string; position: number; role: "system" | "user" | "assistant"; content: string;
+  finish_reason: "stop" | "length" | "interrupted" | "error" | string | null; error: string | null; stats: Partial<ChatStats> | null; model: string | null; created_at: number;
+  attachments: Attachment[];
+}
+export interface Conversation {
+  id: string; title: string; model: string | null; system_prompt: string; params: Record<string, unknown>; pinned: boolean; created_at: number; updated_at: number; message_count: number;
+}
+export interface ConversationWithMessages extends Conversation { messages: StoredMessage[] }
+export interface ConversationList { object: "list"; data: Conversation[]; total: number; limit: number; offset: number }
+export interface ConversationCreate { id?: string; title?: string; model?: string | null; system_prompt?: string; params?: Record<string, unknown>; pinned?: boolean }
+export type ConversationPatch = Partial<Omit<ConversationCreate, "id">>;
+export interface MessageAppend {
+  id?: string; role: "system" | "user" | "assistant"; content?: string; finish_reason?: string; error?: string; stats?: Partial<ChatStats>; model?: string; created_at?: number;
+}
+export type MessagePatch = Partial<Pick<MessageAppend, "content" | "finish_reason" | "error" | "stats">> & { finish_reason?: string | null; error?: string | null; stats?: Partial<ChatStats> | null };
+export interface SearchHit { message_id: string; conversation_id: string; position: number; role: string; snippet: string; title: string; updated_at: number }
+export interface SearchResult { object: "list"; data: SearchHit[] }
+export interface SavedModelConfig { kv: KvChoice; flash: "auto" | "on" | "off"; vision: boolean; context: number | null; last_loaded_at?: number | null; updated_at?: number }
+export type SavedModelConfigs = Record<string, SavedModelConfig>;
+export interface SavedModelConfigPut { kv?: KvChoice; flash?: "auto" | "on" | "off" | boolean; vision?: boolean; context?: number | null }

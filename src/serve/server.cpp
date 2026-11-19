@@ -36,6 +36,7 @@
 #include "serve/engine.h"
 #include "serve/metrics.h"
 #include "serve/options.h"
+#include "serve/store.h"
 
 #ifdef _WIN32
 #include <process.h>
@@ -834,7 +835,9 @@ int dara_serve_main(int argc, char** argv) {
     struct { std::mutex mu; std::thread th; } async_load;   // POST /dara/models/load with "async": true
     reg.models_dir = default_models_dir();
     LoadSpec initial;
-    std::string host = "127.0.0.1", api_key;
+    std::string host = "127.0.0.1", api_key, data_dir = Store::default_data_dir();
+    bool no_store = false;
+    if (const char* k = std::getenv("DARA_API_KEY"); k && *k) api_key = k;   // preferred over --api-key: arguments are visible to other processes
     int port = 11435, default_max = 1024;
     std::vector<std::string> cors = {"http://localhost", "http://127.0.0.1", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"};
     for (int i = 1; i < argc; ++i) {
@@ -859,13 +862,16 @@ int dara_serve_main(int argc, char** argv) {
         else if (a == "--compact-reserve") reg.base.compact_reserve = std::atoi(next().c_str());
         else if (a == "--max-tokens") default_max = std::atoi(next().c_str());
         else if (a == "--api-key") api_key = next();
+        else if (a == "--data-dir") data_dir = next();
+        else if (a == "--no-store") no_store = true;
         else if (a == "--cors-origin") cors.push_back(next());
         else if (initial.model.empty() && a[0] != '-') initial.model = a;
         else {
             std::fprintf(stderr, "unknown argument %s\n"
                          "usage: dara serve [--model <id or .gguf>] [--models-dir DIR] [--port 11435] [--host 127.0.0.1] [--vision | --mmproj <gguf>|auto]\n"
                          "                  [--flash auto|on|off|<drafter.dflash>] [--no-spec] [--ctx auto|N] [--min-context N] [--image-max-tokens N]\n"
-                         "                  [--max-tokens N] [--api-key KEY] [--cors-origin ORIGIN]\n"
+                         "                  [--max-tokens N] [--api-key KEY (or DARA_API_KEY)] [--cors-origin ORIGIN]\n"
+                         "                  [--data-dir DIR (app database; default %%LOCALAPPDATA%%/Dara, or DARA_DATA_DIR)] [--no-store]\n"
                          "model ids: %s\n", a.c_str(), Registry::ids().c_str());
             return 2;
         }
@@ -910,7 +916,7 @@ int dara_serve_main(int argc, char** argv) {
             res.set_header("Access-Control-Allow-Origin", o);
             res.set_header("Vary", "Origin");
             res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
         }
         if (req.method == "OPTIONS") { res.status = 204; return httplib::Server::HandlerResponse::Handled; }
         if (!api_key.empty() && req.path != "/health") {
@@ -1098,6 +1104,13 @@ int dara_serve_main(int argc, char** argv) {
     // ---- options, benchmark, version ----
     Benchmarks benches;
     CalibrationStore calib(CalibrationStore::default_path());
+    std::unique_ptr<Store> store;
+    std::string store_problem = "disabled with --no-store";
+    if (!no_store) {
+        try { store = std::make_unique<Store>(data_dir); store_problem.clear(); }
+        catch (const std::exception& e) { store_problem = e.what(); std::fprintf(stderr, "WARNING: the app database is not available (%s); chat history endpoints answer 503\n", e.what()); }
+    }
+    register_store_routes(svr, store.get(), store_problem);
     svr.Get("/dara/version", [&](const httplib::Request&, httplib::Response& res) {
         res.set_content(dump({{"version", DARA_VERSION}, {"api", 1}, {"built", std::string(__DATE__) + " " + __TIME__}, {"calibration_file", calib.path()}}), "application/json");
     });

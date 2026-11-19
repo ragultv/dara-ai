@@ -44,7 +44,9 @@ dara rm <id>
 | `--min-context N` | `0` | floor for `--ctx auto` (0: none; `dara --min-context` keeps its own default of 32768) |
 | `--image-max-tokens N` | `400` | Qwen image token cap |
 | `--max-tokens N` | `1024` | default reply length when a request does not set one |
-| `--api-key KEY` | | require `Authorization: Bearer KEY` |
+| `--api-key KEY` | | require `Authorization: Bearer KEY`. The `DARA_API_KEY` environment variable does the same and is preferred (arguments are visible to other processes) |
+| `--data-dir DIR` | `%LOCALAPPDATA%\Dara` (or `DARA_DATA_DIR`) | where the app database `dara.db` and its `attachments` folder live (chat history, settings, per-model configuration) |
+| `--no-store` | | run without the app database (its endpoints answer 503) |
 | `--cors-origin ORIGIN` | localhost + Tauri origins | extra allowed browser origin |
 Requests run one at a time (a queue); `/dara/stats` and `/metrics` answer while a request runs.
 
@@ -69,6 +71,7 @@ Requests run one at a time (a queue); `/dara/stats` and `/metrics` answer while 
 | `POST /dara/tokenize` | `{"messages": [...]}` or `{"text": "..."}` -> token count |
 | `POST /dara/compact` | `{"messages": [...], "max_tokens": N}` -> the messages as the context maintainer would send them |
 | `GET /dara/stats` | everything below, as JSON |
+| `/dara/conversations`, `/dara/messages`, `/dara/attachments`, `/dara/settings`, `/dara/model-configs`, `/dara/search`, `/dara/store`, `/dara/data` | the app database: chat history, settings, per-model configuration, image attachments, full-text search, export and delete-all. Reference: [ui/08-database.md](ui/08-database.md); test: `tests/store_api_test.py` |
 | `GET /metrics` | the same as Prometheus text |
 
 ### Per-request numbers

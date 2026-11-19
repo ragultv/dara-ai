@@ -9,8 +9,8 @@ Acceptance: every screen of 01 works in React against the mock and the real serv
 
 ## M-DB: Database (with or right after M-R)
 
-Implement 08-database.md: `src-tauri/src/db.rs` (rusqlite bundled, schema from `docs/ui/db/schema.sql` embedded with `include_str!`, migrations, commands), the TypeScript wrappers in `app/src/lib/db/`, one-time import of any conversations left in `localStorage`, export and delete-all in Settings.
-Acceptance: Rust tests from 08 pass; conversations and settings survive a restart and an app update; delete-all leaves no rows and no attachment files.
+The backend part is done (server-side SQLite and the `/dara/` store endpoints; test `tests/store_api_test.py`). The UI part: typed wrappers in `app/src/lib/api/` for the store endpoints (08-database.md, `dara-api.d.ts`), the chat flow that saves messages and checkpoints streamed replies, one-time import of any conversations left in `localStorage`, settings and per-model configuration loaded at startup, search, export and delete-all in Settings.
+Acceptance: conversations, settings and model configs survive a restart of both the app and the server; images show after a restart (fetched with the Authorization header into blob URLs); delete-all leaves no rows and no attachment files.
 
 ## M0: Scaffold and the memory spike
 
@@ -64,7 +64,7 @@ Conversation search and export, prompt library, multiple windows, update channel
 
 ## Backend items the UI team needs (owned by the backend, tracked in docs/BACKLOG.md)
 
-1. `DARA_API_KEY` environment variable instead of only `--api-key` on the command line.
+1. (done) The server reads the API key from `DARA_API_KEY`.
 2. Host-header validation (DNS rebinding defense).
 3. Public hosting for the Flash drafter downloads (currently from a private repository).
 4. A graceful `POST /dara/shutdown` so the app can stop the server cleanly.
