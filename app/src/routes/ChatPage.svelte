@@ -289,48 +289,86 @@
                 {/if}
 
                 <!-- Per-message stats & actions footer -->
-                <div
-                  class="flex items-center justify-between text-xs text-text-subtle pt-1 border-t border-border border-dashed"
-                >
-                  <div class="flex items-center space-x-3 font-mono text-[11px] tabular-nums">
-                    {#if msg.stats?.decodeTokensPerSecond}
-                      <span>{msg.stats.decodeTokensPerSecond.toFixed(1)} tok/s</span>
-                    {/if}
-                    {#if msg.stats?.ttftMs}
-                      <span>TTFT: {msg.stats.ttftMs.toFixed(0)}ms</span>
-                    {/if}
-                    {#if msg.stats?.cachedTokens}
-                      <span>Cached: {msg.stats.cachedTokens}</span>
-                    {/if}
-                    {#if msg.stats?.speculative}
-                      <span class="text-primary font-medium"
-                        >Flash: {msg.stats.speculative.acceptance.toFixed(0)}%</span
-                      >
-                    {/if}
-                  </div>
-
+                {#if !chatStore.isGenerating || msg.id !== activeConv.messages[activeConv.messages.length - 1]?.id}
                   <div
-                    class="flex items-center space-x-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                    class="flex flex-col sm:flex-row sm:items-center justify-between text-xs text-text-subtle pt-2 mt-2 border-t border-border/40 gap-2"
                   >
-                    <button
-                      type="button"
-                      aria-label="Copy reply"
-                      onclick={() => copyMessage(msg.content)}
-                      class="hover:text-text cursor-pointer"
+                    <div
+                      class="flex flex-wrap items-center gap-2 font-mono text-[11px] tabular-nums"
                     >
-                      Copy
-                    </button>
-                    <span>•</span>
-                    <button
-                      type="button"
-                      aria-label="Regenerate reply"
-                      onclick={() => chatStore.regenerate(serverStore.loadedModel ?? undefined)}
-                      class="hover:text-text cursor-pointer"
+                      {#if msg.stats?.decodeTokensPerSecond}
+                        <span
+                          class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-primary-subtle text-primary font-semibold text-[11px]"
+                          title="Generation Speed"
+                        >
+                          ⚡ {msg.stats.decodeTokensPerSecond.toFixed(1)} tok/s
+                        </span>
+                      {/if}
+                      {#if msg.stats?.prefillTokensPerSecond}
+                        <span
+                          class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-surface-raised border border-border text-text-muted text-[11px]"
+                          title="Prompt Prefill Speed"
+                        >
+                          Prefill: {msg.stats.prefillTokensPerSecond.toFixed(0)} tok/s
+                        </span>
+                      {/if}
+                      {#if msg.stats?.ttftMs}
+                        <span class="text-text-subtle text-[11px]" title="Time To First Token">
+                          TTFT: {msg.stats.ttftMs.toFixed(0)}ms
+                        </span>
+                      {/if}
+                      {#if msg.stats?.decodeTokens && msg.stats?.totalMs}
+                        <span class="text-text-subtle text-[11px]">
+                          {msg.stats.decodeTokens} tokens in {(msg.stats.totalMs / 1000).toFixed(
+                            1
+                          )}s
+                        </span>
+                      {:else if msg.stats?.totalTokens}
+                        <span class="text-text-subtle text-[11px]">
+                          {msg.stats.totalTokens} tokens
+                        </span>
+                      {/if}
+                      {#if msg.stats?.cachedTokens}
+                        <span
+                          class="text-success font-medium text-[10px]"
+                          title="Prompt Cached Tokens"
+                        >
+                          Cached: {msg.stats.cachedTokens}
+                        </span>
+                      {/if}
+                      {#if msg.stats?.speculative}
+                        <span
+                          class="text-primary font-medium text-[11px]"
+                          title="Flash Speculative Drafting Acceptance"
+                        >
+                          Flash: {msg.stats.speculative.acceptance.toFixed(0)}%
+                        </span>
+                      {/if}
+                    </div>
+
+                    <div
+                      class="flex items-center space-x-2 text-[11px] text-text-subtle opacity-70 group-hover:opacity-100 transition-opacity"
                     >
-                      Regenerate
-                    </button>
+                      <button
+                        type="button"
+                        aria-label="Copy reply"
+                        onclick={() => copyMessage(msg.content)}
+                        class="hover:text-text cursor-pointer transition-colors"
+                      >
+                        Copy
+                      </button>
+                      <span>•</span>
+                      <button
+                        type="button"
+                        aria-label="Regenerate reply"
+                        onclick={() => chatStore.regenerate(serverStore.loadedModel ?? undefined)}
+                        class="hover:text-text cursor-pointer transition-colors"
+                      >
+                        Regenerate
+                      </button>
+                    </div>
                   </div>
-                </div>
+                {/if}
               </div>
             </div>
           {/if}
@@ -429,8 +467,8 @@
               </svg>
             </IconButton>
 
-            <!-- Generation Settings Popover -->
-            <Popover>
+            <!-- Generation Settings Popover (opens upward above bottom input bar) -->
+            <Popover side="top">
               {#snippet trigger({ isOpen, toggle })}
                 <IconButton
                   aria-label="Generation parameters"

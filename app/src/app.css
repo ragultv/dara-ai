@@ -45,10 +45,39 @@
   font-family: var(--font-ui);
   background-color: var(--color-bg);
   color: var(--color-text);
-  min-height: 100vh;
+  height: 100%;
+  width: 100%;
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+
+#app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.selectable-text {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 *,

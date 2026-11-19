@@ -10,7 +10,13 @@ export interface UiMessage {
   stats?:
     | {
         decodeTokensPerSecond?: number | undefined;
+        prefillTokensPerSecond?: number | undefined;
         ttftMs?: number | undefined;
+        prefillMs?: number | undefined;
+        decodeMs?: number | undefined;
+        totalMs?: number | undefined;
+        decodeTokens?: number | undefined;
+        prefillTokens?: number | undefined;
         cachedTokens?: number | undefined;
         totalTokens?: number | undefined;
         speculative?:
@@ -223,6 +229,8 @@ class ChatStore {
     this.tokenBuffer = "";
     this.currentTps = undefined;
     this.abortController = new AbortController();
+    const startTime = performance.now();
+    let receivedTimings = false;
 
     try {
       const stream = await apiClient.streamChat(chatReq, this.abortController.signal);
@@ -236,14 +244,21 @@ class ChatStore {
 
         // Final chunk telemetry
         if (chunk.timings) {
+          receivedTimings = true;
           if (chunk.timings.decode_tokens_per_second) {
             this.currentTps = chunk.timings.decode_tokens_per_second;
           }
           assistantMsg.stats = {
             decodeTokensPerSecond: chunk.timings.decode_tokens_per_second,
+            prefillTokensPerSecond: chunk.timings.prefill_tokens_per_second,
             ttftMs: chunk.timings.ttft_ms,
+            prefillMs: chunk.timings.prefill_ms,
+            decodeMs: chunk.timings.decode_ms,
+            totalMs: chunk.timings.total_ms,
+            decodeTokens: chunk.timings.decode_tokens,
+            prefillTokens: chunk.timings.prefill_tokens,
             cachedTokens: chunk.usage?.prompt_tokens_details?.cached_tokens,
-            totalTokens: chunk.usage?.total_tokens,
+            totalTokens: chunk.usage?.total_tokens ?? chunk.timings.decode_tokens,
             speculative: chunk.speculative
               ? {
                   mode: chunk.speculative.mode,
@@ -264,6 +279,18 @@ class ChatStore {
         }
       }
 
+      // If stream ended without timings chunk, compute elapsed fallback
+      if (!receivedTimings && this.tokenBuffer.length > 0) {
+        const elapsedSec = (performance.now() - startTime) / 1000;
+        const estimatedTokens = Math.max(1, Math.round(this.tokenBuffer.length / 3.8));
+        const estimatedTps = elapsedSec > 0 ? estimatedTokens / elapsedSec : 0;
+        assistantMsg.stats = {
+          decodeTokensPerSecond: Math.round(estimatedTps * 10) / 10,
+          totalTokens: estimatedTokens,
+          totalMs: Math.round(elapsedSec * 1000)
+        };
+      }
+
       this.flushBufferImmediate(convId, assistantMsgId);
     } catch (err: unknown) {
       if (this.abortController?.signal.aborted) {
@@ -276,6 +303,7 @@ class ChatStore {
       this.isGenerating = false;
       this.abortController = null;
       this.currentTps = undefined;
+      currentConv.messages = [...currentConv.messages];
       this.conversations = [...this.conversations];
       this.saveToStorage();
     }

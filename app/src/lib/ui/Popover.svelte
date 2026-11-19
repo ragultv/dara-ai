@@ -5,6 +5,7 @@
     id?: string;
     isOpen?: boolean;
     align?: "start" | "center" | "end";
+    side?: "top" | "bottom";
     class?: string;
     trigger: Snippet<[{ isOpen: boolean; toggle: () => void }]>;
     children: Snippet<[{ close: () => void }]>;
@@ -14,6 +15,7 @@
     id,
     isOpen = $bindable(false),
     align = "start",
+    side = "bottom",
     class: className = "",
     trigger,
     children
@@ -60,6 +62,10 @@
     center: "left-1/2 -translate-x-1/2",
     end: "right-0"
   };
+  const sideClasses = {
+    top: "bottom-full mb-2",
+    bottom: "top-full mt-2"
+  };
 </script>
 
 <div bind:this={containerRef} class="relative inline-block {className}">
@@ -69,9 +75,9 @@
     <div
       id={popoverId}
       role="region"
-      class="absolute z-modal mt-2 min-w-[200px] rounded-lg bg-surface-raised border border-border shadow-lg p-4 {alignClasses[
-        align
-      ]}"
+      class="absolute z-modal min-w-[200px] rounded-lg bg-surface-raised border border-border shadow-lg p-4 {sideClasses[
+        side
+      ]} {alignClasses[align]}"
     >
       {@render children({ close })}
     </div>

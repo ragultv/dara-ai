@@ -74,7 +74,13 @@
   <div class="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
     {#each modelsStore.models as model (model.id)}
       {@const job = modelsStore.downloads[model.id]}
-      {@const isDownloading = Boolean(job && job.status === "downloading")}
+      {@const isDownloading = Boolean(
+        job &&
+        (job.status === "running" ||
+          job.status === "verifying" ||
+          job.status === "queued" ||
+          job.status === "downloading")
+      )}
       {@const isLoading = modelsStore.loadingModelId === model.id}
       {@const isRecommended = model.dara.fits_gpu === "full" || model.id === "dara-nano"}
 
