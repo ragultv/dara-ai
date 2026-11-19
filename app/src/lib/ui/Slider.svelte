@@ -5,7 +5,7 @@
     min?: number;
     max?: number;
     step?: number;
-    value?: number;
+    value?: number | undefined;
     unit?: string;
     disabled?: boolean;
     class?: string;
