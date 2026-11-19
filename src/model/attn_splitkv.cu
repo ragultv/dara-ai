@@ -197,6 +197,155 @@ partial_kernel(const float* __restrict__ q, const void* __restrict__ Kv, const f
     }
 }
 
+// Stage 1 for verification steps (2..kMultiTokens tokens at consecutive positions, full attention): grid (splits, heads). One block reads each
+// K / V entry of its chunk ONCE and applies it to every token, instead of one block per token re-reading the chunk (with many draft tokens at a long
+// context the K / V reads dominated the step). Per token, every operation and its order are those of partial_kernel, so the partials -- and the
+// output -- are bitwise identical to the per-token kernel.
+constexpr int kMultiTokens = 8;
+template <AttnFmt FMT>
+__global__ void __launch_bounds__(kThreads)
+partial_multi_kernel(const float* __restrict__ q, const void* __restrict__ Kv, const float* __restrict__ Kn, const void* __restrict__ Vv, const float* __restrict__ Vn,
+                     const int64_t* __restrict__ pos, int n, int heads, int kv_heads, int hd, float scale, int splits, float* __restrict__ part, KvAux aux) {
+    extern __shared__ float sq[];                    // [n][hd] queries
+    __shared__ float sc[kMultiTokens][kSplitChunk];  // scores, then probabilities, per token
+    __shared__ float red[8];
+    __shared__ int s_cnt[kMultiTokens];
+    const int split = blockIdx.x, h = blockIdx.y;
+    const int lo = split * kSplitChunk;
+    int pmax = 0;
+    for (int t = 0; t < n; ++t) pmax = max(pmax, static_cast<int>(pos[t]));
+    if (lo > pmax) return;
+    const int cnt_max = min(lo + kSplitChunk, pmax + 1) - lo;
+    const int kvh = h / (heads / kv_heads);
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    if (threadIdx.x < kMultiTokens) s_cnt[threadIdx.x] = threadIdx.x < n ? max(0, min(lo + kSplitChunk, static_cast<int>(pos[threadIdx.x]) + 1) - lo) : 0;
+    for (int t = 0; t < n; ++t)
+        for (int i = threadIdx.x; i < hd; i += blockDim.x) sq[t * hd + i] = q[(static_cast<size_t>(t) * heads + h) * hd + i];
+    __syncthreads();
+    const int frontier = FMT == AttnFmt::Q4 ? kivi_frontier(aux.pend ? static_cast<int>(*aux.pend) + 1 : aux.held) : 0;
+
+    // scores: one warp per position, every token's dot product from the same K reads
+    for (int j = warp; j < cnt_max; j += kThreads / 32) {
+        const int r = lo + j;
+        const size_t row = static_cast<size_t>(r) * kv_heads + kvh;
+        float acc[kMultiTokens];
+#pragma unroll
+        for (int t = 0; t < kMultiTokens; ++t) acc[t] = 0.0f;
+        for (int i = lane * 4; i < hd; i += 128) {
+            if (FMT == AttnFmt::F32) {
+                const float4 kk = *reinterpret_cast<const float4*>(static_cast<const float*>(Kv) + row * hd + i);
+#pragma unroll
+                for (int t = 0; t < kMultiTokens; ++t) {
+                    if (t >= n) break;
+                    const float4 qq = *reinterpret_cast<const float4*>(sq + t * hd + i);
+                    acc[t] = fmaf(qq.x, kk.x, acc[t]); acc[t] = fmaf(qq.y, kk.y, acc[t]); acc[t] = fmaf(qq.z, kk.z, acc[t]); acc[t] = fmaf(qq.w, kk.w, acc[t]);
+                }
+            } else if (FMT == AttnFmt::K16V8) {
+                const uint2 raw = *reinterpret_cast<const uint2*>(static_cast<const __half*>(Kv) + row * hd + i);
+                const float2 k01 = __half22float2(*reinterpret_cast<const __half2*>(&raw.x)), k23 = __half22float2(*reinterpret_cast<const __half2*>(&raw.y));
+#pragma unroll
+                for (int t = 0; t < kMultiTokens; ++t) {
+                    if (t >= n) break;
+                    const float4 qq = *reinterpret_cast<const float4*>(sq + t * hd + i);
+                    acc[t] = fmaf(qq.x, k01.x, acc[t]); acc[t] = fmaf(qq.y, k01.y, acc[t]); acc[t] = fmaf(qq.z, k23.x, acc[t]); acc[t] = fmaf(qq.w, k23.y, acc[t]);
+                }
+            } else if (FMT == AttnFmt::Q4 && r < frontier) {
+                const uint16_t w = *reinterpret_cast<const uint16_t*>(static_cast<const uint8_t*>(Kv) + (row * hd >> 1) + (i >> 1));
+                const __half2* ks = reinterpret_cast<const __half2*>(Kn) + static_cast<size_t>(r / kKiviGroup) * kv_heads * hd + static_cast<size_t>(kvh) * hd;
+                const float2 s0 = __half22float2(ks[i]), s1 = __half22float2(ks[i + 1]), s2 = __half22float2(ks[i + 2]), s3 = __half22float2(ks[i + 3]);
+                const float k0 = fmaf(static_cast<float>(w & 15u), s0.x, s0.y), k1 = fmaf(static_cast<float>((w >> 4) & 15u), s1.x, s1.y);
+                const float k2 = fmaf(static_cast<float>((w >> 8) & 15u), s2.x, s2.y), k3 = fmaf(static_cast<float>((w >> 12) & 15u), s3.x, s3.y);
+#pragma unroll
+                for (int t = 0; t < kMultiTokens; ++t) {
+                    if (t >= n) break;
+                    const float4 qq = *reinterpret_cast<const float4*>(sq + t * hd + i);
+                    acc[t] = fmaf(qq.x, k0, acc[t]); acc[t] = fmaf(qq.y, k1, acc[t]); acc[t] = fmaf(qq.z, k2, acc[t]); acc[t] = fmaf(qq.w, k3, acc[t]);
+                }
+            } else {   // Q8 / K8V4 keys, or the Q4 ring (Q8)
+                const int8_t* kr;
+                const float* ks;
+                if (FMT == AttnFmt::Q4) {
+                    const size_t srow = static_cast<size_t>(r % kKiviRing) * kv_heads + kvh;
+                    kr = aux.ring + srow * hd; ks = aux.ring_sc + srow * (hd / 32);
+                } else {
+                    kr = static_cast<const int8_t*>(Kv) + row * hd; ks = Kn + row * (hd / 32);
+                }
+                const char4 kk = *reinterpret_cast<const char4*>(kr + i);
+                const float sk = ks[i >> 5];
+#pragma unroll
+                for (int t = 0; t < kMultiTokens; ++t) {
+                    if (t >= n) break;
+                    const float4 qq = *reinterpret_cast<const float4*>(sq + t * hd + i);
+                    float d = qq.x * static_cast<float>(kk.x);
+                    d = fmaf(qq.y, static_cast<float>(kk.y), d); d = fmaf(qq.z, static_cast<float>(kk.z), d); d = fmaf(qq.w, static_cast<float>(kk.w), d);
+                    acc[t] = fmaf(sk, d, acc[t]);
+                }
+            }
+        }
+#pragma unroll
+        for (int t = 0; t < kMultiTokens; ++t) {
+            if (t >= n) break;
+            float a = acc[t];
+            for (int off = 16; off > 0; off >>= 1) a += __shfl_down_sync(0xffffffffu, a, off);
+            if (lane == 0 && j < s_cnt[t]) sc[t][j] = a * scale;
+        }
+    }
+    __syncthreads();
+
+    // per token: local softmax statistics (as partial_kernel), unnormalised probabilities in place
+    float mloc[kMultiTokens], lloc[kMultiTokens];
+    for (int t = 0; t < n; ++t) {
+        const int cnt = s_cnt[t];
+        float m = -3.402823466e38f;
+        for (int j = threadIdx.x; j < cnt; j += blockDim.x) m = fmaxf(m, sc[t][j]);
+        for (int off = 16; off > 0; off >>= 1) m = fmaxf(m, __shfl_down_sync(0xffffffffu, m, off));
+        if (lane == 0) red[warp] = m;
+        __syncthreads();
+        mloc[t] = fmaxf(fmaxf(red[0], red[1]), fmaxf(red[2], red[3]));
+        __syncthreads();
+        float sum = 0.0f;
+        for (int j = threadIdx.x; j < cnt; j += blockDim.x) { const float e = expf(sc[t][j] - mloc[t]); sc[t][j] = e; sum += e; }
+        for (int off = 16; off > 0; off >>= 1) sum += __shfl_down_sync(0xffffffffu, sum, off);
+        if (lane == 0) red[warp] = sum;
+        __syncthreads();
+        lloc[t] = red[0] + red[1] + red[2] + red[3];
+        __syncthreads();
+    }
+
+    // local unnormalised outputs: each V entry read once, applied to every token that sees it
+    for (int i = threadIdx.x; i < hd; i += blockDim.x) {
+        float acc[kMultiTokens];
+#pragma unroll
+        for (int t = 0; t < kMultiTokens; ++t) acc[t] = 0.0f;
+        for (int j = 0; j < cnt_max; ++j) {
+            const size_t row = static_cast<size_t>(lo + j) * kv_heads + kvh;
+            if (FMT == AttnFmt::F32) {
+                const float v = static_cast<const float*>(Vv)[row * hd + i];
+#pragma unroll
+                for (int t = 0; t < kMultiTokens; ++t) if (t < n && j < s_cnt[t]) acc[t] = fmaf(sc[t][j], v, acc[t]);
+            } else if (FMT == AttnFmt::K8V4 || FMT == AttnFmt::Q4) {
+                const float2 sm = __half22float2(reinterpret_cast<const __half2*>(Vn)[row * (hd / 32) + (i >> 5)]);
+                const float code = static_cast<float>((static_cast<const uint8_t*>(Vv)[(row * hd + i) >> 1] >> ((i & 1) * 4)) & 15u);
+                const float v = fmaf(code, sm.x, sm.y);
+#pragma unroll
+                for (int t = 0; t < kMultiTokens; ++t) if (t < n && j < s_cnt[t]) acc[t] = fmaf(sc[t][j], v, acc[t]);
+            } else {   // Q8 / K16V8 values
+                const float vs = Vn[row * (hd / 32) + (i >> 5)];
+                const float v = static_cast<float>(static_cast<const int8_t*>(Vv)[row * hd + i]);
+#pragma unroll
+                for (int t = 0; t < kMultiTokens; ++t) if (t < n && j < s_cnt[t]) acc[t] = fmaf(sc[t][j] * vs, v, acc[t]);
+            }
+        }
+#pragma unroll
+        for (int t = 0; t < kMultiTokens; ++t) {
+            if (t >= n || s_cnt[t] == 0) continue;
+            float* pr = part + ((static_cast<size_t>(t) * heads + h) * splits + split) * (hd + 2);
+            if (i == threadIdx.x && threadIdx.x == 0) { pr[0] = mloc[t]; pr[1] = lloc[t]; }
+            pr[2 + i] = acc[t];
+        }
+    }
+}
+
 // Stage 2: grid (heads, tokens): merge the partials of one (token, head).
 template <AttnFmt FMT>
 __global__ void __launch_bounds__(256)
@@ -319,6 +468,24 @@ int attn_splitkv_cuda(AttnFmt fmt, const float* q, const float* gate, const void
         }
         const size_t smem = static_cast<size_t>(hd) * sizeof(float);
         const dim3 grid(splits, heads, n);
+        static const bool multi_on = [] { const char* e = std::getenv("DARA_MULTI_VERIFY"); return !(e && e[0] == '0'); }();
+        if (multi_on && n >= 2 && n <= kMultiTokens && window == 0 && fmt != AttnFmt::TQ4) {
+            // several tokens, full attention: one block per (chunk, head) reads K/V once for all of them (bitwise identical partials)
+            const dim3 g2(splits, heads);
+            const size_t sm2 = static_cast<size_t>(n) * hd * sizeof(float);
+            switch (fmt) {
+                case AttnFmt::F32: partial_multi_kernel<AttnFmt::F32><<<g2, kThreads, sm2, s>>>(qsrc, K, Kn, V, Vn, pg, n, heads, kv_heads, hd, scale, splits, partials, aux); break;
+                case AttnFmt::Q8: partial_multi_kernel<AttnFmt::Q8><<<g2, kThreads, sm2, s>>>(qsrc, K, Kn, V, Vn, pg, n, heads, kv_heads, hd, scale, splits, partials, aux); break;
+                case AttnFmt::K16V8: partial_multi_kernel<AttnFmt::K16V8><<<g2, kThreads, sm2, s>>>(qsrc, K, Kn, V, Vn, pg, n, heads, kv_heads, hd, scale, splits, partials, aux); break;
+                case AttnFmt::K8V4: partial_multi_kernel<AttnFmt::K8V4><<<g2, kThreads, sm2, s>>>(qsrc, K, Kn, V, Vn, pg, n, heads, kv_heads, hd, scale, splits, partials, aux); break;
+                case AttnFmt::Q4: partial_multi_kernel<AttnFmt::Q4><<<g2, kThreads, sm2, s>>>(qsrc, K, Kn, V, Vn, pg, n, heads, kv_heads, hd, scale, splits, partials, aux); break;
+                default: break;
+            }
+            combine_kernel<AttnFmt::F32><<<dim3(heads, n), 256, smem, s>>>(partials, gg, pg, heads, hd, window, splits, og);
+            const cudaError_t e = cudaGetLastError();
+            if (e != cudaSuccess) return static_cast<int>(e);
+            continue;
+        }
         switch (fmt) {
             case AttnFmt::F32: partial_kernel<AttnFmt::F32><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;
             case AttnFmt::Q8: partial_kernel<AttnFmt::Q8><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;

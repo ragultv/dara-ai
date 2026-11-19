@@ -74,6 +74,7 @@ struct ContextInfo {
 struct SpecInfo {                    // speculative decoding (greedy: output identical to plain greedy; sampled: same distribution as plain sampling)
     std::string mode;                // "": not used, "flash" (trained drafter + prompt lookup), "ngram" (prompt lookup)
     std::string note;                // why Flash was not used when it was asked for
+    int stood_down_at = -1;          // model pass at which Flash stood down for the conversation (-1: it did not)
     int verify_steps = 0, drafted = 0, accepted = 0;
     int passes = 0;                  // model forward passes during decode (tokens per pass = decoded / passes)
 };

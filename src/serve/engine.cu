@@ -194,6 +194,8 @@ struct Engine::Impl {
     dara::model::QwenModel::DeviceCheckpoint qckpt;   // Qwen: state after qckpt_tokens.size() - 1 tokens of the last conversation
     std::vector<int32_t> qckpt_tokens;
     size_t flash_valid = 0;              // drafter positions known to match the held state
+    bool flash_paused = false;           // Flash stood down in the conversation held now (cleared when a new conversation starts)
+    bool spec_paused = false;            // all speculative decoding stood down in it (prompt lookup did not pay off either)
     // special ids
     std::vector<int32_t> eog;
     int32_t img_pad = -1, img_open = -1, img_close = -1;
@@ -473,12 +475,19 @@ struct Engine::Impl {
             }
         }
         // speculative decoding (prompt lookup + the Flash drafter), for greedy and sampled requests alike; "flash": false turns it off
-        const bool spec_on = opt.spec && sp.flash != 0;
+        if (reuse == 0) { flash_paused = false; spec_paused = false; }   // a new conversation: speculation gets a fresh chance
+        const bool spec_on = opt.spec && sp.flash != 0 && !(spec_paused && sp.flash != 1);
+        if (opt.spec && sp.flash == -1 && spec_paused) r.spec.note = "speculative decoding paused for this conversation: drafts were not paying off";
         bool use_flash = spec_on && flash != nullptr;
+        if (reuse == 0) flash_paused = false;   // a new conversation: Flash gets a fresh chance
+        if (use_flash && flash_paused && sp.flash != 1) { use_flash = false; r.spec.note = "flash paused for this conversation: drafts were not paying off"; }
         if (sp.flash == 1 && !flash) r.spec.note = "flash requested but no drafter is loaded" + (info.flash_note.empty() ? std::string() : ": " + info.flash_note);
         if (use_flash && std::min(flash_valid, flash->position()) < reuse) {
-            if (!qwen) reuse = std::min(flash_valid, flash->position());   // Nano can rewind anywhere: recompute the part the drafter missed
-            else { use_flash = false; r.spec.note = "drafter out of step with the cached prompt (a request with flash off ran in between)"; }
+            const size_t gap = reuse - std::min(flash_valid, flash->position());
+            // Nano can rewind anywhere: recompute a small part the drafter missed. A large gap means Flash stood down earlier in this conversation
+            // (it was not paying off) or a request ran without it: keep the prompt cache and continue without the drafter.
+            if (!qwen && gap <= 1024) reuse = std::min(flash_valid, flash->position());
+            else { use_flash = false; r.spec.note = "flash paused for this conversation (drafts were not paying off, or a request ran without it); a new conversation tries again"; }
         }
         if (reuse == 0) {
             reset_state();
@@ -567,6 +576,17 @@ struct Engine::Impl {
             std::vector<int32_t> draft, feed_t, vids;
             std::vector<float> feats, lgs;
             int ng_cool = 0, ng_back = 0, ng_len = qwen ? 4 : 7;
+            // adaptive Flash: when the drafter's tokens keep being rejected (long or unfamiliar context), drafting costs more than it saves --
+            // back off (2, 4, 8 ... 32 steps of plain decoding, the drafter still follows along) and try again; any accepted draft resets it
+            int fl_cool = 0, fl_back = 0;
+            float fl_ema = 1.0f;                  // running average of drafts accepted per verify step (Flash drafts only)
+            // overall benefit while the drafter is kept in step: tokens per model pass over a window of passes, counting passes where the drafter
+            // declined to draft (low confidence) -- those still pay for keeping it in step
+            int fl_win_passes = 0, fl_win_tokens = 0;
+            bool ngram_off = false;
+            constexpr int kFlashWindowPasses = 48;
+            constexpr float kFlashMinTokensPerPass = 1.25f;
+            constexpr float kFlashMinAccept = 0.7f;   // below this, a verify step of 1 + k tokens costs more than it saves (measured on a GTX 1650)
             const int ngram_max = 4, ngram_min = 3;
             auto lookup = [&](int limit) {
                 draft.clear();
@@ -578,7 +598,7 @@ struct Engine::Impl {
                         for (int q = 0; q < n && eq; ++q) eq = seq[static_cast<size_t>(j + q)] == seq[static_cast<size_t>(n_sz - n + q)];
                         if (!eq) continue;
                         for (int q = j + n; q < n_sz && static_cast<int>(draft.size()) < limit; ++q) draft.push_back(seq[static_cast<size_t>(q)]);
-                        if (!draft.empty()) break;
+                        if (static_cast<int>(draft.size()) >= std::min(2, limit)) break; draft.clear();   // too close to the end to copy enough: look further back
                     }
                 }
             };
@@ -588,10 +608,15 @@ struct Engine::Impl {
                 const int32_t cur = seq.back();
                 draft.clear();
                 bool from_ngram = false;
-                if (ng_cool == 0) { lookup(std::min(ng_len, budget - 1)); from_ngram = draft.size() >= 2; if (!from_ngram) draft.clear(); }
+                if (ngram_off) {}
+                else if (ng_cool == 0) { lookup(std::min(ng_len, budget - 1)); from_ngram = draft.size() >= 2; if (!from_ngram) draft.clear(); }
                 else --ng_cool;
                 const size_t dpos = use_flash ? flash->position() : 0;
-                if (!from_ngram && use_flash && budget > 1) flash->draft(y, d1, p1, std::min(kmax, budget - 1), opt.flash_min_p, draft);
+                bool from_flash = false;
+                if (!from_ngram && use_flash && budget > 1) {
+                    if (fl_cool > 0) --fl_cool;
+                    else { flash->draft(y, d1, p1, std::min(kmax, budget - 1), opt.flash_min_p, draft); from_flash = !draft.empty(); }
+                }
                 if (static_cast<int>(draft.size()) > budget - 1) draft.resize(static_cast<size_t>(std::max(0, budget - 1)));
                 const int kd = static_cast<int>(draft.size());
                 feed_t.assign(1, cur);
@@ -635,6 +660,27 @@ struct Engine::Impl {
                     seq.resize(base_len);
                 }
                 ++passes;
+                if (from_flash) {
+                    // a single lucky acceptance must not keep an unprofitable drafter running: decide on the running average, back off
+                    // exponentially (4 .. 64 plain steps) while it stays low, and give each probe after a back-off a neutral start
+                    fl_ema = 0.7f * fl_ema + 0.3f * static_cast<float>(m);
+                    if (fl_ema < kFlashMinAccept) {
+                        if (fl_back >= 64) {
+                            // still not paying after backing off to the limit: stand the drafter down for this conversation. Keeping it in step costs
+                            // every token (the target's states for it, no CUDA graph on Nano), so a paused drafter is not free -- a stopped one is.
+                            use_flash = false;
+                            r.spec.note = "flash paused for this conversation: drafts were not paying off";
+                            r.spec.stood_down_at = passes;
+                            flash_paused = true;
+                            flash_valid = std::min(flash_valid, dpos);
+                        } else {
+                            fl_back = fl_back ? std::min(fl_back * 2, 64) : 4;
+                            fl_cool = fl_back;
+                            fl_ema = kFlashMinAccept;
+                        }
+                    }
+                    else fl_back = 0;
+                }
                 if (from_ngram) {
                     ng_len = m == kd ? std::min(ng_len * 2, 7) : std::max(2, m + 1);
                     if (m == 0) { ng_back = ng_back ? std::min(ng_back * 2, 32) : 2; ng_cool = ng_back; } else ng_back = 0;
@@ -647,6 +693,25 @@ struct Engine::Impl {
                     flash->rewind(dpos);
                     flash->extend(feats.data(), to_add.data(), m + 1, y, d1);
                     p1 = flash->last_prob();
+                }
+                if (!ngram_off) {   // benefit of speculation as a whole over a window of passes (passes without drafts count too)
+                    ++fl_win_passes;
+                    fl_win_tokens += static_cast<int>(to_add.size());
+                    if (fl_win_passes >= kFlashWindowPasses) {
+                        if (static_cast<float>(fl_win_tokens) < kFlashMinTokensPerPass * static_cast<float>(fl_win_passes)) {
+                            if (use_flash) {
+                                use_flash = false;   // not covering its cost: stand the drafter down for this conversation (it is in step up to here)
+                                r.spec.note = "flash paused for this conversation: drafts were not paying off";
+                                r.spec.stood_down_at = passes;
+                                flash_paused = true;
+                            } else {
+                                ngram_off = true;    // prompt lookup is not paying off either: plain decoding for the rest of the conversation
+                                spec_paused = true;
+                                r.spec.note = "speculative decoding paused for this conversation: drafts were not paying off";
+                            }
+                        }
+                        fl_win_passes = fl_win_tokens = 0;
+                    }
                 }
                 for (int32_t id : to_add) if (!(go = accept(id))) break;   // a stop inside the run: seq stays a prefix of the held state
             }

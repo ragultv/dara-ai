@@ -497,7 +497,8 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
         }
         LP("attn split/norm/rope");
         const bool ref = attention_reference_mode();
-        const int maxpos = dev_pos ? static_cast<int>(s.kv_cap) : static_cast<int>(s.pos) + T;  // grid bound: fixed for a captured graph
+        const int maxpos_full = dev_pos ? static_cast<int>(s.kv_cap) : static_cast<int>(s.pos) + T;  // grid bound: fixed for a captured graph
+        const int maxpos = s.window > 0 ? std::min(s.window, maxpos_full) : maxpos_full;              // sliding window: positions a token can see
         const float attn_scale = 1.0f / std::sqrt(static_cast<float>(d.head_dim));
         const AttnFmt afmt = attn_fmt(s.kv_format);
         // prefill chunks (positions on the host, many tokens): GEMM -> masked softmax -> GEMM, gate applied after (every format but TQ4)
@@ -511,11 +512,11 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
         }
         auto prefill_attention = [&] {
             const int p0 = static_cast<int>(s.pos);
-            const size_t pf = attn_prefill_scratch_floats(T, p0, 0, d.heads, d.kv_heads);
+            const size_t pf = attn_prefill_scratch_floats(T, p0, s.window, d.heads, d.kv_heads);
             float* ps = sp.get<float>(18, pf);
             const bool f32 = afmt == AttnFmt::F32;
             cuda_check(attn_prefill_cuda(afmt, q, gate, f32 ? static_cast<const void*>(s.Kc.p) : s.Kq.p, f32 ? nullptr : s.Kn.p,
-                                         f32 ? static_cast<const void*>(s.Vc.p) : s.Vq.p, f32 ? nullptr : s.Vn.p, T, p0, d.heads, d.kv_heads, d.head_dim, 0, attn_scale, ps, pf,
+                                         f32 ? static_cast<const void*>(s.Vc.p) : s.Vq.p, f32 ? nullptr : s.Vn.p, T, p0, d.heads, d.kv_heads, d.head_dim, s.window, attn_scale, ps, pf,
                                          att, stream, aux),
                        "prefill attention");
         };
@@ -524,8 +525,8 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
             const size_t floats = per * static_cast<size_t>(std::min(T, 8));
             float* scr = sp.get<float>(17, floats);
             cuda_check(afmt != AttnFmt::F32
-                           ? attn_splitkv_cuda(afmt, q, gate, s.Kq.p, s.Kn.p, s.Vq.p, s.Vn.p, pos_dev, T, d.heads, d.kv_heads, d.head_dim, 0, attn_scale, maxpos, scr, floats, att, stream, aux)
-                           : attn_splitkv_cuda(afmt, q, gate, s.Kc.p, nullptr, s.Vc.p, nullptr, pos_dev, T, d.heads, d.kv_heads, d.head_dim, 0, attn_scale, maxpos, scr, floats, att, stream),
+                           ? attn_splitkv_cuda(afmt, q, gate, s.Kq.p, s.Kn.p, s.Vq.p, s.Vn.p, pos_dev, T, d.heads, d.kv_heads, d.head_dim, s.window, attn_scale, maxpos, scr, floats, att, stream, aux)
+                           : attn_splitkv_cuda(afmt, q, gate, s.Kc.p, nullptr, s.Vc.p, nullptr, pos_dev, T, d.heads, d.kv_heads, d.head_dim, s.window, attn_scale, maxpos, scr, floats, att, stream),
                        "split-KV attention");
         };
         if (kv_v4_values(s.kv_format)) {   // 4-bit values; keys Q8 (K8V4) or Q8 ring -> 4-bit groups (Q4)
