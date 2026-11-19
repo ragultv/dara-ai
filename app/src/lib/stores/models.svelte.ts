@@ -63,8 +63,9 @@ class ModelsStore {
 
     // Disk space check per docs/ui/01-product-and-pages.md:
     // "Block a download if free space is lower than the size, with the numbers."
+    // Only block if we have a valid, measured positive free space.
     const requiredGb = model.dara.download_size_mb / 1024;
-    if (this.diskFreeGb !== null && this.diskFreeGb < requiredGb) {
+    if (this.diskFreeGb !== null && this.diskFreeGb > 0 && this.diskFreeGb < requiredGb) {
       this.error = `Not enough disk space: needs ${requiredGb.toFixed(1)} GB, ${this.diskFreeGb.toFixed(1)} GB free.`;
       return;
     }
