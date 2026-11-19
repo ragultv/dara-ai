@@ -35,10 +35,13 @@ dara rm <id>
 | `--model <id or gguf>` | none | load this model at start. Without it the server starts empty and loads the model the first request names |
 | `--models-dir DIR` | `%LOCALAPPDATA%\Dara\models` | the model library |
 | `--host`, `--port` | `127.0.0.1`, `11435` | listen address |
-| `--vision` / `--mmproj <gguf>\|auto` | off | image input. Costs almost no VRAM or RAM and no context (see "Image input" below) |
-| `--flash auto\|on\|off\|<file>` | `auto` | Flash drafter. `auto` keeps it only if the model still fits fully in VRAM with it (4 GB card: on for Nano, off for the 4B, where it would cost layers and be slower) |
+| `--kv-format auto\|q8\|q4\|k8v4\|tq4` | `auto` | K/V cache format. `auto` = the configuration the options API recommends for this GPU (see "Defaults" below) |
+| `--flash auto\|on\|off\|<file>` | `auto` | Flash drafter. `auto` = the recommendation (on only when it still keeps 32K tokens fully on the GPU: on for Nano, off for the 4B on a 4 GB card); `on` / `off` force it |
+| `--ctx auto\|N` | `auto` | context size. `auto` = the largest that keeps every layer and the output head on the GPU, from the VRAM free at load time (the 9B, which cannot fit, gets 32K and the planner's placement) |
+| `--vram-reserve MB` | `64` | VRAM the planner leaves free (0 = each model's own default: 128 MiB Qwen, 256 MiB Gemma). A smaller reserve gives a few thousand more tokens of context |
+| `--no-vision` / `--mmproj <gguf>` | vision on | image input is on whenever the model's image encoder is installed (it costs a few MB and no context, see "Image input" below); `--no-vision` turns it off |
 | `--no-spec` | | no speculative decoding at all |
-| `--ctx auto\|N`, `--min-context N` | `auto`, `32768` | context size (as for `dara`) |
+| `--min-context N` | `0` | floor for `--ctx auto` (0: none; `dara --min-context` keeps its own default of 32768) |
 | `--image-max-tokens N` | `400` | Qwen image token cap |
 | `--max-tokens N` | `1024` | default reply length when a request does not set one |
 | `--api-key KEY` | | require `Authorization: Bearer KEY` |
@@ -57,6 +60,7 @@ Requests run one at a time (a queue); `/dara/stats` and `/metrics` answer while 
 | `GET` / `DELETE /dara/models/pull/{job}` | progress (bytes, %, MB/s, ETA) / cancel (the partial file is kept for resuming) |
 | `POST /dara/models/load` | `{"model": "dara-core-4b", "flash": "auto"\|true\|false, "vision": false, "ctx": 32768}` |
 | `POST /dara/models/unload` | free the GPU |
+| `GET /dara/load` | progress of the current / last model load (stage, percent, error, chosen config) |
 | `GET /dara/models/{id}/options` | what each K/V format, Flash setting and context size does on this GPU, with quality labels and measured speeds (below). `?vision=false`, `?formats=q8,q4` |
 | `POST /dara/models/{id}/benchmark` | measure the speeds on this machine: `{"formats": ["q8","q4"], "vision": true, "force": false}` -> a job (`GET /dara/benchmarks/{job}` progress, `DELETE` cancels) |
 | `GET /dara/version` | version and calibration file |
@@ -90,6 +94,20 @@ the first generated token to the last.
 VRAM; with the NVIDIA driver's NVML: utilization, temperature, power, clocks, P-state), `disk` (model / mmproj / drafter file sizes, free space on
 the model's volume), `model` (family, quant, layers on GPU, output head location, context, Flash, vision, placement), `context` (tokens held),
 `engine` (busy, queued, live tokens and tokens/s of the running request, totals, average prefill and decode speed), `last_request`.
+
+## Defaults, and load progress
+
+When the K/V format and Flash are left on `auto` (the default), `dara serve` loads each model with the configuration the options API reports as
+`recommended` for this GPU, computed from the VRAM that is free when the model loads; the context stays automatic. Anything you set explicitly wins, and the
+rest is still recommended (`config.source` is `recommended`, `partly recommended` or `explicit`; `config.reason` says why). `/v1/models` shows the loaded
+model's `config` (K/V format, Flash, context, layers on the GPU, output head, vision). On the GTX 1650: Nano loads INT8 + Flash with 131,072 tokens; the
+Core 4B loads Q4 without Flash with about 35K tokens, every layer and the output head on the GPU. A load that fails after the old model was unloaded puts
+the old model back; bad input (an unknown K/V format) is refused with a 400 before anything is unloaded.
+
+Loading takes 5-15 s. `GET /dara/load` reports it: `state` (`idle`, `queued`, `loading`, `ready`, `failed`), `stage` (planning, loading layers 12/32, loading
+the Flash drafter, loading the image encoder), `percent`, `seconds`, `error`, and the chosen `config`. `GET /health` carries the same as `loading` while one
+runs. `POST /dara/models/load` waits by default; with `"async": true` it returns 202 at once and the load runs in the background (a second one is refused
+with 409 until it finishes), so a UI can show the progress bar.
 
 ## Options: what fits this GPU, and how fast
 

@@ -12,6 +12,7 @@
 //                a double-buffered staging arena, the copy of the next layer overlapping the compute of the current one.
 // If the configured placement cannot fit, the constructor throws with the plan and the numbers instead of failing later.
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -63,6 +64,8 @@ struct ResidencyOptions {
     // (what is free once this process's own model is unloaded); 0 = ask.
     bool plan_only = false;
     size_t assume_free_bytes = 0;
+    // Load progress: called as (stage, done, total) while the constructor works (e.g. "loading layers", 12, 32). Optional.
+    std::function<void(const char*, int, int)> progress;
 };
 
 struct PlacementReport {

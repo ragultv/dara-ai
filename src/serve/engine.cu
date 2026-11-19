@@ -982,6 +982,7 @@ Residency make_residency(const EngineOptions& o, const dara::io::GgufCheckpoint&
     ropt.auto_min_context = o.min_context;
     ropt.safety_bytes = o.vram_reserve_mb << 20;
     ropt.assume_free_bytes = o.assume_free_bytes;
+    if (o.progress) ropt.progress = [cb = o.progress](const char* stage, int done, int total) { cb(stage, done, total); };
     std::error_code ec;
     if (!o.mmproj.empty()) {   // the image encoder's weights and activations get VRAM when the context is sized
         const auto sz = std::filesystem::file_size(std::filesystem::u8path(o.mmproj), ec);
@@ -1041,7 +1042,9 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
     m.qwen = arch == "qwen35";
     std::error_code ec;
     if (m.qwen) m.qcfg = dara::model::QwenConfig::from_gguf(*m.gguf);
+    if (o.progress) o.progress("planning", 0, 1);
     Residency rs = make_residency(o, *m.gguf, m.qwen, m.qwen ? &m.qcfg : nullptr, true);
+    rs.ropt_plain.progress = rs.ropt.progress;
     dara::model::ResidencyOptions& ropt = rs.ropt;
     dara::model::ResidencyOptions& ropt_plain = rs.ropt_plain;
     std::string flash_path = rs.flash_path;
@@ -1082,6 +1085,7 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         m.info.weights_vram_bytes = pr.resident_weight_bytes + pr.head_bytes;
         m.info.gpu = pr.gpu;
         m.info.placement = pr.plan;
+        if (o.progress && !flash_path.empty()) o.progress("loading the Flash drafter", 0, 1);
         if (!flash_path.empty()) m.flash = std::make_unique<dara::model::FlashDrafter>(flash_path, *m.gguf, [w = m.qweights.get()](int32_t t) { return w->embed_row(t); }, m.qm->kv_capacity() + 16);
     } else {
         m.gtok = std::make_unique<dara::tokenizer::GemmaTokenizer>(dara::tokenizer::GemmaTokenizer::from_gguf(m.gguf->header()));
@@ -1113,8 +1117,10 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         m.info.weights_vram_bytes = pr.resident_weight_bytes + pr.head_bytes;
         m.info.gpu = pr.gpu;
         m.info.placement = pr.plan;
+        if (o.progress && !flash_path.empty()) o.progress("loading the Flash drafter", 0, 1);
         if (!flash_path.empty()) m.flash = std::make_unique<dara::model::FlashDrafter>(flash_path, *m.gguf, [g = m.gm.get()](int32_t t) { return g->embed_row_raw(t); }, m.gm->kv_capacity() + 16);
     }
+    if (o.progress && !o.mmproj.empty()) o.progress("loading the image encoder", 0, 1);
     if (!o.mmproj.empty()) {   // after the model: the encoder's resident parts come out of the reservation above
         m.mm = std::make_unique<dara::io::GgufCheckpoint>(o.mmproj);
         if (m.qwen) {

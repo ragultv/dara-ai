@@ -377,6 +377,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
         p.matrix_bytes = off;
         p.host = HostBuffer(off);
         for (size_t i = 0; i < descs.size(); ++i) g.read_into(descs[i].tensor, p.host.data() + p.slots[i].offset);
+        if (opt.progress) opt.progress("loading layers", l, L);
         layers_.push_back(std::move(p));
         PackedLayer& pl = layers_.back();
         if (l < resident_) {

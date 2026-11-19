@@ -268,6 +268,7 @@ QwenModel::QwenModel(const QwenConfig& cfg, const IModelWeights& weights, size_t
     layers_.reserve(L);
     report_.hosted_pinned = true;
     for (int i = 0; i < L; ++i) {
+        if (opt.progress) opt.progress("loading layers", i, L);
         layers_.push_back(weights.load_layer_packed(i));
         PackedLayer& p = layers_.back();
         if (i < resident_) {
