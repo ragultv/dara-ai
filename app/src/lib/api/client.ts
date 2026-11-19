@@ -1,4 +1,5 @@
 import { ApiError } from "./errors.ts";
+import { parseSseStream } from "./sse.ts";
 import type {
   Health,
   ModelList,
@@ -6,7 +7,9 @@ import type {
   PullRequest,
   LoadRequest,
   LoadStatus,
-  Stats
+  Stats,
+  ChatRequest,
+  ChatChunk
 } from "./types.ts";
 
 export interface ClientConfig {
@@ -210,6 +213,47 @@ export class DaraApiClient {
       opts.signal = signal;
     }
     return this.request<Stats>("/dara/stats", opts);
+  }
+
+  async streamChat(
+    req: ChatRequest,
+    signal?: AbortSignal
+  ): Promise<AsyncGenerator<ChatChunk, void, unknown>> {
+    const url = `${this.baseUrl}/v1/chat/completions`;
+    const headers = new Headers({
+      "Content-Type": "application/json",
+      Accept: "text/event-stream"
+    });
+    if (this.apiKey) {
+      headers.set("Authorization", `Bearer ${this.apiKey}`);
+    }
+
+    const fetchOpts: RequestInit = {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...req, stream: true })
+    };
+    if (signal) {
+      fetchOpts.signal = signal;
+    }
+
+    const response = await fetch(url, fetchOpts);
+
+    if (!response.ok) {
+      let errorBody: unknown;
+      try {
+        errorBody = await response.json();
+      } catch {
+        errorBody = await response.text();
+      }
+      throw ApiError.fromResponseBody(response.status, errorBody, "Chat completion failed");
+    }
+
+    if (!response.body) {
+      throw new ApiError(0, "Empty response body from chat completion stream", "empty_response");
+    }
+
+    return parseSseStream(response.body.getReader());
   }
 }
 

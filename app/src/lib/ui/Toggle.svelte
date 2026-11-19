@@ -3,7 +3,7 @@
     id?: string;
     label: string;
     description?: string;
-    checked?: boolean;
+    checked?: boolean | undefined;
     disabled?: boolean;
     class?: string;
     onchange?: (checked: boolean) => void;

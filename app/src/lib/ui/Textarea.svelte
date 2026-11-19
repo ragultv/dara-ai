@@ -6,7 +6,7 @@
     label?: string;
     hint?: string;
     error?: string;
-    value?: string;
+    value?: string | undefined;
     maxRows?: number;
     oninput?: (e: Event & { currentTarget: HTMLTextAreaElement }) => void;
   }
