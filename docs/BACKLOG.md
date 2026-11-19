@@ -59,5 +59,6 @@ tier's budget.
 - **Vision encoder on tensor cores** (attention GEMMs) for faster image TTFT on sm_80+.
 - **Nano small-op fusion** (decode launch overhead).
 - **Tokenizer memory** (~30-40 MB of the private working set).
-- **Vision without the up-front VRAM reservation:** load the image encoder on demand into memory freed by evicting context, so `--mmproj`
-  does not cost layers / context on 4 GB cards.
+- **Images when the context is nearly full:** the encode borrows the unused tail of the K/V caches, which is cut into small pieces per layer; when
+  the conversation fills the context the big buffers come from free VRAM instead. Splitting the largest working buffers (MLP activations, q/k/v) so they
+  fit the pieces would make a full context cheaper still. A CPU fallback for encoding would remove the last failure case.

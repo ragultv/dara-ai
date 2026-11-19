@@ -166,6 +166,9 @@ void alloc_kv(const KvBuffers& b, KvFormat fmt, size_t capacity, int kv_heads, i
 // Q4 keys after the held length drops from `old_held` to `new_held` (prompt cache / rewind): groups at or after the new frontier that were quantized
 // go back into the ring, so the ring again covers [frontier(new_held), new_held). No-op for other formats. kv_width 0: derived from the ring.
 void kv_rewound(KvFormat fmt, const KvBuffers& b, int kv_width, size_t old_held, size_t new_held, void* stream = nullptr);
+// Appends the device ranges of these K/V buffers that hold positions >= from (nothing needed while rom positions are held): borrowed as scratch
+// (DeviceArena) while an image is encoded. capacity = the buffers' position capacity.
+void kv_tail_regions(const KvBuffers& b, KvFormat fmt, size_t capacity, size_t from, std::vector<DeviceArena::Region>& out);
 struct GpuLayerCheckpoint {
     std::vector<float> conv, S;  // DeltaNet state copy (empty for attention layers)
     size_t length = 0;           // tokens processed (attention: the KV length to truncate back to)

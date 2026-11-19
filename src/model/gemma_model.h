@@ -77,6 +77,11 @@ public:
     // token ids there must be the pad id (the per-layer token table reads it); the soft tokens also feed the per-layer projection.
     void add_soft_tokens(size_t start, int n, std::vector<float> rows);
     void clear_soft_tokens() { soft_.clear(); }
+    // Device ranges of the K/V caches holding positions >= from (unused while `from` positions are held): scratch to borrow (DeviceArena).
+    void kv_tail_regions(size_t from, std::vector<DeviceArena::Region>& out) {
+        for (int l = 0; l < cfg_.layers; ++l)
+            if (cfg_.owns_kv(l)) dara::model::kv_tail_regions(kv_[l].bufs(), opt_.kv_format, capacity_, from, out);
+    }
     size_t kv_capacity() const { return capacity_; }   // positions the caches hold (the auto choice when constructed with 0)
     // long forward calls run in pieces of this many tokens (multiple of the prefill chunk): bounds the per-call device buffers
     int forward_piece_tokens() const { const int c = opt_.max_chunk_tokens > 0 ? opt_.max_chunk_tokens : 1; return c * (256 / c > 0 ? 256 / c : 1); }
