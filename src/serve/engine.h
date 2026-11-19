@@ -129,6 +129,7 @@ struct EngineOptions {
     std::string id;                         // model id reported by the API (default: the file name)
     size_t kv = 0;                          // 0: auto
     size_t min_context = 32768;
+    size_t assume_free_bytes = 0;           // dry runs (ModelPlanner): treat this much VRAM as free instead of asking the driver (0 = ask)
     size_t vram_reserve_mb = 0;
     std::string kv_format = "q8";              // K/V cache: q8 (int8), k8v4, q4, tq4, k16v8             // VRAM the planner leaves free (0: the model's default; DARA_VRAM_SAFETY_MB overrides)
     int image_max_tokens = 400;             // Qwen image token cap (Gemma: at most 280 by the model)
@@ -163,4 +164,35 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// What loading a configuration would do on this GPU, from the real placement planner and without loading anything.
+struct PlanResult {
+    bool ok = false;
+    std::string error;               // why it cannot be placed
+    size_t context = 0;              // positions the K/V caches hold (the auto choice when the query asked for 0)
+    size_t native_context = 0;
+    int layers = 0, layers_gpu = 0;
+    bool head_on_cpu = false;        // the output head stays in host RAM
+    bool flash_active = false;       // the Flash drafter would be loaded (it is dropped when its VRAM would push layers out)
+    std::string flash_note;
+    std::string placement;           // the planner's description
+    size_t vram_total = 0, vram_free_assumed = 0;
+    size_t state_bytes = 0;          // K/V caches + recurrent state
+};
+
+// Parses a model's GGUF once, then answers plan() queries. A query is an EngineOptions: kv_format, kv (context, 0 = auto), min_context, flash / flash_mode /
+// spec, mmproj (reserves the image encoder's resident part), vram_reserve_mb and assume_free_bytes (VRAM to treat as free; 0 = ask the driver).
+class ModelPlanner {
+public:
+    explicit ModelPlanner(const std::string& gguf);
+    ~ModelPlanner();
+    ModelPlanner(const ModelPlanner&) = delete;
+    ModelPlanner& operator=(const ModelPlanner&) = delete;
+    PlanResult plan(const EngineOptions& query);
+    const std::string& family() const;   // "qwen35" or "gemma4"
+    int layers() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 }  // namespace dara::serve

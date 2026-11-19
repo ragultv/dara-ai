@@ -57,6 +57,9 @@ Requests run one at a time (a queue); `/dara/stats` and `/metrics` answer while 
 | `GET` / `DELETE /dara/models/pull/{job}` | progress (bytes, %, MB/s, ETA) / cancel (the partial file is kept for resuming) |
 | `POST /dara/models/load` | `{"model": "dara-core-4b", "flash": "auto"\|true\|false, "vision": false, "ctx": 32768}` |
 | `POST /dara/models/unload` | free the GPU |
+| `GET /dara/models/{id}/options` | what each K/V format, Flash setting and context size does on this GPU, with quality labels and measured speeds (below). `?vision=false`, `?formats=q8,q4` |
+| `POST /dara/models/{id}/benchmark` | measure the speeds on this machine: `{"formats": ["q8","q4"], "vision": true, "force": false}` -> a job (`GET /dara/benchmarks/{job}` progress, `DELETE` cancels) |
+| `GET /dara/version` | version and calibration file |
 | `DELETE /dara/models/{id}` | delete a model's files |
 | `GET /health` | liveness |
 | `POST /dara/tokenize` | `{"messages": [...]}` or `{"text": "..."}` -> token count |
@@ -87,6 +90,44 @@ the first generated token to the last.
 VRAM; with the NVIDIA driver's NVML: utilization, temperature, power, clocks, P-state), `disk` (model / mmproj / drafter file sizes, free space on
 the model's volume), `model` (family, quant, layers on GPU, output head location, context, Flash, vision, placement), `context` (tokens held),
 `engine` (busy, queued, live tokens and tokens/s of the running request, totals, average prefill and decode speed), `last_request`.
+
+## Options: what fits this GPU, and how fast
+
+`GET /dara/models/{id}/options` (CLI: `dara options <id>`) answers "what can I choose, and what will it do on my machine" for one model:
+
+- **Placement is exact.** It runs the same placement planner a real load uses, in a dry run that stops before allocating anything (`ResidencyOptions::plan_only`),
+  with the VRAM this process' own loaded model would give back counted as free. For every K/V format (INT8, INT8 keys + 4-bit values, Q4, TurboQuant), with
+  and without the Flash drafter, it reports the **fast** point (the largest context with every layer and the output head on the GPU; when even a small
+  context cannot be fully on the GPU, the planner's smallest placement, flagged by `fully_on_gpu: false`) and a ladder of contexts (4K ... 128K, native):
+  context, layers on the GPU, where the output head runs, K/V cache size. On the 4B the dry run reproduced all 17 placements measured by real loads in the
+  benchmark matrix (INT8 and Q4, Flash on and off, 16K to 128K) exactly.
+- **Quality labels** come from the quality gate (`bench/quality_gate.py`: teacher-forced agreement and KL divergence against the FP32 reference on five
+  workloads, via `tools/gen_quality_table.py` -> `src/serve/quality_table.h`): `high`, `medium` or `lower`, with the numbers. TurboQuant is listed but never
+  recommended (no batched prompt-attention kernel yet).
+- **Speeds are measured, once, on your machine** (`POST .../benchmark`, `dara bench <id>`; about 1.5 min for Nano, 8 min for the 4B): each distinct
+  placement is loaded and timed (generation speed with an empty context, best of three; prompt speed on a ~600-token prompt) and saved to
+  `%LOCALAPPDATA%\Dara\calibration.json` with the GPU, VRAM, driver and Dara version it is valid for (another machine, driver or version counts as not
+  measured), the time, and the power state: a measurement taken on battery is flagged, because laptop GPUs run slower there. Until measured, an option says
+  `"source": "not_measured"`; nothing is guessed. A short probe with ~6000 tokens held also gives `decode_tps_full_estimate`, an estimate of the speed with a
+  full context (linear in the held context; within about 10% of the full fill-up curves measured on the GTX 1650). It is always plain decoding: with a long
+  conversation Flash stands down, so that is the full-context speed with Flash on too.
+- **A recommendation with its rule:** the highest-quality format that keeps at least 32K tokens fully on the GPU, otherwise the high-quality format that
+  keeps the most layers on the GPU; Flash on only when it still keeps 32K tokens fully on the GPU. On the GTX 1650: Nano INT8 + Flash (119,808 tokens),
+  Core 4B Q4 without Flash (29,696 tokens), Pro 9B Q4 (19 of 32 layers on the GPU; the response says it does not fit fully).
+- The benchmark holds the engine while it runs (requests queue), unloads the current model for it and puts it back afterwards.
+
+Measured on the GTX 1650 (on AC power), Core 4B, generation speed with an empty context:
+
+| K/V | Flash | context | layers / head | tok/s | full-context estimate |
+| --- | --- | --- | --- | --- | --- |
+| INT8 | off | 17,408 (fast) | 32/32, GPU | 49.0 | 27.0 |
+| INT8 | off | 32,768 | 32/32, CPU | 30.3 | |
+| INT8 | off | 131,072 | 9/32, CPU | 9.8 | |
+| INT8 | on | 5,120 (fast) | 32/32, GPU | 60.2 | |
+| Q4 | off | 29,696 (fast) | 32/32, GPU | 48.9 | 20.5 |
+| Q4 | off | 131,072 | 24/32, CPU | 18.8 | |
+| Q4 | on | 8,192 (fast) | 32/32, GPU | 56.5 | |
+| Q4 | on | 131,072 | 17/32, CPU | 13.2 | |
 
 ## Image input
 

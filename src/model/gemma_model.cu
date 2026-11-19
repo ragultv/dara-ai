@@ -177,6 +177,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     report_.gpu = require_supported_gpu();
     size_t free_b = 0, total_b = 0;
     cuda_check(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    if (opt.assume_free_bytes) free_b = std::min(opt.assume_free_bytes, total_b);
     // Longest context: the model's native one, except where a kernel keeps one score per position in shared memory (the TurboQuant
     // and FP32 reference attention kernels). The default split-KV / prefill attention path has no such bound.
     size_t max_ctx = cfg_.context_length ? cfg_.context_length : static_cast<size_t>(kGemmaMaxContext);
@@ -308,6 +309,17 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
         throw std::runtime_error(why);
     }
     resident_ = resident;
+    if (opt.plan_only) {   // dry run: the placement a real load would make (see ResidencyOptions::plan_only)
+        report_.resident_layers = resident_;
+        report_.hosted_layers = L - resident_;
+        report_.head_on_cpu = false;
+        report_.head_bytes = head_bytes;
+        report_.state_bytes = kv_bytes;
+        report_.workspace_bytes = workspace;
+        report_.vram_free_at_start = free_b;
+        report_.vram_total = total_b;
+        return;
+    }
 
     // ---- load once ----------------------------------------------------------------------------------------------------------
     kv_.resize(L);
