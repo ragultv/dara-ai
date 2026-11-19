@@ -2,6 +2,16 @@
 
 Work one milestone at a time. Each ends with its acceptance criteria met, checks passing, a commit, and a review. Do not start the next milestone first.
 
+## M-R: Migrate the existing Svelte app to React (do first)
+
+`app/` currently holds a Svelte implementation (milestones up to hardening). The stack decision is now React 19 + Zustand. Re-create `app/` in React: keep `src-tauri` (sidecar, capabilities, CSP), `mocks`, `tests`' fixtures and the Tailwind/token setup; port screens one by one in this order: shell and design-system components, Models/onboarding, Chat, Options, Monitor, Settings. Port behavior and tests, not code line by line. Delete the Svelte sources only once the React screen passes the same tests. Replace `localStorage` conversation storage with the database (below).
+Acceptance: every screen of 01 works in React against the mock and the real server; tests, lint, axe pass; memory measured and compared with the Svelte numbers in `app/PERF.md`.
+
+## M-DB: Database (with or right after M-R)
+
+Implement 08-database.md: `src-tauri/src/db.rs` (rusqlite bundled, schema from `docs/ui/db/schema.sql` embedded with `include_str!`, migrations, commands), the TypeScript wrappers in `app/src/lib/db/`, one-time import of any conversations left in `localStorage`, export and delete-all in Settings.
+Acceptance: Rust tests from 08 pass; conversations and settings survive a restart and an app update; delete-all leaves no rows and no attachment files.
+
 ## M0: Scaffold and the memory spike
 
 - Create `app/` with Tauri 2 + React 19 + Vite + TypeScript (strict) + Tailwind v4 + Zustand; ESLint, Prettier, Vitest, Playwright configured; `prebuild` copies `docs/ui/tokens.css`.

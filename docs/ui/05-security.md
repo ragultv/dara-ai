@@ -43,7 +43,7 @@ The app is a local program that talks to a local server which runs the user's mo
 ## Data and privacy
 
 - Everything stays on the machine. No analytics, crash reporting or update pings without an explicit, off-by-default setting that says what is sent.
-- Conversations and images are stored in the app data folder, readable only by the user (default Windows ACLs on `%LOCALAPPDATA%`). "Delete all" removes them for real (files and database), with a confirm.
+- Conversations, settings and images are stored in the SQLite database and attachments folder under `%LOCALAPPDATA%\Dara` (see 08-database.md), readable only by the user (default Windows ACLs). The WebView has no SQL or file-system access; the Rust commands validate every input. "Delete all" removes them for real (files and database), with a confirm.
 - Do not log message content or the API key, even in development logs. Logs hold events and error codes only.
 - Copied diagnostics (Monitor, errors) contain versions, GPU name, VRAM, configuration and error text; paths are reduced to file names.
 
