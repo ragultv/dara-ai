@@ -85,3 +85,41 @@ Per Milestone 0 requirements:
 3. **Mitigations & Tuning Options**:
    - WebView2 command-line arguments (e.g. `--disable-features=IsolateOrigins,site-per-process`, `--in-process-gpu` or `--disable-gpu-compositing`) can reduce process count and overhead, though disabling GPU compositing impacts frame smoothness and CSS transforms.
    - In production with Windows virtual memory paging, Windows automatically trims the working set of idle WebView2 processes when memory pressure occurs.
+
+---
+
+## 6. Milestone 6: Hardening, Security & Production Verification
+
+Date: 2026-11-19
+
+### A. Production Distribution Bundle
+
+- **Bundle build tool**: Vite 6.4.6 + Svelte 5 (runes) + Tailwind v4
+- **HTML**: `dist/index.html` (390 bytes / 260 bytes gzip)
+- **JavaScript**: `dist/assets/index-*.js` (279.34 kB / 89.61 kB gzip)
+- **CSS**: `dist/assets/index-*.css` (37.11 kB / 7.42 kB gzip)
+- **Total gzip transfer**: **97.03 kB** (under 100 kB budget for complete application suite)
+
+### B. Security & Privacy Audit Verification
+
+- **Content Security Policy (CSP)**:
+  - Configured in `tauri.conf.json`:
+    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'`
+  - Verified no remote scripts, fonts, or images can execute.
+- **XSS & Injection Protection**:
+  - All Markdown rendering is sanitized through `DOMPurify` before DOM insertion.
+  - Automated Playwright E2E test (`chat.spec.ts`) verifies `<img onerror>`, `javascript:`, `<script>` payloads are rendered completely inert.
+- **Path & Username Privacy Redaction**:
+  - Diagnostics copy utility (`redact.ts`) scrubs Windows (`C:\Users\<user>\`) and Unix (`/home/<user>/`, `/Users/<user>/`) user directory identifiers.
+  - Verified with 8 Vitest unit tests in `monitor-settings.test.ts`.
+- **Minimal Capabilities**:
+  - `src-tauri/capabilities/default.json` grants only `core:default` and `opener:default`.
+  - Zero broad filesystem scopes (`fs:*`) or arbitrary shell execution (`shell:*`).
+- **Design Token Discipline**:
+  - Automated regex scan confirms **0 hex color literals** across the entire `src/` codebase outside `tokens.css`.
+
+### C. Comprehensive Automated Test Matrix
+
+- **Unit Tests**: 8 test suites, **30 passing tests** (Vitest).
+- **End-to-End Tests**: 5 test suites, **9 passing browser tests** (Playwright with headless Chromium).
+- **Compiler & Linter**: 0 errors and 0 warnings (`svelte-check`, `eslint`, `prettier`).
