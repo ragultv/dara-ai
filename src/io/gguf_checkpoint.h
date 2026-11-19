@@ -29,13 +29,25 @@ public:
     void read_into(const std::string& name, void* dst) const;                         // all bytes straight into dst (info(name).bytes long)
     std::vector<uint8_t> read_rows(const std::string& name, uint64_t row0, uint64_t nrows) const;  // whole rows
     std::vector<float> read_f32(const std::string& name) const;                       // tensor must be F32
+    // The tensor's bytes inside a read-only memory map of the whole file (mapped on first use, valid for the checkpoint's lifetime). Pages are
+    // file-backed: Windows reads them on first touch and can drop them under memory pressure, so large tables read row by row (embeddings) cost
+    // no private memory.
+    const uint8_t* map(const std::string& name) const;
     const GgufFile& header() const { return hdr_; }
+    // Frees the header's large string arrays (vocabulary, merges) once the tokenizer has been built from them.
+    void release_string_arrays();
+    ~GgufCheckpoint();
+    GgufCheckpoint(const GgufCheckpoint&) = delete;
+    GgufCheckpoint& operator=(const GgufCheckpoint&) = delete;
 
 private:
     GgufFile hdr_;
     std::map<std::string, Info> tensors_;
     mutable std::ifstream f_;
     std::string path_;
+    mutable void* map_file_ = nullptr;   // HANDLEs and the view (Windows)
+    mutable void* map_handle_ = nullptr;
+    mutable const uint8_t* map_base_ = nullptr;
 };
 
 // Bytes per row for a type with `cols` columns (cols must be a whole number of blocks); 0 if the type is unsupported.

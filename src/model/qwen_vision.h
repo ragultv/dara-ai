@@ -15,6 +15,7 @@
 #include "io/image.h"
 #include "model/device_buffer.h"
 #include "model/layer_cuda.h"
+#include "model/vision_stream.h"
 
 namespace dara::model {
 
@@ -31,23 +32,38 @@ struct QwenVisionInput {
 class QwenVision {
 public:
     // max_tokens: image token budget (merged tokens); images are resized to at most max_tokens * 32 * 32 pixels (and at least 64 tokens).
-    explicit QwenVision(const dara::io::GgufCheckpoint& mmproj, int max_tokens = 1024);
+    // stream_weights: 1 = the matrices are streamed from the (memory-mapped) mmproj file while an image is encoded, so the encoder keeps only a few MB in
+    // VRAM between images; 0 = all matrices resident (faster per image, 0.6-0.9 GB of VRAM); -1 = DARA_VISION_STREAM (default 1). The output is bit-identical.
+    // `mmproj` must outlive the encoder.
+    explicit QwenVision(const dara::io::GgufCheckpoint& mmproj, int max_tokens = 1024, int stream_weights = -1);
     QwenVisionInput preprocess(const dara::io::RgbImage& img) const;
     std::vector<float> encode(const QwenVisionInput& in);   // [tokens][out_dim], merged-grid row-major
     int out_dim() const { return out_dim_; }
     double last_seconds() const { return last_seconds_; }
+    bool streaming() const { return streamed_; }
+    // Device memory encode() allocates for an image of n_patches patches (activations, plus the weight-stream buffers when streaming), as exact as
+    // the allocator sees it (each buffer rounded up to 256 bytes); pinned host memory of the stream: WeightStream::host_bytes().
+    size_t scratch_bytes(int n_patches) const;
+    // VRAM the encoder keeps between images
+    size_t resident_bytes() const { return resident_bytes_; }
 
 private:
-    struct Lin { DeviceMatrix w; DevBuf<float> b; };
+    struct Lin { DeviceMatrix w; DevBuf<float> b; StreamRef s; };   // w: resident weights (not when streaming), s: the matrix in the file
     struct Block { Lin qkv, proj, fc1, fc2; DevBuf<float> ln1_w, ln1_b, ln2_w, ln2_b; };
-    void linear(const Lin& l, const float* x, size_t ldx, float* y, int n);
+    // y[:, 0..r1-r0) = x . W[r0..r1)^T (+ bias[r0..r1)) for n tokens; y has row stride ldy. Streams the chunks of the rows when `ws` is set.
+    void linear_rows(WeightStream* ws, const Lin& l, size_t r0, size_t r1, const float* x, size_t ldx, float* y, size_t ldy, int n);
+    void build_plan();
     int hidden_ = 1024, heads_ = 16, hd_ = 64, inter_ = 4096, inter_pad_ = 4096, depth_ = 24, patch_ = 16, merge_ = 2, temporal_ = 2, out_dim_ = 2560;
     int grid_side_ = 48, max_tokens_ = 1024;
     float eps_ = 1e-6f;
     Lin patch_lin_, mm0_, mm2_;
     DevBuf<float> post_w_, post_b_;
-    std::vector<float> pos_table_;   // [grid_side^2][hidden]
+    const uint8_t* pos_map_ = nullptr;   // [grid_side^2][hidden] in the mapped file (F16 or F32): rows are read as needed, no private copy
+    uint32_t pos_type_ = 0;
     std::vector<Block> blocks_;
+    bool streamed_ = false;
+    std::vector<ChunkReq> plan_;         // every chunk of one image, in compute order (streaming)
+    size_t resident_bytes_ = 0;
     double last_seconds_ = 0;
 };
 

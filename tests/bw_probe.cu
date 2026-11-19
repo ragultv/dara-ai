@@ -67,7 +67,7 @@ __global__ void __launch_bounds__(256) read_q4k_pattern(const uint8_t* __restric
 }
 
 template <int UNROLL>
-void run_q4k_pattern(const void* buf, size_t bytes, int nblk) {
+float run_q4k_pattern(const void* buf, size_t bytes, int nblk) {
     const size_t row_bytes = static_cast<size_t>(nblk) * 144, rows = bytes / row_bytes;
     unsigned* out; cudaMalloc(&out, 4);
     cudaEvent_t a, b; cudaEventCreate(&a); cudaEventCreate(&b);
@@ -81,6 +81,7 @@ void run_q4k_pattern(const void* buf, size_t bytes, int nblk) {
     }
     std::printf("  Q4_K load pattern, %2d blocks/row, unroll %d: %6.1f GB/s\n", nblk, UNROLL, best);
     cudaFree(out);
+    return best;
 }
 
 int main() {
@@ -93,17 +94,22 @@ int main() {
     int mem_khz = 0, bus_bits = 0;
     cudaDeviceGetAttribute(&mem_khz, cudaDevAttrMemoryClockRate, 0);
     cudaDeviceGetAttribute(&bus_bits, cudaDevAttrGlobalMemoryBusWidth, 0);
-    std::printf("%s: %d SMs, memory %d MHz x %d-bit (theoretical peak about %.0f GB/s)\n", prop.name, prop.multiProcessorCount, mem_khz / 1000, bus_bits,
-                2.0 * mem_khz * 1e3 * bus_bits / 8 / 1e9);
+    const double peak = 2.0 * mem_khz * 1e3 * bus_bits / 8 / 1e9;
+    std::printf("%s: %d SMs, memory %d MHz x %d-bit (theoretical peak about %.0f GB/s)\n", prop.name, prop.multiProcessorCount, mem_khz / 1000, bus_bits, peak);
+    float best_stream = 0, best_q4k = 0;
     std::printf("streaming a 512 MiB buffer (far larger than L2), one warp per row:\n");
     for (size_t row : {1440ul, 11520ul}) {   // 10 and 80 Q4_K blocks per row (2560 / 20480 columns)
         run<unsigned, 1>(buf, bytes, row, "4 B per lane, no unroll");
         run<unsigned, 4>(buf, bytes, row, "4 B per lane, unroll 4");
         run<uint2, 4>(buf, bytes, row, "8 B per lane, unroll 4");
         run<uint4, 1>(buf, bytes, row, "16 B per lane, no unroll");
-        run<uint4, 4>(buf, bytes, row, "16 B per lane, unroll 4");
+        best_stream = std::max(best_stream, run<uint4, 4>(buf, bytes, row, "16 B per lane, unroll 4"));
     }
     std::printf("the wide-load Q4_K kernel's exact weight-load pattern, no arithmetic:\n");
-    for (int nblk : {10, 36}) { run_q4k_pattern<1>(buf, bytes, nblk); run_q4k_pattern<2>(buf, bytes, nblk); run_q4k_pattern<4>(buf, bytes, nblk); }
+    for (int nblk : {10, 36})
+        best_q4k = std::max({best_q4k, run_q4k_pattern<1>(buf, bytes, nblk), run_q4k_pattern<2>(buf, bytes, nblk), run_q4k_pattern<4>(buf, bytes, nblk)});
+    // one line for scripts (bench/decode_quick.py)
+    std::printf("PROBE gpu=\"%s\" sm=%d%d theoretical_gbs=%.1f stream_gbs=%.1f q4k_pattern_gbs=%.1f\n", prop.name, prop.major, prop.minor, peak, best_stream, best_q4k);
+    cudaFree(buf);
     return 0;
 }

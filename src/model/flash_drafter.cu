@@ -135,6 +135,14 @@ FlashDrafter::FlashDrafter(const std::string& path, const dara::io::GgufCheckpoi
     for (size_t i = 0; i < ms.size(); ++i) std::memcpy(layer_.host.data() + layer_.slots[i].offset, ms[i].bytes.data(), ms[i].bytes.size());
     make_resident(layer_);
     state_ = make_gpu_layer_state(w, kv_capacity, KvFormat::Q8);   // INT8 K/V: 3.6x less VRAM per context position than FP32 (drafts only steer speed)
+    // The drafter attends to the last kFlashWindow positions only: its cost per token stays constant however long the conversation grows (full
+    // attention made Flash slower than plain decoding at long contexts), and the window matches the short sequences it was trained on. The target
+    // model still attends to everything, so outputs are unchanged; only which tokens get drafted can differ. DARA_FLASH_WINDOW=0: full attention.
+    {
+        int win = 2048;
+        if (const char* e = std::getenv("DARA_FLASH_WINDOW")) win = std::atoi(e);
+        state_.window = win > 0 ? win : 0;
+    }
     fc_ = upload_quant_raw(rq, requant(fc, static_cast<size_t>(H_), 2 * static_cast<size_t>(H_), rq).data(), static_cast<size_t>(H_), 2 * static_cast<size_t>(H_));
 
     // reduced-vocabulary head: the target's own output-head rows (raw GGUF blocks, so the int8 kernels apply)

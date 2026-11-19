@@ -12,6 +12,7 @@
 //                a double-buffered staging arena, the copy of the next layer overlapping the compute of the current one.
 // If the configured placement cannot fit, the constructor throws with the plan and the numbers instead of failing later.
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -46,7 +47,7 @@ struct QwenConfig {
 struct ResidencyOptions {
     int max_chunk_tokens = 64;      // prefill is processed in chunks of at most this many tokens (bounds the workspace)
     int force_resident_layers = -1; // -1: let the planner decide; otherwise exactly this many layers (prefix) live in VRAM
-    size_t safety_bytes = 0;        // extra VRAM kept free; 0 = max(256 MiB, 1/16 of total)
+    size_t safety_bytes = 0;        // extra VRAM kept free; 0 = the default (Qwen: max(128 MiB, 1/32 of total); Gemma: max(256 MiB, 1/16 of total))
     KvFormat kv_format = KvFormat::F32;  // KV cache format of the attention layers (F32 reference or 4-bit TurboQuant)
     // Memory the caller will allocate on the GPU after the model (e.g. the Flash drafter): a fixed part and a part per context
     // position. Counted by the placement planner, so the model leaves room for it.
@@ -55,6 +56,16 @@ struct ResidencyOptions {
     // and the output head in VRAM. A model that cannot be fully VRAM-resident even with a short context gets auto_partial_context
     // and the planner places what fits (more context would push more layers to the CPU).
     size_t auto_partial_context = 32768;
+    // Minimum auto context: when keeping everything in VRAM leaves less than this, the context is raised to it and the planner places what fits
+    // (the 4B on 4 GB: 32K with the output head in host RAM instead of 21.5K fully resident). 0: always the fully-resident size (dara --min-context 0).
+    size_t auto_min_context = 32768;
+    // Dry run: the constructor sizes everything and fills placement() / kv_capacity() exactly as a real load would, then returns before allocating
+    // anything on the GPU (the object is only good for those queries). assume_free_bytes: treat this much VRAM as free instead of asking the driver
+    // (what is free once this process's own model is unloaded); 0 = ask.
+    bool plan_only = false;
+    size_t assume_free_bytes = 0;
+    // Load progress: called as (stage, done, total) while the constructor works (e.g. "loading layers", 12, 32). Optional.
+    std::function<void(const char*, int, int)> progress;
 };
 
 struct PlacementReport {
@@ -65,6 +76,7 @@ struct PlacementReport {
     size_t staging_bytes = 0, state_bytes = 0, workspace_bytes = 0;
     size_t vram_free_at_start = 0, vram_total = 0;
     bool hosted_pinned = true;        // false if any hosted layer fell back to pageable memory
+    bool head_on_cpu = false;         // the output head stays in host RAM (its VRAM went to layers / context)
 };
 
 struct RunStats {
@@ -124,6 +136,31 @@ public:
     };
     Checkpoint checkpoint() const;           // copies DeltaNet states, records KV lengths
     void restore(const Checkpoint& c);       // rewinds the whole model to the checkpoint
+    // The same, kept in VRAM (device-to-device copies of the DeltaNet states; buffers reused between saves): the prompt cache of `dara serve`
+    // saves one after each prompt and resumes from it when the next request extends that prompt. No host RAM.
+    struct DeviceCheckpoint {
+        std::vector<DevBuf<float>> conv, S;
+        std::vector<size_t> layer_pos;
+        size_t pos = 0;
+        bool valid = false;
+    };
+    void save_device(DeviceCheckpoint& c);
+    void restore_device(const DeviceCheckpoint& c);
+    void reset();   // back to an empty sequence (position 0, zero recurrent states, no images)
+    // Device ranges of the K/V caches holding positions >= from (unused while `from` positions are held): scratch to borrow (DeviceArena).
+    void kv_tail_regions(size_t from, std::vector<DeviceArena::Region>& out) {
+        for (GpuLayerState& s : states_)
+            if (s.kind != LayerKind::DeltaNet) dara::model::kv_tail_regions({&s.Kc, &s.Vc, &s.Kq, &s.Vq, &s.Kn, &s.Vn, &s.Kr, &s.Krs}, s.kv_format, s.kv_cap, from, out);
+    }
+    // VRAM of one DeviceCheckpoint (the DeltaNet states), for callers that reserve it before the model sizes its context
+    static size_t device_checkpoint_bytes(const QwenConfig& cfg) {
+        size_t n = 0;
+        for (LayerKind k : cfg.kinds)
+            if (k == LayerKind::DeltaNet)
+                n += (static_cast<size_t>(cfg.k_heads) * cfg.k_dim * 2 + static_cast<size_t>(cfg.v_heads) * cfg.v_dim) * (cfg.conv_kernel - 1) +
+                     static_cast<size_t>(cfg.v_heads) * cfg.k_dim * cfg.v_dim;
+        return n * sizeof(float);
+    }
     // Fast in-VRAM variant for speculative decoding: snapshot() copies DeltaNet states device-to-device (no host traffic) and
     // records KV lengths; rollback() returns the model to exactly that point. One snapshot is kept; allocated on first use.
     // The forward() right after snapshot() (at most kMaxSpecTokens tokens) also records each DeltaNet layer's recurrence inputs, so

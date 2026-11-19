@@ -177,11 +177,12 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     report_.gpu = require_supported_gpu();
     size_t free_b = 0, total_b = 0;
     cuda_check(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+    if (opt.assume_free_bytes) free_b = std::min(opt.assume_free_bytes, total_b);
     // Longest context: the model's native one, except where a kernel keeps one score per position in shared memory (the TurboQuant
     // and FP32 reference attention kernels). The default split-KV / prefill attention path has no such bound.
     size_t max_ctx = cfg_.context_length ? cfg_.context_length : static_cast<size_t>(kGemmaMaxContext);
-    if (opt.kv_format == KvFormat::TQ4) max_ctx = std::min(max_ctx, static_cast<size_t>(kTqMaxPositions));
-    else if (!kv_q8_values(opt.kv_format) && attention_reference_mode()) max_ctx = std::min(max_ctx, static_cast<size_t>(kGemmaMaxContext));
+    if (opt.kv_format == KvFormat::TQ4 && attention_reference_mode()) max_ctx = std::min(max_ctx, static_cast<size_t>(kTqMaxPositions));   // split-KV: no bound
+    else if (opt.kv_format == KvFormat::F32 && attention_reference_mode()) max_ctx = std::min(max_ctx, static_cast<size_t>(kGemmaMaxContext));
     if (kv_capacity > max_ctx) throw std::invalid_argument("kv_capacity " + std::to_string(kv_capacity) + " is above this configuration's maximum context " + std::to_string(max_ctx));
     cuda_check(int8_init(), "int8_init");
     cuda_check(tq_init(), "tq_init");  // codebook (also read by the split-KV TurboQuant kernels)
@@ -198,6 +199,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
         mat_bytes[l] = off;
         max_layer = std::max(max_layer, off);
         if (cfg_.owns_kv(l)) kv_per_token += 2 * static_cast<size_t>(cfg_.kv_heads) * kv_bytes_per_head_vector(opt.kv_format, cfg_.head_dim(l));
+        if (cfg_.owns_kv(l) && opt.kv_format == KvFormat::Q4) small_bytes += kivi_ring_bytes(static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim(l));
         // norms, rope table, two small BF16 matrices
         small_bytes += (5 * static_cast<size_t>(cfg_.hidden) + 2 * cfg_.head_dim(l) + cfg_.head_dim(l) / 2) * sizeof(float) +
                        2 * static_cast<size_t>(cfg_.hidden) * cfg_.per_layer_dim * 2;
@@ -211,9 +213,10 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     const size_t workspace = C * (10 * static_cast<size_t>(cfg_.hidden) + 3 * static_cast<size_t>(max_inter) + 3 * static_cast<size_t>(max_qw) +
                                   3 * pli_floats_per_token + 4 * static_cast<size_t>(cfg_.per_layer_dim)) * sizeof(float) + 32 * kMiB +
                                  static_cast<size_t>(kGemmaMaxContext) * sizeof(float) * 0;
-    const size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(256 * kMiB, total_b / 16);
+    size_t safety = opt.safety_bytes ? opt.safety_bytes : std::max<size_t>(256 * kMiB, total_b / 16);
+    if (const char* e = std::getenv("DARA_VRAM_SAFETY_MB")) safety = static_cast<size_t>(std::atoll(e)) * kMiB;   // tuning / experiments (as the Qwen backend)
     const bool auto_ctx = kv_capacity == 0;
-    const AttnFmt afmt = opt.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
+    const AttnFmt afmt = attn_fmt(opt.kv_format);
     // VRAM that grows with the context outside the K/V caches: the caller's per-position extra (drafter K/V) and, in auto mode, the
     // scratch the pool grows into at long contexts (prefill attention scores of the global layers, split-KV partials).
     auto ctx_extra = [&](size_t ctx) -> size_t {
@@ -242,9 +245,11 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
     const auto sys = dara::core::query_system_memory();
     const size_t ram_margin = 1536 * kMiB;
     // The per-layer embedding table lives in host RAM when it fits next to the margin; otherwise its rows are read from the file.
-    const bool table_in_ram = sys.available_bytes > ram_margin + pli_table_bytes + 2 * head_bytes;
+    // Embedding tables: rows read from the memory-mapped GGUF (file-backed, no private copy) unless DARA_EMBD_RAM=1 (old full copies in host RAM).
+    static const bool embd_ram = [] { const char* e = std::getenv("DARA_EMBD_RAM"); return e && e[0] == '1'; }();
+    const bool table_in_ram = embd_ram && sys.available_bytes > ram_margin + pli_table_bytes + 2 * head_bytes;
     const size_t ram_for_layers_base = sys.available_bytes > ram_margin ? sys.available_bytes - ram_margin : 0;
-    const size_t reserved_host = (table_in_ram ? pli_table_bytes : 0) + head_bytes;  // token_embd copy for row gathers
+    const size_t reserved_host = embd_ram ? (table_in_ram ? pli_table_bytes : 0) + head_bytes : 0;  // copies for row gathers (none when mapped)
     auto make_plan = [&](size_t ctx, size_t& staging_out) {
         dara::core::PlacementRequest req;
         req.model = man;
@@ -280,6 +285,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
             size_t a = lo / step, b = max_ctx / step;
             while (a < b) { const size_t m = (a + b + 1) / 2; if (fully_resident(m * step)) a = m; else b = m - 1; }
             kv_capacity = std::max(lo, a * step);
+            if (kv_capacity < opt.auto_min_context) kv_capacity = std::min(max_ctx, opt.auto_min_context);   // minimum context over full residency
         } else {
             kv_capacity = std::min(max_ctx, opt.auto_partial_context);
         }
@@ -303,26 +309,23 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
         throw std::runtime_error(why);
     }
     resident_ = resident;
+    if (opt.plan_only) {   // dry run: the placement a real load would make (see ResidencyOptions::plan_only)
+        report_.resident_layers = resident_;
+        report_.hosted_layers = L - resident_;
+        report_.head_on_cpu = false;
+        report_.head_bytes = head_bytes;
+        report_.state_bytes = kv_bytes;
+        report_.workspace_bytes = workspace;
+        report_.vram_free_at_start = free_b;
+        report_.vram_total = total_b;
+        return;
+    }
 
     // ---- load once ----------------------------------------------------------------------------------------------------------
     kv_.resize(L);
     for (int l = 0; l < L; ++l)
         if (cfg_.owns_kv(l)) {
-            const size_t w = static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim(l);
-            if (opt.kv_format == KvFormat::K16V8) {
-                kv_[l].Kq = DevBuf<uint8_t>(kv_capacity * w * 2); kv_[l].Vq = DevBuf<uint8_t>(kv_capacity * w);
-                kv_[l].Vn = DevBuf<float>(kv_capacity * w / 32);
-            } else if (opt.kv_format == KvFormat::Q8) {
-                kv_[l].Kq = DevBuf<uint8_t>(kv_capacity * w); kv_[l].Vq = DevBuf<uint8_t>(kv_capacity * w);
-                kv_[l].Kn = DevBuf<float>(kv_capacity * w / 32); kv_[l].Vn = DevBuf<float>(kv_capacity * w / 32);
-            } else if (opt.kv_format == KvFormat::TQ4) {
-                const size_t codes = kv_capacity * static_cast<size_t>(cfg_.kv_heads) * (cfg_.head_dim(l) / 2), norms = kv_capacity * static_cast<size_t>(cfg_.kv_heads);
-                kv_[l].Kq = DevBuf<uint8_t>(codes); kv_[l].Vq = DevBuf<uint8_t>(codes);
-                kv_[l].Kn = DevBuf<float>(norms); kv_[l].Vn = DevBuf<float>(norms);
-            } else {
-                kv_[l].K = DevBuf<float>(kv_capacity * w);
-                kv_[l].V = DevBuf<float>(kv_capacity * w);
-            }
+            alloc_kv(kv_[l].bufs(), opt.kv_format, kv_capacity, cfg_.kv_heads, cfg_.head_dim(l));
         }
     head_ = upload_quant_raw(qtype_of(g.info("token_embd.weight").type, "token_embd.weight"), g.read("token_embd.weight").data(), static_cast<size_t>(cfg_.vocab), cfg_.hidden);
     const size_t PL = pli_floats_per_token;
@@ -374,6 +377,7 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
         p.matrix_bytes = off;
         p.host = HostBuffer(off);
         for (size_t i = 0; i < descs.size(); ++i) g.read_into(descs[i].tensor, p.host.data() + p.slots[i].offset);
+        if (opt.progress) opt.progress("loading layers", l, L);
         layers_.push_back(std::move(p));
         PackedLayer& pl = layers_.back();
         if (l < resident_) {
@@ -387,9 +391,11 @@ GemmaModel::GemmaModel(const dara::io::GgufCheckpoint& g, size_t kv_capacity, co
 
     // host-side embedding tables, read once now (cold load), not on the first token
     embd_type_ = g.info("token_embd.weight").type;
-    embd_ = g.read("token_embd.weight");
+    if (embd_ram) { embd_ = g.read("token_embd.weight"); embd_p_ = embd_.data(); }
+    else embd_p_ = g.map("token_embd.weight");
     pli_type_ = g.info("per_layer_token_embd.weight").type;
-    if (table_in_ram) pli_table_ = g.read("per_layer_token_embd.weight");
+    if (table_in_ram) { pli_table_ = g.read("per_layer_token_embd.weight"); pli_p_ = pli_table_.data(); }
+    else if (!embd_ram) pli_p_ = g.map("per_layer_token_embd.weight");
 
     report_.resident_layers = resident_;
     report_.hosted_layers = L - resident_;
@@ -458,7 +464,7 @@ void GemmaModel::reserve_pool() {
     pool_.get<float>(5, C * H); pool_.get<float>(6, C * max_inter); pool_.get<float>(7, C * max_inter); pool_.get<float>(8, C * H);
     pool_.get<float>(9, C * PD); pool_.get<float>(10, C * H); pool_.get<int64_t>(11, C);
     pool_.get<float>(12, C * max_kvw); pool_.get<float>(13, C * max_kvw);
-    pool_.get<float>(14, 8 * attn_splitkv_scratch_floats_per_token(opt_.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt_.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt_.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32, cfg_.heads, cfg_.head_dim_full, static_cast<int>(capacity_)));  // split-KV partials
+    pool_.get<float>(14, 8 * attn_splitkv_scratch_floats_per_token(attn_fmt(opt_.kv_format), cfg_.heads, cfg_.head_dim_full, static_cast<int>(capacity_)));  // split-KV partials
 }
 
 void GemmaModel::release_raw() {
@@ -476,6 +482,9 @@ GemmaModel::~GemmaModel() { release_raw(); }
 
 void GemmaModel::rewind(size_t pos) {
     if (pos > pos_) throw std::invalid_argument("cannot rewind forward");
+    if (opt_.kv_format == KvFormat::Q4)
+        for (int l = 0; l < cfg_.layers; ++l)
+            if (cfg_.owns_kv(l)) kv_rewound(opt_.kv_format, kv_[l].bufs(), 0, pos_, pos, graph_.stream());
     pos_ = pos;
 }
 
@@ -582,7 +591,14 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
         cuda_check(rmsnorm_cuda(k, s.k_norm.p, n * kvh, hd, c.eps, k, st), "k_norm");
         cuda_check(rope_cuda(k, n, kvh, hd, hd, dpos, s.inv_freq.p, st), "rope k");
         cuda_check(rmsnorm_cuda(v, ones_.p, n * kvh, hd, c.eps, v, st), "v_norm");  // parameter-free RMSNorm
-        if (kv_q8_values(opt_.kv_format)) {
+        if (kv_v4_values(opt_.kv_format)) {   // 4-bit values; keys Q8 (K8V4) or Q8 ring -> 4-bit groups (Q4)
+            if (opt_.kv_format == KvFormat::K8V4) cuda_check(q8kv_append_cuda(k, dpos, n, kvh, hd, kv_[l].Kq.p, kv_[l].Kn.p, st), "q8 append K");
+            else {
+                cuda_check(kivi_ring_append_cuda(k, dpos, n, kvh, hd, kv_[l].Kr.p, kv_[l].Krs.p, st), "q4 ring append K");
+                cuda_check(kivi_quantize_cuda(dpos, n, static_cast<int>(kvw), kv_[l].Kr.p, kv_[l].Krs.p, kv_[l].Kq.p, kv_[l].Kn.p, st), "q4 quantize K");
+            }
+            cuda_check(v4_append_cuda(v, dpos, n, kvh, hd, kv_[l].Vq.p, kv_[l].Vn.p, st), "v4 append V");
+        } else if (kv_q8_values(opt_.kv_format)) {
             if (opt_.kv_format == KvFormat::K16V8) cuda_check(f16kv_append_cuda(k, dpos, n, kvh, hd, kv_[l].Kq.p, st), "f16 append K");
             else cuda_check(q8kv_append_cuda(k, dpos, n, kvh, hd, kv_[l].Kq.p, kv_[l].Kn.p, st), "q8 append K");
             cuda_check(q8kv_append_cuda(v, dpos, n, kvh, hd, kv_[l].Vq.p, kv_[l].Vn.p, st), "q8 append V");
@@ -595,7 +611,7 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
         }
         PM("kv append / v norm");
     }
-    if (attention_reference_mode() && !kv_q8_values(opt_.kv_format)) {   // (INT8 KV has no reference kernel: always split-KV)
+    if (attention_reference_mode() && (opt_.kv_format == KvFormat::F32 || opt_.kv_format == KvFormat::TQ4)) {   // (quantized formats have no reference kernel)
         if (opt_.kv_format == KvFormat::TQ4)
             cuda_check(tq_attention_cuda(q, nullptr, kv_[src].Kq.p, kv_[src].Kn.p, kv_[src].Vq.p, kv_[src].Vn.p, dpos, n, heads, kvh, hd, win, 1.0f, smem_positions, att, st), "tq attention");
         else
@@ -603,10 +619,17 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
     } else {
         // positions any token can attend to: window-bounded for sliding layers; fixed by the capacity for the decode step (a graph cannot change the grid)
         const int maxpos = use_dev_pos ? (win > 0 ? std::min(win, cap) : cap) : (win > 0 ? std::min(win, static_cast<int>(pos0) + n) : static_cast<int>(pos0) + n);
-        const AttnFmt afmt = opt_.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : opt_.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : opt_.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
+        const AttnFmt afmt = attn_fmt(opt_.kv_format);
         const size_t per = attn_splitkv_scratch_floats_per_token(afmt, heads, hd, maxpos);
         // decode (n == 1) uses the slot sized at construction; prefill batches up to 64 tokens per launch (the slot grows outside any graph capture)
         const size_t floats = per * static_cast<size_t>(std::min(n, 8));
+        KvAux aux;
+        if (afmt == AttnFmt::Q4) {
+            aux.ring = reinterpret_cast<const int8_t*>(kv_[src].Kr.p);
+            aux.ring_sc = kv_[src].Krs.p;
+            aux.pend = dpos + (n - 1);
+            aux.kv_width = kvh * hd;
+        }
         if (afmt != AttnFmt::TQ4 && n >= kPrefillAttnMinTokens && !use_dev_pos) {
             // prefill chunk on an FP32 or INT8 cache: GEMM -> masked softmax -> GEMM (K/V tiles reused across 64 query rows)
             const size_t pf = attn_prefill_scratch_floats(n, static_cast<int>(pos0), win, heads, kvh);
@@ -614,12 +637,12 @@ void GemmaModel::run_layer(int l, int T, int c0, int n, const float* x, float* o
             const bool q8 = afmt != AttnFmt::F32;   // K/V in Kq/Vq (Q8 or K16V8)
             cuda_check(attn_prefill_cuda(afmt, q, nullptr, q8 ? static_cast<const void*>(kv_[src].Kq.p) : kv_[src].K.p, q8 ? kv_[src].Kn.p : nullptr,
                                          q8 ? static_cast<const void*>(kv_[src].Vq.p) : kv_[src].V.p, q8 ? kv_[src].Vn.p : nullptr, n, static_cast<int>(pos0), heads, kvh,
-                                         hd, win, 1.0f, ps, pf, att, st),
+                                         hd, win, 1.0f, ps, pf, att, st, aux),
                        "prefill attention");
         } else {
         float* scr = pool_.get<float>(14, floats);
         cuda_check(afmt != AttnFmt::F32
-                       ? attn_splitkv_cuda(afmt, q, nullptr, kv_[src].Kq.p, kv_[src].Kn.p, kv_[src].Vq.p, kv_[src].Vn.p, dpos, n, heads, kvh, hd, win, 1.0f, maxpos, scr, floats, att, st)
+                       ? attn_splitkv_cuda(afmt, q, nullptr, kv_[src].Kq.p, kv_[src].Kn.p, kv_[src].Vq.p, kv_[src].Vn.p, dpos, n, heads, kvh, hd, win, 1.0f, maxpos, scr, floats, att, st, aux)
                        : attn_splitkv_cuda(afmt, q, nullptr, kv_[src].K.p, nullptr, kv_[src].V.p, nullptr, dpos, n, heads, kvh, hd, win, 1.0f, maxpos, scr, floats, att, st),
                    "split-KV attention");
         }
@@ -712,7 +735,7 @@ std::vector<float> GemmaModel::embed_row_raw(int32_t token) const {
     const auto& ef = dara::kernels::quant_format(qtype_of(embd_type_, "token_embd.weight"));
     const size_t eb = static_cast<size_t>(cfg_.hidden) / ef.block_weights;
     std::vector<float> e(static_cast<size_t>(cfg_.hidden));
-    ef.dequant_f32(embd_.data() + static_cast<size_t>(token) * eb * ef.block_bytes, eb, e.data());
+    ef.dequant_f32(embd_p_ + static_cast<size_t>(token) * eb * ef.block_bytes, eb, e.data());
     return e;
 }
 
@@ -757,7 +780,7 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
         // Prompt chunks: tokens are independent, so the dequantisation (~8960 + 1536 values per token from host RAM) is split across CPU threads. Each token's
         // rows are computed exactly as in the serial loop, so the result is identical. The streamed-table path (read_rows) stays serial.
         const unsigned hw = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
-        if (!pli_table_.empty() && T >= 32 && hw > 1) {
+        if (pli_p_ && T >= 32 && hw > 1) {
             std::vector<std::thread> pool;
             const int per = (T + static_cast<int>(hw) - 1) / static_cast<int>(hw);
             for (unsigned w = 0; w < hw; ++w) {
@@ -766,10 +789,10 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
                 pool.emplace_back([&, a, b] {
                     for (int t = a; t < b; ++t) {
                         float* e = &emb[static_cast<size_t>(t) * H];
-                        ef.dequant_f32(embd_.data() + static_cast<size_t>(tokens[t]) * eb * ef.block_bytes, eb, e);
+                        ef.dequant_f32(embd_p_ + static_cast<size_t>(tokens[t]) * eb * ef.block_bytes, eb, e);
                         for (int i = 0; i < H; ++i) e[i] *= es;
                         float* pt = &pli_tok[static_cast<size_t>(t) * PL];
-                        pf.dequant_f32(pli_table_.data() + static_cast<size_t>(tokens[t]) * pb * pf.block_bytes, pb, pt);
+                        pf.dequant_f32(pli_p_ + static_cast<size_t>(tokens[t]) * pb * pf.block_bytes, pb, pt);
                         for (size_t i = 0; i < PL; ++i) pt[i] *= ps;
                     }
                 });
@@ -779,11 +802,11 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
         std::vector<uint8_t> row;
         for (int t = 0; t < T; ++t) {
             float* e = &emb[static_cast<size_t>(t) * H];
-            ef.dequant_f32(embd_.data() + static_cast<size_t>(tokens[t]) * eb * ef.block_bytes, eb, e);
+            ef.dequant_f32(embd_p_ + static_cast<size_t>(tokens[t]) * eb * ef.block_bytes, eb, e);
             for (int i = 0; i < H; ++i) e[i] *= es;
             float* pt = &pli_tok[static_cast<size_t>(t) * PL];
-            if (!pli_table_.empty()) {
-                pf.dequant_f32(pli_table_.data() + static_cast<size_t>(tokens[t]) * pb * pf.block_bytes, pb, pt);
+            if (pli_p_) {
+                pf.dequant_f32(pli_p_ + static_cast<size_t>(tokens[t]) * pb * pf.block_bytes, pb, pt);
             } else {
                 row = g_.read_rows("per_layer_token_embd.weight", static_cast<uint64_t>(tokens[t]), 1);
                 pf.dequant_f32(row.data(), pb, pt);

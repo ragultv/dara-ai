@@ -28,6 +28,8 @@ public:
     virtual DeviceMatrix load_output_head() const = 0;             // [vocab][hidden], uploaded by the caller's request
     // The output head's raw blocks in host RAM (CPU-decode placement keeps the head out of VRAM). Sets *qt to its quantisation.
     virtual std::vector<uint8_t> read_output_head(dara::kernels::QuantType* qt) const = 0;
+    // The same blocks inside a memory map of the model file (no private copy), or null when the weights are not file-backed.
+    virtual const uint8_t* map_output_head(dara::kernels::QuantType* qt, size_t* bytes) const { (void)qt; (void)bytes; return nullptr; }
 };
 
 class GgufWeights : public IModelWeights {
@@ -42,11 +44,13 @@ public:
     std::vector<float> final_norm_scale() const override;
     DeviceMatrix load_output_head() const override;
     std::vector<uint8_t> read_output_head(dara::kernels::QuantType* qt) const override;
+    const uint8_t* map_output_head(dara::kernels::QuantType* qt, size_t* bytes) const override;
 
 private:
     const dara::io::GgufCheckpoint& g_;
     const QwenConfig& cfg_;
-    mutable std::vector<uint8_t> embd_;      // token_embd, read once and kept in host RAM for row gathers
+    mutable std::vector<uint8_t> embd_;      // token_embd copy (only with DARA_EMBD_RAM=1)
+    mutable const uint8_t* embd_ptr_ = nullptr;   // rows: the memory-mapped GGUF (or embd_)
     mutable std::vector<float> final_norm_;
 };
 

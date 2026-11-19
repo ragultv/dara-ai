@@ -1,5 +1,6 @@
 #include "model/qwen_weights.h"
 
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -114,13 +115,18 @@ PackedLayer GgufWeights::load_layer_packed(int layer) const {
 }
 
 std::vector<float> GgufWeights::embed_row(int32_t token) const {
-    // The embedding table is read from disk once and kept in host RAM; gathering a row never touches the file again.
+    // Rows come straight from the memory-mapped GGUF (file-backed pages: no private copy of the 497 MB table; a row is read on first touch).
+    // DARA_EMBD_RAM=1 restores the old full copy in host RAM.
     const auto& in = g_.info("token_embd.weight");
-    if (embd_.empty()) embd_ = g_.read("token_embd.weight");
+    static const bool ram = [] { const char* e = std::getenv("DARA_EMBD_RAM"); return e && e[0] == '1'; }();
+    if (!embd_ptr_) {
+        if (ram) { embd_ = g_.read("token_embd.weight"); embd_ptr_ = embd_.data(); }
+        else embd_ptr_ = g_.map("token_embd.weight");
+    }
     const auto& f = dara::kernels::quant_format(gguf_qtype(in.type, "token_embd.weight"));
     const size_t blocks = in.cols() / f.block_weights;
     std::vector<float> out(in.cols());
-    f.dequant_f32(embd_.data() + static_cast<size_t>(token) * blocks * f.block_bytes, blocks, out.data());
+    f.dequant_f32(embd_ptr_ + static_cast<size_t>(token) * blocks * f.block_bytes, blocks, out.data());
     return out;
 }
 
@@ -146,6 +152,15 @@ std::vector<uint8_t> GgufWeights::read_output_head(dara::kernels::QuantType* qt)
     if (in.cols() != static_cast<uint64_t>(cfg_.hidden) || in.rows() != static_cast<uint64_t>(cfg_.vocab)) throw std::runtime_error("unexpected shape for " + name);
     if (qt) *qt = gguf_qtype(in.type, name);
     return g_.read(name);
+}
+
+const uint8_t* GgufWeights::map_output_head(dara::kernels::QuantType* qt, size_t* bytes) const {
+    const std::string name = cfg_.tied_embeddings ? "token_embd.weight" : "output.weight";
+    const auto& in = g_.info(name);
+    if (in.cols() != static_cast<uint64_t>(cfg_.hidden) || in.rows() != static_cast<uint64_t>(cfg_.vocab)) throw std::runtime_error("unexpected shape for " + name);
+    if (qt) *qt = gguf_qtype(in.type, name);
+    if (bytes) *bytes = static_cast<size_t>(in.bytes);
+    return g_.map(name);
 }
 
 }  // namespace dara::model

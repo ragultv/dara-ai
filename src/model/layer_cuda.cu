@@ -50,8 +50,35 @@ DeviceMatrix upload_quant_raw(dara::kernels::QuantType t, const void* blocks, si
     return m;
 }
 
+DeviceMatrix upload_q6k_planar(const void* blocks, size_t rows, size_t cols) {
+    const auto& f = dara::kernels::quant_format(dara::kernels::QuantType::Q6_K);
+    if (cols % f.block_weights != 0) throw std::invalid_argument("quantized row is not a whole number of blocks");
+    const size_t nblk = cols / f.block_weights;
+    std::vector<uint8_t> planar(rows * nblk * f.block_bytes);
+    dara::kernels::repack_q6k_planar(static_cast<const uint8_t*>(blocks), rows, nblk, planar.data());
+    DeviceMatrix m = make_matrix(planar.data(), planar.size(), rows, cols, nblk);
+    m.quantized = true;
+    m.qtype = dara::kernels::QuantType::Q6_K;
+    m.q6_planar = true;
+    return m;
+}
+
+DeviceMatrix upload_f16_raw(const uint16_t* bits, size_t rows, size_t cols) {
+    DeviceMatrix m = make_matrix(bits, rows * cols * sizeof(uint16_t), rows, cols, cols);
+    m.f16 = true;
+    return m;
+}
+
+DeviceMatrix upload_f16_matrix(const std::vector<float>& host, size_t rows, size_t cols) {
+    if (host.size() != rows * cols) throw std::invalid_argument("upload_f16_matrix: size mismatch");
+    std::vector<uint16_t> bits(host.size());
+    for (size_t i = 0; i < host.size(); ++i) bits[i] = dara::kernels::float_to_half(host[i]);
+    return upload_f16_raw(bits.data(), rows, cols);
+}
+
 int matvec_cuda(const DeviceMatrix& m, const float* d_x, float* d_y, void* stream) {
     if (!m.data) return static_cast<int>(cudaErrorInvalidValue);
+    if (m.q6_planar || m.f16) return matvec_multi_cuda(m, d_x, m.cols, d_y, m.rows, 1, stream);
     if (m.quantized) return dara::kernels::gemv_quant_cuda(m.qtype, m.data.get(), m.ld, d_x, d_y, m.rows, m.cols, stream);
     return dara::kernels::gemv_cuda(dara::kernels::WeightType::BF16, m.data.get(), m.ld, d_x, d_y, m.rows, m.cols, stream);
 }
@@ -121,6 +148,22 @@ static int int8_gemm(const DeviceMatrix& m, const float* d_x, size_t ldx, float*
 
 int matvec_multi_cuda(const DeviceMatrix& m, const float* d_x, size_t ldx, float* d_y, size_t ldy, int nt, void* stream) {
     if (!m.data) return static_cast<int>(cudaErrorInvalidValue);
+    if (m.f16) return dara::kernels::gemm_f16_cuda(m.data.get(), m.ld, d_x, ldx, d_y, ldy, m.rows, m.cols, nt, stream);
+    if (m.q6_planar) {   // planar Q6_K (output head): one vector with int8 activations; several (verification) with FP32 activations
+        static const bool f32_multi = [] { const char* e = std::getenv("DARA_Q6P_F32_MULTI"); return e && e[0] == '1'; }();   // A/B switch
+        if (nt > 1 && f32_multi && ldx % 4 == 0)
+            return dara::kernels::gemv_q6kp_f32_cuda(m.data.get(), m.rows, m.cols, d_x, ldx, nt, d_y, ldy, stream);
+        if (!g_q8_scratch) return static_cast<int>(cudaErrorInvalidValue);
+        for (int t0 = 0; t0 < nt; t0 += 8) {
+            const int n = std::min(8, nt - t0);
+            if (dara::kernels::q8act_bytes(m.cols, n) > kQ8ScratchBytes) return static_cast<int>(cudaErrorInvalidValue);
+            int e = dara::kernels::quantize_activations_cuda(d_x + static_cast<size_t>(t0) * ldx, ldx, m.cols, n, g_q8_scratch, stream);
+            g_share_cols = 0;   // the shared-input scratch now holds these vectors
+            if (!e) e = dara::kernels::gemv_q6kp_q8_cuda(m.data.get(), m.rows, m.cols, g_q8_scratch, n, d_y + static_cast<size_t>(t0) * ldy, ldy, stream);
+            if (e) return e;
+        }
+        return 0;
+    }
     if (m.quantized) {
         // Q6_K has an int8 kernel too, but on its 2-byte-aligned blocks it has not yet measured faster than the FP32 kernel: DARA_INT8_Q6=1 opts in.
         static const bool q6 = [] { const char* e = std::getenv("DARA_INT8_Q6"); return e && e[0] == '1'; }();
@@ -225,6 +268,8 @@ struct LayerProf {
     LayerProf() { const char* e = std::getenv("DARA_LAYER_PROF"); on = e && (e[0] == '1' || e[0] == '2'); decode_only = e && e[0] == '2'; }
     void mark(const char* l, void* stream, int T) {
         if (!on || (decode_only && T != 1)) return;
+        cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;   // no event records inside a graph capture (that would fail the capture)
+        if (cudaStreamIsCapturing(static_cast<cudaStream_t>(stream), &cs) != cudaSuccess || cs != cudaStreamCaptureStatusNone) return;
         if (used >= ev.size()) { cudaEvent_t e; cudaEventCreate(&e); ev.push_back(e); }
         cudaEventRecord(ev[used], static_cast<cudaStream_t>(stream));
         if (label.size() <= used) label.resize(used + 1);
@@ -267,26 +312,67 @@ GpuLayerState make_gpu_layer_state(const GpuLayerWeights& w, size_t kv_capacity,
     } else {
         s.kv_cap = kv_capacity;
         s.kv_format = fmt;
-        if (fmt == KvFormat::K16V8) {
-            s.Kq = DevBuf<uint8_t>(kv_capacity * w.at.kv_width() * 2);
-            s.Vq = DevBuf<uint8_t>(kv_capacity * w.at.kv_width());
-            s.Vn = DevBuf<float>(kv_capacity * w.at.kv_width() / 32);
-        } else if (fmt == KvFormat::Q8) {
-            s.Kq = DevBuf<uint8_t>(kv_capacity * w.at.kv_width());
-            s.Vq = DevBuf<uint8_t>(kv_capacity * w.at.kv_width());
-            s.Kn = DevBuf<float>(kv_capacity * w.at.kv_width() / 32);
-            s.Vn = DevBuf<float>(kv_capacity * w.at.kv_width() / 32);
-        } else if (fmt == KvFormat::TQ4) {
-            s.Kq = DevBuf<uint8_t>(kv_capacity * w.at.kv_heads * (w.at.head_dim / 2));
-            s.Vq = DevBuf<uint8_t>(kv_capacity * w.at.kv_heads * (w.at.head_dim / 2));
-            s.Kn = DevBuf<float>(kv_capacity * w.at.kv_heads);
-            s.Vn = DevBuf<float>(kv_capacity * w.at.kv_heads);
-        } else {
-            s.Kc = DevBuf<float>(kv_capacity * w.at.kv_width());
-            s.Vc = DevBuf<float>(kv_capacity * w.at.kv_width());
-        }
+        alloc_kv({&s.Kc, &s.Vc, &s.Kq, &s.Vq, &s.Kn, &s.Vn, &s.Kr, &s.Krs}, fmt, kv_capacity, w.at.kv_heads, w.at.head_dim);
     }
     return s;
+}
+
+void alloc_kv(const KvBuffers& b, KvFormat fmt, size_t cap, int kv_heads, int head_dim) {
+    const size_t w = static_cast<size_t>(kv_heads) * head_dim;
+    switch (fmt) {
+        case KvFormat::F32:
+            *b.Kc = DevBuf<float>(cap * w); *b.Vc = DevBuf<float>(cap * w);
+            break;
+        case KvFormat::Q8:
+            *b.Kq = DevBuf<uint8_t>(cap * w); *b.Vq = DevBuf<uint8_t>(cap * w);
+            *b.Kn = DevBuf<float>(cap * w / 32); *b.Vn = DevBuf<float>(cap * w / 32);
+            break;
+        case KvFormat::K16V8:
+            *b.Kq = DevBuf<uint8_t>(cap * w * 2); *b.Vq = DevBuf<uint8_t>(cap * w);
+            *b.Vn = DevBuf<float>(cap * w / 32);
+            break;
+        case KvFormat::TQ4:
+            *b.Kq = DevBuf<uint8_t>(cap * kv_heads * (head_dim / 2)); *b.Vq = DevBuf<uint8_t>(cap * kv_heads * (head_dim / 2));
+            *b.Kn = DevBuf<float>(cap * kv_heads); *b.Vn = DevBuf<float>(cap * kv_heads);
+            break;
+        case KvFormat::K8V4:
+            *b.Kq = DevBuf<uint8_t>(cap * w); *b.Kn = DevBuf<float>(cap * w / 32);
+            *b.Vq = DevBuf<uint8_t>(cap * w / 2); *b.Vn = DevBuf<float>(cap * w / 32);   // half2 (scale, min) per 32 values = one float slot
+            break;
+        case KvFormat::Q4: {
+            const size_t groups = (cap + kKiviGroup - 1) / kKiviGroup;
+            *b.Kq = DevBuf<uint8_t>(groups * kKiviGroup * w / 2); *b.Kn = DevBuf<float>(groups * w);   // per-channel half2 per group of positions
+            *b.Vq = DevBuf<uint8_t>(cap * w / 2); *b.Vn = DevBuf<float>(cap * w / 32);
+            *b.Kr = DevBuf<uint8_t>(static_cast<size_t>(kKiviRing) * w); *b.Krs = DevBuf<float>(static_cast<size_t>(kKiviRing) * w / 32);
+            break;
+        }
+    }
+}
+
+void kv_tail_regions(const KvBuffers& b, KvFormat fmt, size_t cap, size_t from, std::vector<DeviceArena::Region>& out) {
+    // positions from a whole group of 32 on (Q4 keys and their per-channel scales are laid out per group of positions)
+    const size_t start = (from + kKiviGroup - 1) / kKiviGroup * kKiviGroup;
+    auto add = [&](void* p, size_t bytes, size_t positions) {
+        if (!p || !bytes || !positions || start >= positions) return;
+        size_t off = static_cast<size_t>((static_cast<unsigned long long>(bytes) * start + positions - 1) / positions);   // round up
+        off = (off + 255) & ~size_t(255);
+        if (off + 4096 < bytes) out.push_back({static_cast<uint8_t*>(p) + off, bytes - off, 0});
+    };
+    const size_t qpos = fmt == KvFormat::Q4 ? (cap + kKiviGroup - 1) / kKiviGroup * kKiviGroup : cap;   // Q4 keys: whole groups
+    add(b.Kc->p, b.Kc->n * sizeof(float), cap);
+    add(b.Vc->p, b.Vc->n * sizeof(float), cap);
+    add(b.Kq->p, b.Kq->n, qpos);
+    add(b.Kn->p, b.Kn->n * sizeof(float), qpos);
+    add(b.Vq->p, b.Vq->n, cap);
+    add(b.Vn->p, b.Vn->n * sizeof(float), cap);
+}
+
+void kv_rewound(KvFormat fmt, const KvBuffers& b, int kv_width, size_t old_held, size_t new_held, void* stream) {
+    if (fmt != KvFormat::Q4 || new_held >= old_held) return;
+    if (kv_width <= 0) kv_width = static_cast<int>(b.Krs->n * 32 / kKiviRing);   // from the ring's size
+    const int f_new = kivi_frontier(static_cast<int>(new_held)), f_old = kivi_frontier(static_cast<int>(old_held));
+    const int hi = std::min(static_cast<int>(new_held), f_old);   // positions the ring must cover again that were quantized
+    if (hi > f_new) cuda_check(kivi_unquantize_cuda(f_new, hi, kv_width, b.Kq->p, b.Kn->p, b.Kr->p, b.Krs->p, stream), "q4 key rewind");
 }
 
 GpuLayerCheckpoint gpu_layer_checkpoint(const GpuLayerState& s) {
@@ -303,6 +389,8 @@ void gpu_layer_restore(GpuLayerState& s, const GpuLayerCheckpoint& c) {
         s.S.put(c.S.data(), c.S.size());
     } else if (c.length > s.pos) {
         throw std::invalid_argument("KV checkpoint is ahead of the layer");  // the cache can only be rewound
+    } else {
+        kv_rewound(s.kv_format, {&s.Kc, &s.Vc, &s.Kq, &s.Vq, &s.Kn, &s.Vn, &s.Kr, &s.Krs}, 0, s.pos, c.length);
     }
     s.pos = c.length;
 }
@@ -427,19 +515,27 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
         }
         LP("attn split/norm/rope");
         const bool ref = attention_reference_mode();
-        const int maxpos = dev_pos ? static_cast<int>(s.kv_cap) : static_cast<int>(s.pos) + T;  // grid bound: fixed for a captured graph
+        const int maxpos_full = dev_pos ? static_cast<int>(s.kv_cap) : static_cast<int>(s.pos) + T;  // grid bound: fixed for a captured graph
+        const int maxpos = s.window > 0 ? std::min(s.window, maxpos_full) : maxpos_full;              // sliding window: positions a token can see
         const float attn_scale = 1.0f / std::sqrt(static_cast<float>(d.head_dim));
-        const AttnFmt afmt = s.kv_format == KvFormat::TQ4 ? AttnFmt::TQ4 : s.kv_format == KvFormat::Q8 ? AttnFmt::Q8 : s.kv_format == KvFormat::K16V8 ? AttnFmt::K16V8 : AttnFmt::F32;
-        // prefill chunks (positions on the host, many tokens) on an FP32 or INT8 cache: GEMM -> masked softmax -> GEMM, gate applied after
+        const AttnFmt afmt = attn_fmt(s.kv_format);
+        // prefill chunks (positions on the host, many tokens): GEMM -> masked softmax -> GEMM, gate applied after (every format but TQ4)
         const bool prefill_attn = !ref && !dev_pos && T >= kPrefillAttnMinTokens && s.kv_format != KvFormat::TQ4;
+        KvAux aux;
+        if (s.kv_format == KvFormat::Q4) {
+            aux.ring = reinterpret_cast<const int8_t*>(s.Kr.p);
+            aux.ring_sc = s.Krs.p;
+            aux.pend = pos_dev + (T - 1);
+            aux.kv_width = d.kv_heads * d.head_dim;
+        }
         auto prefill_attention = [&] {
             const int p0 = static_cast<int>(s.pos);
-            const size_t pf = attn_prefill_scratch_floats(T, p0, 0, d.heads, d.kv_heads);
+            const size_t pf = attn_prefill_scratch_floats(T, p0, s.window, d.heads, d.kv_heads);
             float* ps = sp.get<float>(18, pf);
-            const bool q8 = kv_q8_values(s.kv_format);   // K/V in Kq/Vq (Q8 or K16V8)
-            cuda_check(attn_prefill_cuda(afmt, q, gate, q8 ? static_cast<const void*>(s.Kq.p) : s.Kc.p, q8 ? s.Kn.p : nullptr,
-                                         q8 ? static_cast<const void*>(s.Vq.p) : s.Vc.p, q8 ? s.Vn.p : nullptr, T, p0, d.heads, d.kv_heads, d.head_dim, 0, attn_scale, ps, pf,
-                                         att, stream),
+            const bool f32 = afmt == AttnFmt::F32;
+            cuda_check(attn_prefill_cuda(afmt, q, gate, f32 ? static_cast<const void*>(s.Kc.p) : s.Kq.p, f32 ? nullptr : s.Kn.p,
+                                         f32 ? static_cast<const void*>(s.Vc.p) : s.Vq.p, f32 ? nullptr : s.Vn.p, T, p0, d.heads, d.kv_heads, d.head_dim, s.window, attn_scale, ps, pf,
+                                         att, stream, aux),
                        "prefill attention");
         };
         auto split_attention = [&] {
@@ -447,11 +543,20 @@ void gpu_layer_forward_dev(const GpuLayerWeights& w, GpuLayerState& s, const flo
             const size_t floats = per * static_cast<size_t>(std::min(T, 8));
             float* scr = sp.get<float>(17, floats);
             cuda_check(afmt != AttnFmt::F32
-                           ? attn_splitkv_cuda(afmt, q, gate, s.Kq.p, s.Kn.p, s.Vq.p, s.Vn.p, pos_dev, T, d.heads, d.kv_heads, d.head_dim, 0, attn_scale, maxpos, scr, floats, att, stream)
-                           : attn_splitkv_cuda(afmt, q, gate, s.Kc.p, nullptr, s.Vc.p, nullptr, pos_dev, T, d.heads, d.kv_heads, d.head_dim, 0, attn_scale, maxpos, scr, floats, att, stream),
+                           ? attn_splitkv_cuda(afmt, q, gate, s.Kq.p, s.Kn.p, s.Vq.p, s.Vn.p, pos_dev, T, d.heads, d.kv_heads, d.head_dim, s.window, attn_scale, maxpos, scr, floats, att, stream, aux)
+                           : attn_splitkv_cuda(afmt, q, gate, s.Kc.p, nullptr, s.Vc.p, nullptr, pos_dev, T, d.heads, d.kv_heads, d.head_dim, s.window, attn_scale, maxpos, scr, floats, att, stream),
                        "split-KV attention");
         };
-        if (kv_q8_values(s.kv_format)) {   // int8 values (+ int8 or fp16 keys): quantise-and-append, split-KV attention reads them directly (no reference kernel)
+        if (kv_v4_values(s.kv_format)) {   // 4-bit values; keys Q8 (K8V4) or Q8 ring -> 4-bit groups (Q4)
+            if (s.kv_format == KvFormat::K8V4) cuda_check(q8kv_append_cuda(k, pos_dev, T, d.kv_heads, d.head_dim, s.Kq.p, s.Kn.p, stream), "q8 append K");
+            else {
+                cuda_check(kivi_ring_append_cuda(k, pos_dev, T, d.kv_heads, d.head_dim, s.Kr.p, s.Krs.p, stream), "q4 ring append K");
+                cuda_check(kivi_quantize_cuda(pos_dev, T, d.kv_heads * d.head_dim, s.Kr.p, s.Krs.p, s.Kq.p, s.Kn.p, stream), "q4 quantize K");
+            }
+            cuda_check(v4_append_cuda(v, pos_dev, T, d.kv_heads, d.head_dim, s.Vq.p, s.Vn.p, stream), "v4 append V");
+            LP("kv append");
+            if (prefill_attn) prefill_attention(); else split_attention();
+        } else if (kv_q8_values(s.kv_format)) {   // int8 values (+ int8 or fp16 keys): quantise-and-append, split-KV attention reads them directly (no reference kernel)
             if (s.kv_format == KvFormat::K16V8) cuda_check(f16kv_append_cuda(k, pos_dev, T, d.kv_heads, d.head_dim, s.Kq.p, stream), "f16 append K");
             else cuda_check(q8kv_append_cuda(k, pos_dev, T, d.kv_heads, d.head_dim, s.Kq.p, s.Kn.p, stream), "q8 append K");
             cuda_check(q8kv_append_cuda(v, pos_dev, T, d.kv_heads, d.head_dim, s.Vq.p, s.Vn.p, stream), "q8 append V");
