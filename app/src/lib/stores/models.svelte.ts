@@ -35,6 +35,16 @@ class ModelsStore {
       const list = await apiClient.getModels();
       this.models = list.data;
 
+      // Sync active downloads from backend model status
+      for (const m of this.models) {
+        if (m.dara.download && !/done|failed|cancelled/i.test(m.dara.download.status)) {
+          this.downloads = { ...this.downloads, [m.id]: m.dara.download };
+          if (!this.pollIntervals.has(m.id)) {
+            this.startDownloadPolling(m.id, m.dara.download.id);
+          }
+        }
+      }
+
       // Update disk stats
       try {
         const stats = await apiClient.getStats();

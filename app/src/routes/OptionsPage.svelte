@@ -4,30 +4,27 @@
   import { router } from "../lib/router/router.svelte.ts";
   import { modelsStore } from "../lib/stores/models.svelte.ts";
   import type { OptionsResponse, KvFormat, OptionEntry, BenchmarkJob } from "../lib/api/types.ts";
-  import Card from "../lib/ui/Card.svelte";
-  import Badge from "../lib/ui/Badge.svelte";
+  import Icon from "../lib/ui/Icon.svelte";
+  import Dialog from "../lib/ui/Dialog.svelte";
   import Button from "../lib/ui/Button.svelte";
   import Toggle from "../lib/ui/Toggle.svelte";
-  import Dialog from "../lib/ui/Dialog.svelte";
-  import ProgressBar from "../lib/ui/ProgressBar.svelte";
   import { toast } from "../lib/ui/Toast.svelte";
 
   let optionsData = $state<OptionsResponse | null>(null);
   let isLoading = $state<boolean>(true);
   let error = $state<string | null>(null);
 
-  // Selected format and flash
   let selectedKv = $state<KvFormat>("q8");
   let selectedFlash = $state<boolean>(true);
   let selectedContext = $state<number | undefined>(undefined);
 
-  // Benchmark state
   let isBenchmarkModalOpen = $state<boolean>(false);
   let activeBenchmark = $state<BenchmarkJob | null>(null);
   let isBenchmarking = $state<boolean>(false);
   let benchmarkPollInterval: ReturnType<typeof setInterval> | null = null;
 
   const modelId = $derived(router.optionsModelId || "dara-nano");
+  const currentModelMeta = $derived(modelsStore.models.find((m) => m.id === modelId));
 
   onMount(() => {
     void loadOptions();
@@ -42,7 +39,6 @@
     try {
       const data = await apiClient.getModelOptions(modelId);
       optionsData = data;
-      // Initialize with recommended values
       if (data.recommended) {
         selectedKv = data.recommended.kv;
         selectedFlash = data.recommended.flash;
@@ -57,7 +53,6 @@
     }
   }
 
-  // Active option entry matching chosen (kv, flash)
   const currentOption = $derived<OptionEntry | null>(
     optionsData?.options.find(
       (opt) => opt.kv === selectedKv && Boolean(opt.flash) === selectedFlash
@@ -94,7 +89,7 @@
           stopBenchmarkPolling();
           isBenchmarking = false;
           if (job.status === "done") {
-            toast.show("Benchmark completed!", "success");
+            toast.show("Benchmark completed! New speed measurements saved.", "success");
             void loadOptions();
           }
         }
@@ -123,7 +118,7 @@
       isBenchmarking = false;
       activeBenchmark = null;
       isBenchmarkModalOpen = false;
-      toast.show("Benchmark cancelled", "info");
+      toast.show("Benchmark was cancelled.", "info");
     }
   }
 
@@ -135,376 +130,292 @@
         flash: selectedFlash,
         ...(selectedContext !== undefined ? { ctx: selectedContext } : {})
       });
-      toast.show(`Loaded ${modelId} with ${selectedKv.toUpperCase()} settings`, "success");
+      toast.show(`Loaded ${modelId} with ${selectedKv.toUpperCase()} settings.`, "success");
       router.navigate("chat");
     } catch (err: unknown) {
-      toast.show(err instanceof Error ? err.message : "Failed to load settings", "danger");
+      toast.show(err instanceof Error ? err.message : "Failed to load settings into VRAM.", "danger");
     }
   }
 
   function formatContextLabel(num: number): string {
-    if (num >= 1000) return `${Math.round(num / 1024)}K`;
+    if (num >= 1000) return `${Math.round(num / 1024)}k`;
     return `${num}`;
   }
 </script>
 
-<div class="p-8 max-w-5xl mx-auto space-y-8 text-left">
-  <!-- Back Button & Top Navigation -->
-  <div class="flex items-center space-x-2">
-    <Button variant="ghost" size="sm" onclick={() => router.navigate("models")}>
-      ← Back to Models
-    </Button>
+<div class="p-6 max-w-5xl w-full mx-auto space-y-6 text-left">
+  <!-- Top Navigation & Back Button -->
+  <div class="flex items-center justify-between border-b border-border pb-4">
+    <button
+      type="button"
+      onclick={() => router.navigate("models")}
+      class="flex items-center gap-1.5 text-xs font-semibold text-text-muted hover:text-text transition-colors cursor-pointer"
+    >
+      <Icon name="chevron-left" size={14} />
+      <span>Back to Models</span>
+    </button>
   </div>
 
   {#if isLoading}
-    <div class="p-12 text-center text-text-muted space-y-2">
-      <div
-        class="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto"
-      ></div>
-      <p class="text-xs">Loading hardware options for {modelId}...</p>
+    <div class="py-16 text-center space-y-3">
+      <Icon name="refresh-cw" size={24} class="text-primary animate-spin mx-auto" />
+      <p class="text-xs text-text-muted">Analyzing GPU placement options for {modelId}...</p>
     </div>
   {:else if error}
     {#if error.toLowerCase().includes("not installed")}
-      <Card variant="surface" padding="lg" class="max-w-md mx-auto text-center space-y-4 my-8">
-        <div
-          class="w-12 h-12 rounded-xl bg-primary-subtle text-primary flex items-center justify-center mx-auto"
-        >
-          <svg
-            class="w-6 h-6"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            aria-hidden="true"
-          >
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
-            />
-          </svg>
+      <!-- Not Installed Friendly State -->
+      <div class="max-w-md mx-auto text-center space-y-4 bg-surface border border-border rounded-xl p-8 shadow-sm">
+        <div class="w-12 h-12 rounded-xl bg-primary/10 border border-primary/20 text-primary flex items-center justify-center mx-auto">
+          <Icon name="download" size={22} />
         </div>
         <div>
-          <h2 class="text-base font-bold text-text">Model Not Downloaded</h2>
+          <h2 class="text-base font-bold text-text">Model Not Downloaded Yet</h2>
           <p class="text-xs text-text-muted mt-1 leading-relaxed">
             Model <strong class="text-text font-mono">{modelId}</strong> must be downloaded before you
-            can configure GPU layers, K/V precision, and run hardware benchmarks.
+            can configure GPU placement, K/V cache precision, or run benchmark sweeps.
           </p>
         </div>
-        <div class="flex justify-center gap-3 pt-2">
-          <Button variant="primary" size="sm" onclick={() => router.navigate("models")}>
-            Go to Models to Download
-          </Button>
+        <div class="pt-2">
+          <button
+            type="button"
+            onclick={() => {
+              void modelsStore.downloadModel(modelId);
+              router.navigate("models");
+            }}
+            class="h-9 px-4 rounded-lg bg-primary hover:bg-primary-hover text-white text-xs font-semibold transition-all cursor-pointer shadow-sm"
+          >
+            Download {currentModelMeta ? `(${(currentModelMeta.dara.download_size_mb / 1024).toFixed(1)} GB)` : "Model"}
+          </button>
         </div>
-      </Card>
+      </div>
     {:else}
-      <div
-        role="alert"
-        class="p-6 rounded-xl bg-danger-subtle border border-danger text-sm text-danger"
-      >
+      <div role="alert" class="p-6 rounded-xl bg-danger/10 border border-danger/30 text-xs text-danger text-center max-w-md mx-auto space-y-3">
+        <Icon name="alert-circle" size={24} class="mx-auto" />
         <p class="font-bold">Failed to load model options</p>
-        <p class="text-xs mt-1">{error}</p>
-        <Button variant="secondary" size="sm" class="mt-4" onclick={loadOptions}>Try again</Button>
+        <p class="text-text-subtle">{error}</p>
+        <button
+          type="button"
+          onclick={loadOptions}
+          class="h-8 px-4 rounded-lg bg-surface border border-border text-xs font-semibold text-text hover:bg-surface-raised transition-colors cursor-pointer"
+        >
+          Try again
+        </button>
       </div>
     {/if}
   {:else if optionsData}
-    <!-- 1. Header with GPU Hardware Specs -->
+    <!-- Options Main View -->
     <header class="space-y-4 border-b border-border pb-6">
       <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <div class="flex items-center space-x-2">
-            <h1 class="text-2xl font-bold tracking-tight text-text">{optionsData.name} Options</h1>
-            <Badge variant="purple">{optionsData.family}</Badge>
+          <div class="flex items-center gap-2">
+            <h1 class="text-lg font-bold text-text tracking-tight">{optionsData.name} Options</h1>
+            <span class="px-2 py-0.5 rounded-md bg-primary/10 border border-primary/20 text-primary text-[10px] font-bold">
+              {optionsData.family}
+            </span>
           </div>
           <p class="text-xs text-text-muted mt-1">
-            Configure precision and speculative drafting tailored for your graphics hardware.
+            Configure quantization precision and speculative drafting tailored for your graphics hardware.
           </p>
         </div>
 
-        <!-- GPU Hardware Card -->
-        <div
-          class="flex items-center space-x-3 bg-surface-sunken p-3 rounded-xl border border-border text-xs font-mono"
-        >
-          <div
-            class="w-8 h-8 rounded-lg bg-primary-subtle text-primary flex items-center justify-center shrink-0"
-          >
-            <svg
-              class="w-4 h-4"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-              aria-hidden="true"
-            >
-              <rect x="4" y="4" width="16" height="16" rx="2" />
-              <rect x="9" y="9" width="6" height="6" />
-              <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
-            </svg>
+        <!-- GPU Hardware Specs Card -->
+        <div class="flex items-center gap-3 bg-surface p-3 rounded-xl border border-border text-xs font-mono shadow-sm">
+          <div class="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 text-primary flex items-center justify-center shrink-0">
+            <Icon name="cpu" size={16} />
           </div>
           <div>
-            <div class="font-semibold text-text">{optionsData.machine.gpu}</div>
-            <div class="text-text-subtle text-[11px]">
-              VRAM: {(optionsData.machine.vram_free_assumed_mb / 1024).toFixed(1)} GB free of {(
-                optionsData.machine.vram_total_mb / 1024
-              ).toFixed(0)} GB total
+            <div class="font-bold text-text truncate max-w-[200px]">{optionsData.machine.gpu}</div>
+            <div class="text-[10px] text-text-subtle">
+              VRAM: {(optionsData.machine.vram_free_assumed_mb / 1024).toFixed(1)} GB free of {(optionsData.machine.vram_total_mb / 1024).toFixed(0)} GB
             </div>
           </div>
         </div>
       </div>
-
-      <!-- Battery Power Warning -->
-      {#if optionsData.calibration.entries_measured_on_battery > 0}
-        <div
-          role="alert"
-          class="p-3 rounded-lg bg-warning-subtle border border-warning text-xs text-warning flex items-center space-x-2"
-        >
-          <span>⚠️</span>
-          <span
-            >Measurements were taken on battery power: speeds may be lower than when plugged into AC
-            power.</span
-          >
-        </div>
-      {/if}
     </header>
 
-    <!-- 2. Interactive Form Controls: K/V Precision & Flash -->
-    <section
-      class="grid grid-cols-1 md:grid-cols-3 gap-6"
-      aria-labelledby="heading-format-controls"
-    >
-      <div class="md:col-span-2 space-y-4">
-        <h2
-          id="heading-format-controls"
-          class="text-sm font-bold text-text uppercase tracking-wider"
-        >
-          K/V Cache Precision
-        </h2>
+    <!-- Controls Grid: K/V Cache Precision & Flash Drafter -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+      <!-- K/V Precision Cards (2 cols) -->
+      <div class="md:col-span-2 space-y-3">
+        <h2 class="text-xs font-bold text-text-subtle uppercase tracking-wider">K/V Cache Precision</h2>
 
-        <div
-          class="grid grid-cols-1 sm:grid-cols-2 gap-3"
-          role="radiogroup"
-          aria-label="K/V precision options"
-        >
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" role="radiogroup" aria-label="K/V precision options">
           {#each optionsData.formats as fmt (fmt.id)}
             {@const isSelected = selectedKv === fmt.id}
-            {@const qualityBadgeVariant =
-              fmt.quality.label === "high"
-                ? "success"
-                : fmt.quality.label === "medium"
-                  ? "purple"
-                  : fmt.quality.label === "experimental"
-                    ? "warning"
-                    : "neutral"}
-
             <button
               type="button"
               role="radio"
               aria-checked={isSelected}
               onclick={() => (selectedKv = fmt.id)}
-              class="p-4 rounded-xl border text-left transition-colors cursor-pointer select-none space-y-2 {isSelected
-                ? 'bg-primary-subtle border-primary ring-1 ring-primary'
-                : 'bg-surface border-border hover:bg-surface-raised'}"
+              class="p-4 rounded-xl border text-left transition-all cursor-pointer space-y-2 {isSelected
+                ? 'bg-surface-raised border-primary ring-1 ring-primary/40 shadow-sm'
+                : 'bg-surface border-border hover:border-primary/30'}"
             >
               <div class="flex items-center justify-between">
-                <span class="font-bold text-sm text-text">{fmt.name}</span>
-                <Badge variant={qualityBadgeVariant} size="sm">{fmt.quality.text}</Badge>
+                <span class="font-bold text-xs text-text">{fmt.name}</span>
+                <span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-surface-sunken border border-border text-text-subtle">
+                  {fmt.quality.text}
+                </span>
               </div>
-
-              <p class="text-xs text-text-muted leading-relaxed">{fmt.description}</p>
-
+              <p class="text-[11px] text-text-muted leading-relaxed">{fmt.description}</p>
               {#if fmt.caveat}
-                <p class="text-[11px] text-warning italic leading-snug">{fmt.caveat}</p>
+                <p class="text-[10px] text-warning italic leading-snug">{fmt.caveat}</p>
               {/if}
             </button>
           {/each}
         </div>
       </div>
 
-      <!-- Flash Toggle Card -->
-      <div class="space-y-4">
-        <h2 class="text-sm font-bold text-text uppercase tracking-wider">Flash Acceleration</h2>
-        <Card variant="surface" padding="md" class="space-y-4">
+      <!-- Flash Acceleration Card -->
+      <div class="space-y-3">
+        <h2 class="text-xs font-bold text-text-subtle uppercase tracking-wider">Flash Acceleration</h2>
+        <div class="bg-surface border border-border rounded-xl p-4 space-y-3 shadow-sm">
           <Toggle
             label="Enable Flash Drafter"
-            description="Uses ~150 MB memory for speculative decoding, yielding significantly higher tokens per second."
+            description="Speculative draft decoding speeds up inference up to 2-3x."
             disabled={!optionsData.flash ||
               typeof optionsData.flash !== "object" ||
               !("available" in optionsData.flash) ||
               !optionsData.flash.available}
             bind:checked={selectedFlash}
           />
-
-          {#if optionsData.flash && typeof optionsData.flash === "object" && "note" in optionsData.flash && optionsData.flash.note}
-            <p class="text-xs text-text-subtle">{String(optionsData.flash.note)}</p>
-          {/if}
-        </Card>
+        </div>
       </div>
-    </section>
+    </div>
 
-    <!-- 3. Result Card: Active Profile Summary -->
+    <!-- Active Profile Performance Summary -->
     {#if currentOption}
-      <section class="space-y-4" aria-labelledby="heading-result">
-        <h2 id="heading-result" class="text-sm font-bold text-text uppercase tracking-wider">
-          Hardware Placement & Speed
-        </h2>
+      <div class="bg-surface border border-border rounded-xl p-5 shadow-sm space-y-5">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <h3 class="text-sm font-bold text-text">
+                Fastest Setup: {formatContextLabel(currentOption.fast.context)} context
+              </h3>
+              {#if isRecommended}
+                <span class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-success/10 text-success border border-success/20">
+                  Recommended
+                </span>
+              {/if}
+            </div>
+            {#if isRecommended && optionsData.recommended.reason}
+              <p class="text-xs text-success font-medium mt-0.5">{optionsData.recommended.reason}</p>
+            {/if}
+          </div>
 
-        <Card
-          variant="raised"
-          padding="lg"
-          class="space-y-6 border-2 {isRecommended ? 'border-primary' : 'border-border'}"
-        >
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div class="space-y-1">
-              <div class="flex items-center space-x-2">
-                <h3 class="text-lg font-bold text-text">
-                  Fastest Setup: {formatContextLabel(currentOption.fast.context)} tokens of context
-                </h3>
-                {#if isRecommended}
-                  <Badge variant="success">★ Recommended</Badge>
-                {/if}
+          <!-- Speed Box -->
+          <div class="text-right">
+            {#if currentOption.fast.speed.source === "measured"}
+              <div class="text-2xl font-bold font-mono text-primary tabular-nums">
+                {currentOption.fast.speed.decode_tps_start.toFixed(1)}
+                <span class="text-xs font-sans text-text-muted font-normal">tok/s</span>
               </div>
-
-              {#if isRecommended && optionsData.recommended.reason}
-                <p class="text-xs text-success font-medium">
-                  {optionsData.recommended.reason}
-                </p>
-              {/if}
-            </div>
-
-            <!-- Speed Box -->
-            <div class="text-right">
-              {#if currentOption.fast.speed.source === "measured"}
-                <div class="text-2xl font-bold font-mono text-primary tabular-nums">
-                  {currentOption.fast.speed.decode_tps_start.toFixed(1)}
-                  <span class="text-xs font-sans text-text-muted">tok/s</span>
-                </div>
-                {#if currentOption.fast.speed.decode_tps_full_estimate}
-                  <div class="text-[11px] text-text-subtle font-mono">
-                    ~{currentOption.fast.speed.decode_tps_full_estimate.toFixed(1)} tok/s when full
-                  </div>
-                {/if}
-              {:else}
-                <div class="text-sm font-mono text-text-muted italic">Not measured yet</div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="text-primary hover:text-primary text-xs"
-                  onclick={() => (isBenchmarkModalOpen = true)}
-                >
-                  Measure on this PC
-                </Button>
-              {/if}
-            </div>
+            {:else}
+              <div class="text-xs font-mono text-text-muted italic">Not benchmarked</div>
+              <button
+                type="button"
+                onclick={() => (isBenchmarkModalOpen = true)}
+                class="text-xs text-primary hover:underline cursor-pointer"
+              >
+                Benchmark on this GPU
+              </button>
+            {/if}
           </div>
+        </div>
 
-          <!-- 4. Context Ladder Table -->
-          <div class="space-y-2">
-            <span class="text-xs font-semibold text-text uppercase tracking-wider"
-              >Context Ladder</span
-            >
-            <div class="overflow-x-auto border border-border rounded-lg bg-surface-sunken">
-              <table class="w-full text-xs text-left">
-                <thead
-                  class="border-b border-border text-text-subtle uppercase text-[10px] font-mono"
-                >
-                  <tr>
-                    <th class="p-3">Context</th>
-                    <th class="p-3">GPU Placement</th>
-                    <th class="p-3">Cache VRAM</th>
-                    <th class="p-3 text-right">Generation Speed</th>
+        <!-- Context Ladder Table -->
+        <div class="space-y-2">
+          <span class="text-[10px] font-bold text-text-subtle uppercase tracking-wider">Context Ladder</span>
+          <div class="overflow-x-auto border border-border rounded-lg bg-surface-sunken">
+            <table class="w-full text-xs text-left">
+              <thead class="border-b border-border text-text-subtle uppercase text-[10px] font-mono">
+                <tr>
+                  <th class="p-2.5">Context</th>
+                  <th class="p-2.5">GPU Placement</th>
+                  <th class="p-2.5">Cache VRAM</th>
+                  <th class="p-2.5 text-right">Generation Speed</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-border">
+                {#each currentOption.points as pt (pt.context)}
+                  <tr class="hover:bg-surface-raised/50 transition-colors">
+                    <td class="p-2.5 font-bold font-mono text-text">{formatContextLabel(pt.context)}</td>
+                    <td class="p-2.5 text-text-subtle">
+                      {pt.fully_on_gpu ? "Full GPU" : `${pt.layers_gpu}/${pt.layers} GPU layers`}
+                    </td>
+                    <td class="p-2.5 font-mono text-text-subtle">{(pt.kv_cache_mb / 1024).toFixed(2)} GB</td>
+                    <td class="p-2.5 text-right font-mono font-semibold text-text">
+                      {#if pt.speed.source === "measured"}
+                        <span class="text-success">{pt.speed.decode_tps_start.toFixed(1)} tok/s</span>
+                      {:else}
+                        <span class="text-text-muted italic">Not measured</span>
+                      {/if}
+                    </td>
                   </tr>
-                </thead>
-                <tbody class="divide-y divide-border">
-                  {#each currentOption.points as pt (pt.context)}
-                    <tr class="hover:bg-surface-raised transition-colors">
-                      <td class="p-3 font-bold font-mono text-text">
-                        {formatContextLabel(pt.context)} tokens
-                      </td>
-                      <td class="p-3">
-                        {#if pt.fully_on_gpu}
-                          <Badge variant="success" size="sm">100% on GPU</Badge>
-                        {:else}
-                          <span class="text-warning font-mono"
-                            >{pt.layers_gpu} / {pt.layers} layers on GPU</span
-                          >
-                        {/if}
-                      </td>
-                      <td class="p-3 font-mono text-text-muted">
-                        {pt.kv_cache_mb} MB
-                      </td>
-                      <td class="p-3 text-right font-mono">
-                        {#if pt.speed.source === "measured"}
-                          <span class="font-bold text-text tabular-nums"
-                            >{pt.speed.decode_tps_start.toFixed(1)} tok/s</span
-                          >
-                        {:else}
-                          <span class="text-text-subtle italic">Unmeasured</span>
-                        {/if}
-                      </td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            </div>
+                {/each}
+              </tbody>
+            </table>
           </div>
+        </div>
 
-          <!-- Bottom Actions -->
-          <div class="flex items-center justify-between pt-4 border-t border-border">
-            <Button variant="secondary" size="md" onclick={() => (isBenchmarkModalOpen = true)}>
-              Measure Benchmarks on this PC
-            </Button>
+        <!-- Action Buttons -->
+        <div class="flex items-center justify-between pt-4 border-t border-border/50">
+          <button
+            type="button"
+            onclick={() => (isBenchmarkModalOpen = true)}
+            class="h-9 px-4 rounded-lg border border-border bg-surface hover:bg-surface-raised text-xs font-semibold text-text transition-colors cursor-pointer flex items-center gap-2"
+          >
+            <Icon name="activity" size={13} />
+            <span>Run Benchmark</span>
+          </button>
 
-            <Button variant="primary" size="md" class="font-bold px-6" onclick={applyAndLoad}>
-              Load with these settings
-            </Button>
-          </div>
-        </Card>
-      </section>
+          <button
+            type="button"
+            onclick={applyAndLoad}
+            class="h-9 px-5 rounded-lg bg-primary hover:bg-primary-hover text-white text-xs font-semibold transition-all cursor-pointer shadow-sm flex items-center gap-2"
+          >
+            <Icon name="check" size={13} />
+            <span>Apply & Load into VRAM</span>
+          </button>
+        </div>
+      </div>
     {/if}
   {/if}
 
-  <!-- Benchmark Dialog Modal -->
+  <!-- Benchmark Dialog -->
   <Dialog
     isOpen={isBenchmarkModalOpen}
-    title="Run Hardware Inference Benchmark"
-    description="Measures real generation and prefill speeds for this model on your graphics card."
+    title="GPU Inference Benchmark"
     onclose={() => {
       if (!isBenchmarking) isBenchmarkModalOpen = false;
     }}
   >
-    <div class="space-y-4 text-xs text-text-muted leading-relaxed">
+    <div class="space-y-4 text-xs text-text-muted">
       <p>
-        Benchmarking takes about 30–60 seconds and will fully exercise the GPU. If you are on a
-        laptop, please ensure your power adapter is plugged in for peak hardware clocks.
+        The benchmark evaluates actual token generation speeds across K/V precision levels and Flash drafter configs on your GPU.
       </p>
 
       {#if activeBenchmark}
-        <div
-          class="space-y-2 p-3 rounded-lg bg-surface-sunken border border-border font-mono text-[11px]"
-        >
-          <div class="flex justify-between font-bold text-text">
-            <span>Status: {activeBenchmark.status.toUpperCase()}</span>
+        <div class="p-3 bg-surface-sunken border border-border rounded-xl space-y-2">
+          <div class="flex justify-between items-center text-xs">
+            <span class="font-bold text-text">Status: {activeBenchmark.status}</span>
           </div>
-          <div class="space-y-1 text-text-subtle max-h-32 overflow-y-auto">
-            {#each activeBenchmark.log as line, i (i)}
-              <div>{line}</div>
-            {/each}
-          </div>
+          {#if activeBenchmark.log && activeBenchmark.log.length > 0}
+            <div class="max-h-32 overflow-y-auto font-mono text-[10px] text-text-subtle p-2 bg-surface rounded">
+              {#each activeBenchmark.log as line, i (i)}
+                <div>{line}</div>
+              {/each}
+            </div>
+          {/if}
         </div>
-      {/if}
-
-      {#if isBenchmarking}
-        <ProgressBar label="Running benchmarks..." />
       {/if}
     </div>
 
     {#snippet actions()}
       {#if isBenchmarking}
-        <Button variant="danger" size="sm" onclick={cancelBenchmark}>Cancel Benchmark</Button>
+        <Button variant="danger" size="sm" onclick={cancelBenchmark}>Cancel</Button>
       {:else}
-        <Button variant="ghost" size="sm" onclick={() => (isBenchmarkModalOpen = false)}
-          >Close</Button
-        >
+        <Button variant="ghost" size="sm" onclick={() => (isBenchmarkModalOpen = false)}>Close</Button>
         <Button variant="primary" size="sm" onclick={startBenchmark}>Start Benchmark</Button>
       {/if}
     {/snippet}

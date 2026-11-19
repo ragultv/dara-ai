@@ -61,23 +61,28 @@ body {
   overflow: hidden;
   overscroll-behavior: none;
   -webkit-overscroll-behavior: none;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-user-drag: none;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 #app {
   height: 100%;
   width: 100%;
   overflow: hidden;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 input,
 textarea,
 [contenteditable="true"],
-.selectable-text {
-  user-select: text;
-  -webkit-user-select: text;
+.selectable-text,
+.oprel-markdown,
+.oprel-markdown *,
+.oprel-code-content,
+.oprel-code-content * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
 
 *,
@@ -89,4 +94,264 @@ textarea,
 :focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 2px;
+}
+
+textarea:focus,
+textarea:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+
+/* =========================================================================
+   Oprel-Grade Markdown & Code Highlighting System
+   ========================================================================= */
+
+.oprel-markdown {
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--color-text);
+  word-break: break-word;
+}
+
+.oprel-markdown > *:first-child {
+  margin-top: 0 !important;
+}
+
+.oprel-markdown > *:last-child {
+  margin-bottom: 0 !important;
+}
+
+.oprel-markdown p {
+  margin: 0.65rem 0;
+}
+
+.oprel-markdown strong,
+.oprel-markdown b {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.oprel-markdown h1,
+.oprel-markdown h2,
+.oprel-markdown h3,
+.oprel-markdown h4,
+.oprel-markdown h5,
+.oprel-markdown h6 {
+  font-weight: 600;
+  line-height: 1.35;
+  margin-top: 1.25rem;
+  margin-bottom: 0.35rem;
+  color: var(--color-text);
+}
+
+.oprel-markdown h1 { font-size: 1.15rem; }
+.oprel-markdown h2 { font-size: 1.05rem; }
+.oprel-markdown h3 { font-size: 0.95rem; }
+.oprel-markdown h4 { font-size: 0.9rem; }
+
+.oprel-markdown ul,
+.oprel-markdown ol {
+  margin: 0.6rem 0;
+  padding-left: 1.4rem;
+}
+
+.oprel-markdown ul { list-style-type: disc; }
+.oprel-markdown ol { list-style-type: decimal; }
+
+.oprel-markdown li {
+  margin: 0.25rem 0;
+}
+
+.oprel-markdown li > p {
+  margin: 0.2rem 0;
+}
+
+.oprel-markdown blockquote {
+  border-left: 3px solid var(--color-primary);
+  margin: 0.75rem 0;
+  padding: 0.4rem 0.8rem;
+  background: var(--color-surface-sunken);
+  border-radius: 0 0.5rem 0.5rem 0;
+  color: var(--color-text-muted);
+}
+
+.oprel-markdown hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  opacity: 0.45;
+  margin: 1rem 0;
+}
+
+/* assistant-ui Data Table */
+.oprel-markdown table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.8125rem;
+  margin: 0.85rem 0;
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.oprel-markdown th {
+  font-weight: 600;
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-text);
+  background: var(--color-surface-sunken);
+  padding: 0.6rem 0.85rem;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.oprel-markdown td {
+  padding: 0.55rem 0.85rem;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
+  transition: background-color 0.15s ease;
+}
+
+.oprel-markdown tr:last-child td {
+  border-bottom: none;
+}
+
+.oprel-markdown tr:hover td {
+  background-color: var(--color-surface-raised);
+}
+
+.oprel-inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  padding: 0.15em 0.4em;
+  border-radius: 0.25rem;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  color: var(--color-primary);
+}
+
+/* Oprel Code Block Container */
+.oprel-code-block {
+  width: 100%;
+  border-radius: 0.75rem;
+  background: #0d0b14;
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+  margin: 0.75rem 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+
+.oprel-code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 38px;
+  min-height: 38px;
+  max-height: 38px;
+  padding: 0 0.85rem;
+  background: #07050a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 0;
+}
+
+.oprel-code-lang {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: #94a3b8;
+  font-weight: 600;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.oprel-code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: transparent;
+  border: none;
+  border-radius: 0.375rem;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 0.2rem 0.45rem;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.oprel-code-copy-btn:hover {
+  color: #ffffff;
+  background: transparent;
+  opacity: 1;
+}
+
+.oprel-code-content {
+  overflow-x: auto;
+  padding: 0.85rem 1rem !important;
+  margin: 0 !important;
+  background: #0d0b14;
+}
+
+.oprel-code-content pre {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  line-height: 1.6 !important;
+  font-family: var(--font-mono) !important;
+}
+
+.oprel-code-content code {
+  font-family: var(--font-mono) !important;
+  font-size: 0.8125rem !important;
+  background: transparent !important;
+  padding: 0 !important;
+  border: none !important;
+  color: #f8fafc !important;
+  white-space: pre !important;
+  word-break: normal !important;
+  word-wrap: normal !important;
+}
+
+/* Shiki Syntax Token Highlighting */
+.tok-keyword { color: #c084fc !important; font-weight: 600; }
+.tok-string { color: #34d399 !important; }
+.tok-number { color: #fbbf24 !important; }
+.tok-comment { color: #64748b !important; font-style: italic; }
+.tok-bool { color: #f472b6 !important; font-weight: 600; }
+
+.oprel-code-content::-webkit-scrollbar {
+  height: 6px;
+}
+
+.oprel-code-content::-webkit-scrollbar-track {
+  background: #07050a;
+}
+
+.oprel-code-content::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+/* Slim modern scrollbars for thread views */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-strong);
 }
