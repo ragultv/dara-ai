@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { modelsStore } from "../lib/stores/models.svelte.ts";
+  import { router } from "../lib/router/router.svelte.ts";
   import Card from "../lib/ui/Card.svelte";
   import Badge from "../lib/ui/Badge.svelte";
   import Button from "../lib/ui/Button.svelte";
@@ -235,6 +236,14 @@
               Download ({(model.dara.download_size_mb / 1024).toFixed(1)} GB)
             </Button>
           {/if}
+          <Button
+            variant="ghost"
+            size="sm"
+            class="w-full text-xs text-text-muted hover:text-text"
+            onclick={() => router.navigate("options", model.id)}
+          >
+            Options & Hardware Benchmarks ⚙
+          </Button>
         </div>
       </Card>
     {/each}
