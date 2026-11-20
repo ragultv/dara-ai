@@ -205,3 +205,16 @@ describe("media and widgets", () => {
     expect(html).toContain('"w1"');
   });
 });
+
+describe("widget guidance", () => {
+  it("is given only when the user asks for something interactive", async () => {
+    const { wantsWidget, buildOpsMessages, buildPlanMessages, WIDGET_GUIDE } =
+      await import("../../src/lib/artifacts/plan.ts");
+    expect(wantsWidget("add an interactive tip calculator")).toBe(true);
+    expect(wantsWidget("make a WIDGET for this")).toBe(true);
+    expect(wantsWidget("make it shorter")).toBe(false);
+    expect(String(buildOpsMessages(["a"], "add a quiz")[0]!.content)).toContain(WIDGET_GUIDE);
+    expect(String(buildOpsMessages(["a"], "shorten")[0]!.content)).not.toContain("```widget");
+    expect(String(buildPlanMessages("a unit converter")[0]!.content)).toContain("one section");
+  });
+});

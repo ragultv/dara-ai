@@ -84,11 +84,13 @@ export class DaraApiClient {
       const response = await fetch(url, fetchOptions);
 
       if (!response.ok) {
-        let errorBody: unknown;
+        // read the body once (json() would use it up and leave nothing for text())
+        const raw = await response.text().catch(() => "");
+        let errorBody: unknown = raw;
         try {
-          errorBody = await response.json();
+          errorBody = JSON.parse(raw);
         } catch {
-          errorBody = await response.text();
+          // not JSON: keep the text
         }
         throw ApiError.fromResponseBody(
           response.status,

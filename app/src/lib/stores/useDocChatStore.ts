@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { Step } from "../artifacts/assistant.ts";
 import { storeApi } from "../api/store-api.ts";
+import { isOldEngine } from "../artifacts/errors.ts";
 
 // The conversation beside a document: what the user asked, what Dara did, and Dara's thinking. It lives in memory for the app session
 // (one list per document); the document itself is what is saved.
@@ -28,6 +29,8 @@ interface DocChatState {
   byDoc: Record<string, DocChatMsg[]>;
   /** documents whose saved chat has been read from the server this session */
   loaded: Record<string, boolean>;
+  /** documents whose chat could not be saved, and why (an engine older than the app cannot keep chats) */
+  saveProblem: Record<string, string | undefined>;
   /** Reads the saved chat of a document (once per session). Messages that were still running when the app closed are marked stopped. */
   load: (docId: string) => Promise<void>;
   /** Saves one message with the document. A failure is silent: the chat stays on screen and is saved with the next message. */
@@ -85,6 +88,7 @@ export function fromSaved(id: string, data: Record<string, unknown>): DocChatMsg
 export const useDocChatStore = create<DocChatState>((set, get) => ({
   byDoc: {},
   loaded: {},
+  saveProblem: {},
   load: async (docId) => {
     if (get().loaded[docId]) return;
     set((s) => ({ loaded: { ...s.loaded, [docId]: true } }));
@@ -102,8 +106,13 @@ export const useDocChatStore = create<DocChatState>((set, get) => ({
   persist: async (docId, msg) => {
     try {
       await storeApi.putArtifactChatMessage(docId, msg.id, savedForm(msg));
-    } catch {
-      // not saved this time
+      if (get().saveProblem[docId])
+        set((s) => ({ saveProblem: { ...s.saveProblem, [docId]: undefined } }));
+    } catch (e) {
+      const why = isOldEngine(e)
+        ? "This engine is older than the app, so this chat is not being saved. Close and reopen Dara to update it."
+        : "This chat could not be saved just now.";
+      set((s) => ({ saveProblem: { ...s.saveProblem, [docId]: why } }));
     }
   },
   clear: async (docId) => {

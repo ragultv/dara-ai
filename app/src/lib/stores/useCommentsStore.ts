@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { newId, storeApi } from "../api/store-api.ts";
 import type { DbArtifactComment } from "../api/types.ts";
+import { collabMessage } from "../artifacts/errors.ts";
 
 // The comments of the open document (docs/ui/10-artifact-collab.md). The server is the source of truth; the list here follows it.
 
@@ -24,8 +25,7 @@ interface CommentsState {
   remove: (id: string) => Promise<void>;
 }
 
-const message = (e: unknown) =>
-  e instanceof Error && e.message ? e.message : "Something went wrong with the comments";
+const message = (e: unknown) => collabMessage(e, "comments");
 
 export const useCommentsStore = create<CommentsState>((set, get) => ({
   docId: null,

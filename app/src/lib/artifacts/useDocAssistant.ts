@@ -90,6 +90,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
                   return { ...st, time: began[i] ?? "" };
                 })
               }),
+            say: (t) => patch({ text: t }),
             reasoning: (reasoning, done, ms) =>
               patch({ reasoning, reasoningStreaming: !done, thinkingMs: ms })
           }
@@ -115,7 +116,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
             nth: q.nth
           });
         patch({
-          text: result.summary,
+          text: result.reply ?? result.summary,
           reasoningStreaming: false,
           status: result.stopped ? "stopped" : "done",
           undo: result.changed ? { markdown: snapshot, title: startTitle } : null

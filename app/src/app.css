@@ -682,13 +682,13 @@ textarea:focus-visible {
 
 /* the words a comment thread points at */
 .doc-editor .comment-mark {
-  background: var(--color-primary-subtle);
-  border-bottom: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  background: var(--color-warning-subtle);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-warning) 25%, transparent);
+  border-radius: 2px;
   cursor: pointer;
 }
 .doc-editor .comment-mark-active {
-  background: var(--color-primary-subtle-hover);
-  border-bottom-color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-warning) 28%, transparent);
 }
 
 /* images and video */
@@ -757,4 +757,27 @@ textarea:focus-visible {
 }
 .doc-editor .widget-code-open + .doc-widget .wl-hide {
   display: inline;
+}
+
+/* the closing message in the panel is as small as the rest of the panel */
+.doc-reply .oprel-markdown {
+  font-size: 13px;
+}
+.doc-reply .oprel-markdown p,
+.doc-reply .oprel-markdown ul,
+.doc-reply .oprel-markdown ol {
+  margin: 0 0 0.6rem;
+}
+.doc-reply .oprel-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+/* table cells have room around their text (this beats the plain-prose table rules, which pad only on the right) */
+.doc-editor.oprel-markdown th,
+.doc-editor.oprel-markdown td {
+  padding: 0.65rem 0.9rem;
+  border: 1px solid var(--color-border);
+}
+.doc-editor.oprel-markdown tr:last-child td {
+  border-bottom: 1px solid var(--color-border);
 }

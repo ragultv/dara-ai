@@ -41,3 +41,11 @@ export function exportFileName(title: string, ext = "md"): string {
 export function displayTitle(title: string): string {
   return title.trim() || "Untitled";
 }
+
+/** "21 Nov, 13:16": when a comment was written. */
+export function commentTime(ms: number): string {
+  const d = new Date(ms);
+  const day = d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${day}, ${time}`;
+}
