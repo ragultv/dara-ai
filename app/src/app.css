@@ -607,3 +607,23 @@ textarea:focus-visible {
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: var(--color-border-strong);
 }
+
+/* A row of the Timeline element appears with a short slide and fade. */
+@keyframes timeline-row-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.timeline-row {
+  animation: timeline-row-in 300ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .timeline-row {
+    animation: none;
+  }
+}

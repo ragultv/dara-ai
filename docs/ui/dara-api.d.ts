@@ -167,3 +167,12 @@ export type ArtifactKind = "doc" | "slides" | "design";
 export interface ArtifactSummary { id: string; kind: ArtifactKind; title: string; pinned: boolean; created_at: number; updated_at: number; chars: number; snippet: string }
 export interface Artifact { id: string; kind: ArtifactKind; title: string; pinned: boolean; created_at: number; updated_at: number; chars: number; content: string }
 export interface ArtifactsList { object: "list"; data: ArtifactSummary[]; total: number; limit: number; offset: number }
+export type ArtifactPatch = { title?: string; content?: string; pinned?: boolean; /** label (max 120 chars): store the state before this change as a version */ snapshot?: string };
+// version history: the states an artifact had before a change (09-artifacts.md, "Version history")
+export interface ArtifactVersionSummary { rev: number; title: string; label: string; created_at: number; chars: number; snippet: string }
+export interface ArtifactVersion { rev: number; title: string; content: string; label: string; created_at: number; chars: number }
+export interface ArtifactVersionsList { object: "list"; data: ArtifactVersionSummary[]; total: number; limit: number; offset: number }
+export type DbArtifactVersionSummary = ArtifactVersionSummary;
+export type DbArtifactVersion = ArtifactVersion;
+export type DbArtifactVersionsResponse = ArtifactVersionsList;
+export type ArtifactRestore = { rev: number };

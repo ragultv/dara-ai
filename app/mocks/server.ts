@@ -30,6 +30,25 @@ export function createMockServer(options: MockServerOptions = {}): {
   stop: () => Promise<void>;
 } {
   const artifacts = new Map<string, MockArtifact>();
+  // version history (docs/ui/09-artifacts.md): the mock keeps a version only for an explicit `snapshot` label or a restore
+  const versions = new Map<
+    string,
+    Array<{ rev: number; title: string; content: string; label: string; created_at: number }>
+  >();
+  const keepVersion = (a: MockArtifact, label: string) => {
+    if (!a.title && !a.content) return;
+    const list = versions.get(a.id) ?? [];
+    const last = list[list.length - 1];
+    if (last && last.title === a.title && last.content === a.content) return;
+    list.push({
+      rev: (last?.rev ?? 0) + 1,
+      title: a.title,
+      content: a.content,
+      label,
+      created_at: a.updated_at
+    });
+    versions.set(a.id, list);
+  };
   const server = http.createServer((req, res) => {
     // Enable CORS for testing & local webview dev
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -273,9 +292,14 @@ export function createMockServer(options: MockServerOptions = {}): {
     }
 
     // ---- artifacts (docs/ui/09-artifacts.md): kept in memory for the dev mock ----
-    const artifactMatch = /^\/dara\/artifacts(?:\/([0-9a-f-]{36}))?$/i.exec(pathname);
+    const artifactMatch =
+      /^\/dara\/artifacts(?:\/([0-9a-f-]{36})(?:\/(versions|restore)(?:\/(\d+))?)?)?$/i.exec(
+        pathname
+      );
     if (artifactMatch) {
       const id = artifactMatch[1];
+      const sub = artifactMatch[2];
+      const subRev = artifactMatch[3] ? Number(artifactMatch[3]) : undefined;
       const send = (status: number, body: unknown) => {
         res.writeHead(status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(body));
@@ -320,8 +344,38 @@ export function createMockServer(options: MockServerOptions = {}): {
         }
         const a = id ? artifacts.get(id) : undefined;
         if (!a) return send(404, { error: { message: "artifact not found", type: "not_found" } });
+        if (sub === "versions" && req.method === "GET") {
+          const list = [...(versions.get(a.id) ?? [])].reverse();
+          if (subRev !== undefined) {
+            const v = list.find((x) => x.rev === subRev);
+            if (!v)
+              return send(404, { error: { message: "version not found", type: "not_found" } });
+            return send(200, { ...v, chars: v.content.length });
+          }
+          return send(200, {
+            object: "list",
+            data: list.map(({ content, ...rest }) => ({
+              ...rest,
+              chars: content.length,
+              snippet: content.slice(0, 200)
+            })),
+            total: list.length,
+            limit: 100,
+            offset: 0
+          });
+        }
+        if (sub === "restore" && req.method === "POST") {
+          const v = (versions.get(a.id) ?? []).find((x) => x.rev === body.rev);
+          if (!v) return send(404, { error: { message: "version not found", type: "not_found" } });
+          keepVersion(a, "Before restore");
+          a.title = v.title;
+          a.content = v.content;
+          a.updated_at = Date.now();
+          return send(200, full(a));
+        }
         if (req.method === "GET") return send(200, full(a));
         if (req.method === "PATCH") {
+          if (typeof body.snapshot === "string") keepVersion(a, body.snapshot);
           if (typeof body.title === "string") a.title = body.title;
           if (typeof body.content === "string") a.content = body.content;
           if (typeof body.pinned === "boolean") a.pinned = body.pinned;

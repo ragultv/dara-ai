@@ -1,12 +1,14 @@
 r"""End-to-end test of the app database endpoints of `dara serve` (docs/ui/08-database.md). No GPU or model needed.
 Usage: python -I tests/store_api_test.py [path\to\dara.exe]    (default build\cuda\dara.exe, or DARA_EXE)"""
-import base64, json, os, shutil, subprocess, sys, tempfile, time, urllib.error, urllib.request
+import base64, json, os, shutil, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
 EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("DARA_EXE", os.path.join("build", "cuda", "dara.exe")))
 PORT = 11441
 KEY = "test-key-123"
 U = f"http://127.0.0.1:{PORT}"
 failures = []
+# test-only limits for version history (every server this test starts): an edit more than 1.5 s after the last save snapshots, 5 versions are kept per artifact
+VERSION_ENV = {"DARA_VERSION_GAP_MS": "1500", "DARA_VERSION_CAP": "5"}
 
 
 def check(name, cond, detail=""):
@@ -27,6 +29,7 @@ def call(method, path, body=None, key=KEY, raw=False):
 
 def start(data_dir, env_key=True):
     env = dict(os.environ)
+    env.update(VERSION_ENV)
     if env_key: env["DARA_API_KEY"] = KEY   # also tests the environment variable
     p = subprocess.Popen([EXE, "serve", "--port", str(PORT), "--data-dir", data_dir, "--models-dir", os.path.join(data_dir, "models")],
                          stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, errors="replace", env=env)
@@ -50,7 +53,7 @@ try:
     s, _ = call("GET", "/dara/settings", key="wrong"); check("settings with wrong key -> 401", s == 401, s)
 
     s, info = call("GET", "/dara/store")
-    check("store info", s == 200 and info["schema_version"] == 2 and info["conversations"] == 0 and info["artifacts"] == 0, info)
+    check("store info", s == 200 and info["schema_version"] == 3 and info["conversations"] == 0 and info["artifacts"] == 0, info)
     check("database file exists", os.path.exists(os.path.join(data_dir, "dara.db")))
 
     # settings
@@ -150,12 +153,93 @@ try:
     s, lst = call("GET", "/dara/artifacts?kind=doc"); check("pinned documents come first", lst["data"][0]["id"] == aid, [x["id"] for x in lst["data"]])
     s, e = call("PATCH", "/dara/artifacts/00000000-0000-4000-8000-000000000000", {"title": "x"}); check("patch unknown -> 404", s == 404, e)
     s, e = call("GET", "/dara/artifacts/00000000-0000-4000-8000-000000000000"); check("get unknown -> 404", s == 404, e)
-    s, st = call("GET", "/dara/store"); check("store info counts artifacts and reports schema 2", st.get("artifacts") == 3 and st.get("schema_version") == 2, st)
+    s, st = call("GET", "/dara/store"); check("store info counts artifacts and reports schema 3", st.get("artifacts") == 3 and st.get("schema_version") == 3, st)
     s, ex = call("GET", "/dara/data/export"); check("export includes artifacts", len(ex.get("artifacts", [])) == 3 and any(x["content"] == "# New\n\nbody" for x in ex["artifacts"]), ex.get("artifacts"))
     s, _ = call("DELETE", f"/dara/artifacts/{sl['id']}"); check("delete an artifact", s == 200)
     s, _ = call("DELETE", f"/dara/artifacts/{sl['id']}"); check("delete again -> 404", s == 404)
     s, _ = call("PATCH", f"/dara/artifacts/{aid}", {"content": "<script>alert(1)</script> and **markdown**"})
     s, g = call("GET", f"/dara/artifacts/{aid}"); check("content is stored as text exactly as sent", g["content"] == "<script>alert(1)</script> and **markdown**", g)
+
+    # version history (schema version 3): the states an artifact had BEFORE a change
+    def versions(i, q=""):
+        s, r = call("GET", f"/dara/artifacts/{i}/versions{q}"); return r if s == 200 else None
+    def db_count(sql, *args):
+        con = sqlite3.connect(os.path.join(data_dir, "dara.db"), timeout=10)
+        try: return con.execute(sql, args).fetchone()[0]
+        finally: con.close()
+
+    s, v = call("POST", "/dara/artifacts", {"kind": "doc", "title": "Doc", "content": "one"}); vid = v["id"]
+    s, _ = call("PATCH", f"/dara/artifacts/{vid}", {"content": "two"})
+    check("an ordinary save inside the gap makes no version", s == 200 and versions(vid)["total"] == 0, versions(vid))
+    s, e = call("GET", "/dara/artifacts/00000000-0000-4000-8000-000000000000/versions"); check("versions of an unknown artifact -> 404", s == 404, e)
+    s, u = call("PATCH", f"/dara/artifacts/{vid}", {"content": "three", "snapshot": "Before Dara edit"})
+    lst = versions(vid)
+    check("an explicit snapshot stores the state before the change", s == 200 and u["content"] == "three" and lst["total"] == 1 and lst["data"][0]["rev"] == 1
+          and lst["data"][0]["label"] == "Before Dara edit" and lst["data"][0]["title"] == "Doc" and lst["data"][0]["chars"] == 3 and lst["data"][0]["snippet"] == "two" and "content" not in lst["data"][0], lst)
+    s, g1 = call("GET", f"/dara/artifacts/{vid}/versions/1")
+    check("get one version with its content", s == 200 and g1["content"] == "two" and g1["title"] == "Doc" and g1["label"] == "Before Dara edit" and g1["rev"] == 1 and g1["chars"] == 3 and g1["created_at"] > 0, g1)
+    check("a version is stamped with when that state was last saved", g1["created_at"] <= u["updated_at"], (g1, u["updated_at"]))
+    s, e = call("GET", f"/dara/artifacts/{vid}/versions/99"); check("unknown version -> 404", s == 404, e)
+    s, e = call("GET", f"/dara/artifacts/{vid}/versions/abc"); check("non-numeric version -> 404", s == 404, e)
+    call("PATCH", f"/dara/artifacts/{vid}", {"content": "three", "snapshot": "no change"})
+    check("a snapshot is skipped when the patch changes nothing", versions(vid)["total"] == 1, versions(vid))
+    s, e = call("PATCH", f"/dara/artifacts/{vid}", {"content": "x", "snapshot": "y" * 121}); check("snapshot label over 120 characters -> 400", s == 400, e)
+    s, e = call("PATCH", f"/dara/artifacts/{vid}", {"content": "x", "snapshot": 5}); check("non-string snapshot -> 400", s == 400, e)
+    s, e = call("PATCH", f"/dara/artifacts/{vid}", {"title": 7, "snapshot": "z"}); check("a bad field refuses the whole patch", s == 400, e)
+    s, g = call("GET", f"/dara/artifacts/{vid}"); check("a refused patch changed and stored nothing", g["content"] == "three" and versions(vid)["total"] == 1, g)
+
+    # no duplicates: the state being replaced equals the newest version
+    call("PATCH", f"/dara/artifacts/{vid}", {"content": "two"})   # three -> two, inside the gap: no version (the newest version already holds "two")
+    s, _ = call("PATCH", f"/dara/artifacts/{vid}", {"content": "U", "snapshot": "dup"})
+    check("a snapshot identical to the newest version is not stored again", s == 200 and versions(vid)["total"] == 1, versions(vid))
+
+    # automatic snapshot: the first content edit after a pause longer than the gap (the gap runs from the last save, a title save included)
+    s, _ = call("PATCH", f"/dara/artifacts/{vid}", {"title": "Doc renamed"})
+    check("a title-only edit makes no automatic version", versions(vid)["total"] == 1, versions(vid))
+    time.sleep(1.7)
+    s, _ = call("PATCH", f"/dara/artifacts/{vid}", {"content": "after the pause"})
+    lst = versions(vid)
+    check("the first content edit after a long pause snapshots the earlier text (label empty)", lst["total"] == 2 and lst["data"][0]["rev"] == 2 and lst["data"][0]["label"] == ""
+          and lst["data"][0]["title"] == "Doc renamed" and lst["data"][0]["snippet"] == "U", lst)
+    s, _ = call("PATCH", f"/dara/artifacts/{vid}", {"content": "right after"})
+    check("a following edit inside the gap makes none", versions(vid)["total"] == 2, versions(vid))
+    lst = versions(vid, "?limit=1&offset=1")
+    check("versions list paging, newest first", lst["total"] == 2 and lst["limit"] == 1 and lst["offset"] == 1 and [x["rev"] for x in lst["data"]] == [1], lst)
+
+    # an empty document is not worth a version
+    s, em = call("POST", "/dara/artifacts", {"kind": "doc"})
+    call("PATCH", f"/dara/artifacts/{em['id']}", {"content": "first words", "snapshot": "Before Dara edit"})
+    check("an empty state is never stored", versions(em["id"])["total"] == 0, versions(em["id"]))
+
+    # restore
+    s, r = call("POST", f"/dara/artifacts/{vid}/restore", {"rev": 1})
+    lst = versions(vid)
+    check("restore returns the artifact with that version's text and title", s == 200 and r["id"] == vid and r["content"] == "two" and r["title"] == "Doc" and r["updated_at"] >= u["updated_at"], r)
+    check("restore keeps the replaced state as 'Before restore'", lst["total"] == 3 and lst["data"][0]["label"] == "Before restore" and lst["data"][0]["snippet"] == "right after" and lst["data"][0]["rev"] == 3, lst)
+    s, g = call("GET", f"/dara/artifacts/{vid}"); check("restored text is what a normal get returns", g["content"] == "two" and g["title"] == "Doc", g)
+    s, e = call("POST", f"/dara/artifacts/{vid}/restore", {"rev": 99}); check("restore an unknown version -> 404", s == 404, e)
+    s, e = call("POST", f"/dara/artifacts/{vid}/restore", {}); check("restore without rev -> 400", s == 400, e)
+    s, e = call("POST", f"/dara/artifacts/{vid}/restore", {"rev": "1"}); check("restore with a non-integer rev -> 400", s == 400, e)
+    s, e = call("POST", f"/dara/artifacts/{vid}/restore", {"rev": 1.5}); check("restore with a fractional rev -> 400", s == 400, e)
+    s, e = call("POST", "/dara/artifacts/00000000-0000-4000-8000-000000000000/restore", {"rev": 1}); check("restore on an unknown artifact -> 404", s == 404, e)
+    s, r = call("POST", f"/dara/artifacts/{vid}/restore", {"rev": 3})
+    lst = versions(vid)
+    check("restore twice walks back and forth (the undo of a restore is a version too)", s == 200 and r["content"] == "right after" and lst["total"] == 4 and lst["data"][0]["snippet"] == "two", lst)
+
+    # the cap (5 in this test): the oldest versions go first
+    s, cp = call("POST", "/dara/artifacts", {"kind": "doc", "title": "Cap", "content": "c0"}); cid2 = cp["id"]
+    for i in range(1, 9): call("PATCH", f"/dara/artifacts/{cid2}", {"content": f"c{i}", "snapshot": f"s{i}"})
+    lst = versions(cid2)
+    check("at most the cap (5) versions are kept, the oldest dropped", lst["total"] == 5 and [x["rev"] for x in lst["data"]] == [8, 7, 6, 5, 4] and lst["data"][0]["snippet"] == "c7", lst)
+    s, _ = call("GET", f"/dara/artifacts/{cid2}/versions/3"); check("a version past the cap is gone", s == 404)
+
+    # versions leave with their artifact
+    check("versions are stored in the table", db_count("SELECT COUNT(*) FROM artifact_versions WHERE artifact_id=?", cid2) == 5)
+    s, _ = call("DELETE", f"/dara/artifacts/{cid2}")
+    check("deleting an artifact deletes its versions", s == 200 and db_count("SELECT COUNT(*) FROM artifact_versions WHERE artifact_id=?", cid2) == 0)
+    s, e = call("GET", f"/dara/artifacts/{cid2}/versions"); check("versions of a deleted artifact -> 404", s == 404, e)
+    check("other artifacts keep theirs", db_count("SELECT COUNT(*) FROM artifact_versions WHERE artifact_id=?", vid) == 4)
+    s, ex = call("GET", "/dara/data/export"); check("export does not carry version history", all("versions" not in a for a in ex["artifacts"]), ex["artifacts"][:1])
 
     # delete all needs the confirmation
     call("POST", "/dara/conversations", {"title": "x"})
@@ -165,6 +249,7 @@ try:
     s3, allc = call("GET", "/dara/model-configs")
     check("delete all clears conversations and model configs", s == 200 and lst["total"] == 0 and allc == {}, (r, lst, allc))
     s4, arts = call("GET", "/dara/artifacts"); check("delete all clears artifacts", s4 == 200 and arts["total"] == 0, arts)
+    check("delete all clears version history", db_count("SELECT COUNT(*) FROM artifact_versions") == 0)
     s, st = call("GET", "/dara/settings"); check("settings kept by delete all", st["theme"] == "dark", st)
 
     # migration from schema version 1 (a database written by the previous build is upgraded in place, after a backup copy)
@@ -180,14 +265,45 @@ try:
         EXE = old_exe
         pm = start(mdir)
         s, info2 = call("GET", "/dara/store")
-        check("new build upgrades the old database to schema 2", s == 200 and info2["schema_version"] == 2 and info2["artifacts"] == 0 and info2["conversations"] == 1, info2)
-        check("a backup of the version 1 file was kept", os.path.exists(os.path.join(mdir, "dara.db.bak-v1")), os.listdir(mdir))
+        check("new build upgrades the old database to schema 3", s == 200 and info2["schema_version"] == 3 and info2["artifacts"] == 0 and info2["conversations"] == 1, info2)
+        check("a backup of the version 1 and the version 2 file was kept", os.path.exists(os.path.join(mdir, "dara.db.bak-v1")) and os.path.exists(os.path.join(mdir, "dara.db.bak-v2")), os.listdir(mdir))
         s, nc = call("POST", "/dara/artifacts", {"kind": "doc", "title": "after upgrade"}); check("artifacts work on the upgraded database", s == 201, nc)
         stop(pm)
         shutil.rmtree(mdir, ignore_errors=True)
         p = start(data_dir)
     else:
         print("skip  migration test (build\\cuda\\dara_prev.exe, a schema 1 build, not found)")
+
+
+    # migration from schema version 2 (a database written by the build with artifacts but no version history). Built here from the
+    # shipped SQL, exactly what that build writes: schema.sql, then 0002_artifacts.sql, user_version 2.
+    stop(p)
+    m2 = tempfile.mkdtemp(prefix="dara_store_mig2_")
+    db_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "ui", "db")
+    OLD = "11111111-1111-4111-8111-111111111111"
+    try:
+        con = sqlite3.connect(os.path.join(m2, "dara.db"))
+        con.executescript(open(os.path.join(db_dir, "schema.sql"), encoding="utf8").read())
+        con.execute("PRAGMA user_version=1")
+        con.executescript(open(os.path.join(db_dir, "0002_artifacts.sql"), encoding="utf8").read())
+        con.execute("INSERT INTO artifacts(id,kind,title,content,pinned,created_at,updated_at) VALUES(?,?,?,?,0,1000,1000)", (OLD, "doc", "Old doc", "old text"))
+        con.commit(); con.execute("PRAGMA user_version=2"); con.commit(); con.close()
+        built = True
+    except sqlite3.Error as ex:
+        print("skip  schema 2 migration test (this Python's SQLite cannot build the schema:", ex, ")")
+        built = False
+    if built:
+        pm = start(m2)
+        s, info3 = call("GET", "/dara/store")
+        check("a schema 2 database is upgraded to schema 3 in place", s == 200 and info3["schema_version"] == 3 and info3["artifacts"] == 1, info3)
+        check("a backup of the version 2 file was kept", os.path.exists(os.path.join(m2, "dara.db.bak-v2")) and not os.path.exists(os.path.join(m2, "dara.db.bak-v1")), os.listdir(m2))
+        s, g = call("GET", f"/dara/artifacts/{OLD}"); check("the old document survived the upgrade", s == 200 and g["content"] == "old text", g)
+        s, r = call("GET", f"/dara/artifacts/{OLD}/versions"); check("the old document has an empty history that works", s == 200 and r["total"] == 0 and r["data"] == [], r)
+        s, _ = call("PATCH", f"/dara/artifacts/{OLD}", {"content": "new text", "snapshot": "Before edit"})
+        s, r = call("GET", f"/dara/artifacts/{OLD}/versions"); check("versions work on the upgraded database", r["total"] == 1 and r["data"][0]["snippet"] == "old text", r)
+        stop(pm)
+    shutil.rmtree(m2, ignore_errors=True)
+    p = start(data_dir)
 
     # corrupt file recovery
     stop(p)

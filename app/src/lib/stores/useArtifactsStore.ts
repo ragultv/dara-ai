@@ -30,9 +30,12 @@ interface ArtifactsState {
   open: (id: string) => Promise<void>;
   close: () => Promise<void>;
   setTitle: (title: string) => void;
-  setContent: (content: string) => void;
+  /** `snapshot` asks the server to keep the text as it was before this change as a labelled version. */
+  setContent: (content: string, opts?: { snapshot?: string }) => void;
   /** Writes pending edits now (leaving the page, closing the window). */
   flush: () => Promise<void>;
+  /** Puts back an earlier version (the server keeps the current text as "Before restore"). Returns the restored document. */
+  restore: (rev: number) => Promise<DbArtifact | null>;
   remove: (id: string) => Promise<boolean>;
   duplicate: (id: string) => Promise<string | null>;
 }
@@ -40,7 +43,7 @@ interface ArtifactsState {
 const SAVE_DELAY_MS = 700;
 const SAVED_VISIBLE_MS = 2000;
 
-let pending: { title?: string; content?: string } = {};
+let pending: { title?: string; content?: string; snapshot?: string } = {};
 let timer: ReturnType<typeof setTimeout> | null = null;
 let savedTimer: ReturnType<typeof setTimeout> | null = null;
 let inFlight: Promise<void> = Promise.resolve();
@@ -140,10 +143,13 @@ export const useArtifactsStore = create<ArtifactsState>((set, get) => {
       schedule();
     },
 
-    setContent: (content) => {
+    setContent: (content, opts) => {
       set((s) => (s.doc ? { doc: { ...s.doc, content, chars: content.length } } : s));
-      pending = { ...pending, content };
-      schedule();
+      pending = { ...pending, content, ...(opts?.snapshot ? { snapshot: opts.snapshot } : {}) };
+      if (opts?.snapshot) {
+        // a labelled snapshot is written at once: the label is about the text as it is right now
+        void get().flush();
+      } else schedule();
     },
 
     flush: async () => {
@@ -153,6 +159,24 @@ export const useArtifactsStore = create<ArtifactsState>((set, get) => {
       }
       inFlight = inFlight.then(writePending);
       await inFlight;
+    },
+
+    restore: async (rev) => {
+      const doc = get().doc;
+      if (!doc) return null;
+      try {
+        await get().flush();
+        const restored = await storeApi.restoreArtifact(doc.id, rev);
+        set((s) => ({
+          doc: s.doc && s.doc.id === restored.id ? restored : s.doc,
+          items: s.items.map((i) => (i.id === restored.id ? summaryOf(restored) : i)),
+          saveState: "idle"
+        }));
+        return restored;
+      } catch (err) {
+        set({ docError: userFacingError(err).message });
+        return null;
+      }
     },
 
     remove: async (id) => {

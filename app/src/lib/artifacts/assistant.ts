@@ -20,6 +20,10 @@ export type StepState = "todo" | "active" | "done";
 export interface Step {
   label: string;
   state: StepState;
+  /** one line under the label (what a section covers) */
+  detail?: string;
+  /** how long into the task this step began, "0:07" (filled in by the caller) */
+  time?: string;
 }
 
 export interface AssistantHooks {
@@ -142,7 +146,11 @@ async function writeNew(run: AssistantRun): Promise<AssistantResult> {
         run.hooks.setDoc(renderPlan(plan, []));
         run.hooks.steps([
           { label: "Plan the document", state: "active" },
-          ...plan.sections.map((s) => ({ label: s.heading, state: "todo" as const }))
+          ...plan.sections.map((s) => ({
+            label: s.heading,
+            detail: s.intent,
+            state: "todo" as const
+          }))
         ]);
       }
     }
@@ -189,6 +197,7 @@ async function writeNew(run: AssistantRun): Promise<AssistantResult> {
     { label: "Plan the document", state: "done" },
     ...plan.sections.map((s, i) => ({
       label: s.heading,
+      detail: s.intent,
       state: (i < active ? "done" : i === active ? "active" : "todo") as StepState
     }))
   ];

@@ -180,3 +180,18 @@ describe("retry after a bad block number", () => {
     expect(String(m[2]!.content)).toContain("numbered 1 to 3");
   });
 });
+
+describe("normalizeLink", () => {
+  it("accepts web and mail links and adds https", async () => {
+    const { normalizeLink } = await import("../../src/lib/artifacts/SelectionMenu.tsx");
+    expect(normalizeLink("example.com/a")).toBe("https://example.com/a");
+    expect(normalizeLink("http://x.io")).toBe("http://x.io");
+    expect(normalizeLink("mailto:a@b.co")).toBe("mailto:a@b.co");
+  });
+  it("refuses anything that could run code, and empty input", async () => {
+    const { normalizeLink } = await import("../../src/lib/artifacts/SelectionMenu.tsx");
+    expect(normalizeLink("javascript:alert(1)")).toBeNull();
+    expect(normalizeLink("data:text/html,x")).toBeNull();
+    expect(normalizeLink("  ")).toBeNull();
+  });
+});

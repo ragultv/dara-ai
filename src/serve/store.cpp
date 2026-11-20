@@ -30,6 +30,32 @@ constexpr size_t kMaxContent = size_t(2) << 20;       // 2 MB of text per messag
 constexpr size_t kMaxAttachment = size_t(20) << 20;   // 20 MB per image
 constexpr size_t kMaxSetting = 64 << 10;
 constexpr int kSnippetChars = 600;   // how much of an artifact the gallery list carries (the card preview)
+constexpr int64_t kVersionGapMs = 120000;   // an edit more than this long after the last save snapshots the earlier text first
+constexpr int kVersionCap = 200;            // versions kept per artifact
+constexpr int kVersionLabelMax = 120;
+constexpr int kVersionSnippetChars = 200;
+
+// Both limits can be lowered for tests with DARA_VERSION_GAP_MS and DARA_VERSION_CAP (read once; not a user setting).
+int64_t version_gap_ms() {
+    static const int64_t v = [] {
+        const char* e = std::getenv("DARA_VERSION_GAP_MS");
+        if (!e || !*e) return kVersionGapMs;
+        char* end = nullptr;
+        const long long n = std::strtoll(e, &end, 10);
+        return (end && !*end && n >= 0) ? static_cast<int64_t>(n) : kVersionGapMs;
+    }();
+    return v;
+}
+int version_cap() {
+    static const int v = [] {
+        const char* e = std::getenv("DARA_VERSION_CAP");
+        if (!e || !*e) return kVersionCap;
+        char* end = nullptr;
+        const long n = std::strtol(e, &end, 10);
+        return (end && !*end && n >= 1) ? static_cast<int>(n) : kVersionCap;
+    }();
+    return v;
+}
 
 std::string u8s(const fs::path& p) { const auto s = p.u8string(); return std::string(s.begin(), s.end()); }
 std::string dump(const json& j) { return j.dump(-1, ' ', false, json::error_handler_t::replace); }
@@ -212,6 +238,29 @@ struct Store::Impl {
         q.text(1, id);
         if (!q.row()) fail(404, "artifact not found", "not_found");
         return artifact_row(q, true);
+    }
+    struct ArtifactState { std::string title, content; int64_t updated_at = 0; };
+    ArtifactState artifact_state(const std::string& id) {   // 404 when absent
+        Stmt q(db, "SELECT title,content,updated_at FROM artifacts WHERE id=?1");
+        q.text(1, id);
+        if (!q.row()) fail(404, "artifact not found", "not_found");
+        return {q.str(0), q.str(1), q.i64(2)};
+    }
+    // Stores `cur` as the next version of the artifact. Skipped when it is empty or identical to the newest version. Caller holds the lock and a transaction.
+    bool snapshot_state(const std::string& id, const ArtifactState& cur, const std::string& label) {
+        if (cur.title.empty() && cur.content.empty()) return false;
+        int64_t next = 1;
+        {
+            Stmt q(db, "SELECT rev,title,content FROM artifact_versions WHERE artifact_id=?1 ORDER BY rev DESC LIMIT 1");
+            q.text(1, id);
+            if (q.row()) {
+                if (q.str(1) == cur.title && q.str(2) == cur.content) return false;
+                next = q.i64(0) + 1;
+            }
+        }
+        { Stmt q(db, "INSERT INTO artifact_versions(artifact_id,rev,title,content,label,created_at) VALUES(?1,?2,?3,?4,?5,?6)"); q.text(1, id).num(2, next).text(3, cur.title).text(4, cur.content).text(5, label).num(6, cur.updated_at).run(); }
+        { Stmt q(db, "DELETE FROM artifact_versions WHERE artifact_id=?1 AND rev NOT IN (SELECT rev FROM artifact_versions WHERE artifact_id=?1 ORDER BY rev DESC LIMIT ?2)"); q.text(1, id).num(2, version_cap()).run(); }
+        return true;
     }
     void touch(const std::string& cid) { Stmt q(db, "UPDATE conversations SET updated_at=?2 WHERE id=?1"); q.text(1, cid).num(2, now_ms()).run(); }
 };
@@ -442,22 +491,85 @@ json Store::artifact_create(const json& b) {
 
 json Store::artifact_patch(const std::string& id, const json& b) {
     if (!b.is_object()) fail(400, "send a JSON object");
+    // validate everything before anything is written
+    const bool has_title = b.contains("title"), has_content = b.contains("content"), has_snapshot = b.contains("snapshot");
+    const std::string title = has_title ? need_string(b, "title", 500) : std::string();
+    const std::string content = has_content ? need_string(b, "content", kMaxContent) : std::string();
+    std::string label;
+    if (has_snapshot) {
+        if (!b["snapshot"].is_string()) fail(400, "'snapshot' must be a string");
+        label = b["snapshot"].get<std::string>();
+        if (label.size() > static_cast<size_t>(kVersionLabelMax)) fail(400, "'snapshot' is too long");
+    }
     std::lock_guard<std::mutex> lk(mu_);
-    impl_->artifact_by_id(id);   // 404 when absent
+    const auto cur = impl_->artifact_state(id);   // 404 when absent
+    const bool title_changes = has_title && title != cur.title, content_changes = has_content && content != cur.content;
+    const int64_t now = now_ms();
     Tx tx(impl_->db);
-    if (b.contains("title")) { Stmt q(impl_->db, "UPDATE artifacts SET title=?2 WHERE id=?1"); q.text(1, id).text(2, need_string(b, "title", 500)).run(); }
-    if (b.contains("content")) { Stmt q(impl_->db, "UPDATE artifacts SET content=?2 WHERE id=?1"); q.text(1, id).text(2, need_string(b, "content", kMaxContent)).run(); }
+    if (title_changes || content_changes) {
+        // an explicit snapshot (the client is about to make a big change), or the first content edit after a long pause
+        if (has_snapshot || (content_changes && now - cur.updated_at > version_gap_ms())) impl_->snapshot_state(id, cur, label);
+    }
+    if (has_title) { Stmt q(impl_->db, "UPDATE artifacts SET title=?2 WHERE id=?1"); q.text(1, id).text(2, title).run(); }
+    if (has_content) { Stmt q(impl_->db, "UPDATE artifacts SET content=?2 WHERE id=?1"); q.text(1, id).text(2, content).run(); }
     if (b.contains("pinned")) { Stmt q(impl_->db, "UPDATE artifacts SET pinned=?2 WHERE id=?1"); q.text(1, id).num(2, b["pinned"].is_boolean() && b["pinned"].get<bool>() ? 1 : 0).run(); }
-    { Stmt q(impl_->db, "UPDATE artifacts SET updated_at=?2 WHERE id=?1"); q.text(1, id).num(2, now_ms()).run(); }
+    { Stmt q(impl_->db, "UPDATE artifacts SET updated_at=?2 WHERE id=?1"); q.text(1, id).num(2, now).run(); }
     tx.commit();
     return impl_->artifact_by_id(id);
 }
 
 bool Store::artifact_delete(const std::string& id) {
     std::lock_guard<std::mutex> lk(mu_);
+    Tx tx(impl_->db);
+    { Stmt q(impl_->db, "DELETE FROM artifact_versions WHERE artifact_id=?1"); q.text(1, id).run(); }
     Stmt q(impl_->db, "DELETE FROM artifacts WHERE id=?1");
     q.text(1, id).run();
-    return sqlite3_changes(impl_->db) > 0;
+    const bool deleted = sqlite3_changes(impl_->db) > 0;
+    tx.commit();
+    return deleted;
+}
+
+json Store::artifact_versions_list(const std::string& id, int limit, int offset) {
+    limit = std::clamp(limit, 1, 500);
+    offset = std::max(offset, 0);
+    std::lock_guard<std::mutex> lk(mu_);
+    impl_->artifact_state(id);   // 404 when absent
+    Stmt q(impl_->db, ("SELECT rev,title,label,created_at,length(content),substr(content,1," + std::to_string(kVersionSnippetChars) + ") FROM artifact_versions WHERE artifact_id=?1 ORDER BY rev DESC LIMIT ?2 OFFSET ?3").c_str());
+    q.text(1, id).num(2, limit).num(3, offset);
+    json arr = json::array();
+    while (q.row()) arr.push_back({{"rev", q.i64(0)}, {"title", q.str(1)}, {"label", q.str(2)}, {"created_at", q.i64(3)}, {"chars", q.i64(4)}, {"snippet", q.str(5)}});
+    Stmt c(impl_->db, "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id=?1");
+    c.text(1, id).row();
+    return {{"object", "list"}, {"data", arr}, {"total", c.i64(0)}, {"limit", limit}, {"offset", offset}};
+}
+
+json Store::artifact_version_get(const std::string& id, int64_t rev) {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt q(impl_->db, "SELECT rev,title,content,label,created_at,length(content) FROM artifact_versions WHERE artifact_id=?1 AND rev=?2");
+    q.text(1, id).num(2, rev);
+    if (!q.row()) fail(404, "version not found", "not_found");
+    return {{"rev", q.i64(0)}, {"title", q.str(1)}, {"content", q.str(2)}, {"label", q.str(3)}, {"created_at", q.i64(4)}, {"chars", q.i64(5)}};
+}
+
+json Store::artifact_restore(const std::string& id, const json& b) {
+    if (!b.is_object()) fail(400, "send a JSON object");
+    if (!b.contains("rev") || !b["rev"].is_number_integer()) fail(400, "'rev' (the version number to restore) is required and must be an integer");
+    const int64_t rev = b["rev"].get<int64_t>();
+    std::lock_guard<std::mutex> lk(mu_);
+    const auto cur = impl_->artifact_state(id);   // 404 when absent
+    std::string title, content;
+    {
+        Stmt q(impl_->db, "SELECT title,content FROM artifact_versions WHERE artifact_id=?1 AND rev=?2");
+        q.text(1, id).num(2, rev);
+        if (!q.row()) fail(404, "version not found", "not_found");
+        title = q.str(0);
+        content = q.str(1);
+    }
+    Tx tx(impl_->db);
+    impl_->snapshot_state(id, cur, "Before restore");
+    { Stmt q(impl_->db, "UPDATE artifacts SET title=?2, content=?3, updated_at=?4 WHERE id=?1"); q.text(1, id).text(2, title).text(3, content).num(4, now_ms()).run(); }
+    tx.commit();
+    return impl_->artifact_by_id(id);
 }
 
 // ---- messages ----
@@ -669,6 +781,7 @@ void Store::delete_all() {
         exec(impl_->db, "DELETE FROM messages");   // attachments cascade, the search index follows by trigger
         exec(impl_->db, "DELETE FROM conversations");
         exec(impl_->db, "DELETE FROM model_configs");
+        exec(impl_->db, "DELETE FROM artifact_versions");
         exec(impl_->db, "DELETE FROM artifacts");
         tx.commit();
     }
@@ -763,6 +876,16 @@ void register_store_routes(httplib::Server& svr, Store* store, const std::string
     svr.Post("/dara/artifacts", guard([=](const httplib::Request& req, httplib::Response& res) { reply(res, 201, store->artifact_create(body_of(req))); }));
     svr.Get(R"(/dara/artifacts/([^/]+))", guard([=](const httplib::Request& req, httplib::Response& res) { reply(res, 200, store->artifact_get(req.matches[1])); }));
     svr.Patch(R"(/dara/artifacts/([^/]+))", guard([=](const httplib::Request& req, httplib::Response& res) { reply(res, 200, store->artifact_patch(req.matches[1], body_of(req))); }));
+    svr.Get(R"(/dara/artifacts/([^/]+)/versions)", guard([=](const httplib::Request& req, httplib::Response& res) {
+        reply(res, 200, store->artifact_versions_list(req.matches[1], intp(req, "limit", 100), intp(req, "offset", 0)));
+    }));
+    svr.Get(R"(/dara/artifacts/([^/]+)/versions/([^/]+))", guard([=](const httplib::Request& req, httplib::Response& res) {
+        const std::string text = req.matches[2];
+        int64_t rev = 0;
+        try { size_t used = 0; rev = std::stoll(text, &used); if (used != text.size()) throw std::invalid_argument("rev"); } catch (...) { fail(404, "version not found", "not_found"); }
+        reply(res, 200, store->artifact_version_get(req.matches[1], rev));
+    }));
+    svr.Post(R"(/dara/artifacts/([^/]+)/restore)", guard([=](const httplib::Request& req, httplib::Response& res) { reply(res, 200, store->artifact_restore(req.matches[1], body_of(req))); }));
     svr.Delete(R"(/dara/artifacts/([^/]+))", guard([=](const httplib::Request& req, httplib::Response& res) {
         if (!store->artifact_delete(req.matches[1])) { error(res, 404, "artifact not found", "not_found"); return; }
         reply(res, 200, {{"deleted", true}});

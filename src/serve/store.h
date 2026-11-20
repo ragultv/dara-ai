@@ -58,7 +58,11 @@ public:
     nlohmann::json artifact_get(const std::string& id);
     nlohmann::json artifact_create(const nlohmann::json& body);
     nlohmann::json artifact_patch(const std::string& id, const nlohmann::json& body);
-    bool artifact_delete(const std::string& id);
+    bool artifact_delete(const std::string& id);             // with its versions
+    // version history: the states an artifact had before a change (explicit `snapshot` in a patch, an edit after a long pause, a restore)
+    nlohmann::json artifact_versions_list(const std::string& id, int limit, int offset);   // newest first; short `snippet`, no full content
+    nlohmann::json artifact_version_get(const std::string& id, int64_t rev);
+    nlohmann::json artifact_restore(const std::string& id, const nlohmann::json& body);    // {"rev": N}; returns the artifact
 
     // attachments (images)
     nlohmann::json attachment_add(const std::string& message_id, const std::string& mime_hint, const std::string& bytes);
