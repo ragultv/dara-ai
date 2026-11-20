@@ -179,6 +179,26 @@ re-encoded every earlier image and re-prefilled the whole history: 14-20 s at 7-
 
 Embeddings are bit-identical to the resident encoder (tests/vision_stream_test.cu; the previous build's logits on image prompts match byte for byte).
 
+## Thinking (reasoning effort)
+
+`POST /v1/chat/completions` accepts `"reasoning_effort"`: `none` (default, no thinking), `low`, `medium`, `high`, `xhigh` (also `extra`) or `max`; or
+`"thinking_budget": N` (reasoning tokens; -1 = no cap). The names follow OpenAI, Hermes Agent and Claude Code. Each level is a **cap on thinking tokens**:
+
+| Effort | low | medium | high | xhigh | max |
+| --- | --- | --- | --- | --- | --- |
+| Thinking tokens (at most) | 512 | 2,048 | 4,096 | 8,192 | 32,768 |
+
+The model thinks first (Qwen: `<think>...</think>`; Nano: Gemma's `<|channel>thought ... <channel|>` with `<|think|>` in the system turn), and the engine returns the
+thinking **separately from the answer**: `message.reasoning_content` (non-streaming) or `delta.reasoning_content` chunks that come before the `content` chunks
+(streaming), the same shape DeepSeek, vLLM and llama.cpp use. `max_tokens` limits the **answer** only; the thinking budget comes on top of it.
+
+If the model is still thinking when its cap is reached, the engine closes the thought for it (`</think>` / `<channel|>`) and the model writes its answer from there
+(`timings.thinking_cut: true`). The reply reports `usage.completion_tokens_details.reasoning_tokens` and `timings.thinking_ms`. Context summaries never think.
+Switching effort on and off changes the prompt (Nano: the system turn), so the next request re-reads the conversation instead of reusing the cache.
+
+Measured on a GTX 1650: Nano, "What is 17 * 23?" at `low`: 205 thinking tokens, 2.7 s, then the answer. A cap of 40 tokens on a long question closes the thought at
+0.5 s and the answer follows. Qwen3.5 4B tends to overthink even simple questions, so it reaches the `low` (512) and `medium` (2,048) caps there.
+
 ## Flash and speculative decoding
 
 Prompt lookup (copying from the context) and the trained Flash drafter propose a few tokens; one model pass checks them all.

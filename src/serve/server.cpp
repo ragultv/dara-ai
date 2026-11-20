@@ -134,13 +134,25 @@ SampleParams parse_sampling(const json& b, int default_max) {
     return sp;
 }
 
+// reasoning effort -> thinking-token budget (0 = off). Names follow OpenAI / Hermes / Claude Code; "extra" and "xhigh" are the same level.
+int effort_budget(const std::string& e) {
+    if (e == "none" || e == "off" || e == "minimal" || e.empty()) return 0;
+    if (e == "low") return 512;
+    if (e == "medium") return 2048;
+    if (e == "high") return 4096;
+    if (e == "xhigh" || e == "extra") return 8192;
+    if (e == "max") return 32768;
+    throw std::invalid_argument("unknown reasoning_effort '" + e + "' (none, low, medium, high, xhigh, max)");
+}
+
 double r2(double v) { return std::round(v * 100.0) / 100.0; }
 
 json usage_json(const GenResult& r) {
     return {{"prompt_tokens", r.usage.prompt_tokens},
             {"completion_tokens", r.usage.completion_tokens},
             {"total_tokens", r.usage.total_tokens()},
-            {"prompt_tokens_details", {{"cached_tokens", r.usage.cached_tokens}, {"image_tokens", r.usage.image_tokens}}}};
+            {"prompt_tokens_details", {{"cached_tokens", r.usage.cached_tokens}, {"image_tokens", r.usage.image_tokens}}},
+            {"completion_tokens_details", {{"reasoning_tokens", r.usage.reasoning_tokens}}}};
 }
 
 json timings_json(const GenResult& r) {
@@ -153,6 +165,8 @@ json timings_json(const GenResult& r) {
             {"prefill_ms", r2(t.prefill_ms)},
             {"prefill_tokens_per_second", r2(t.prefill_tps())},
             {"ttft_ms", r2(t.ttft_ms)},
+            {"thinking_ms", r2(t.thinking_ms)},
+            {"thinking_cut", r.think_cut},
             {"decode_tokens", t.decoded},
             {"decode_ms", r2(t.decode_ms)},
             {"decode_tokens_per_second", r2(t.decode_tps())},
@@ -1244,6 +1258,9 @@ int dara_serve_main(int argc, char** argv) {
                 else if (f.is_string()) { const std::string v = f.get<std::string>(); sp.flash = v == "on" || v == "true" ? 1 : v == "off" || v == "false" ? 0 : -1; }
             }
             if (body.contains("cache_write") && body["cache_write"].is_boolean()) sp.cache_write = body["cache_write"].get<bool>();
+            // thinking: "reasoning_effort": none | low | medium | high | xhigh | max (OpenAI name), or "thinking_budget": N tokens (-1 = no cap)
+            if (chat && body.contains("reasoning_effort") && body["reasoning_effort"].is_string()) sp.think_budget = effort_budget(body["reasoning_effort"].get<std::string>());
+            if (chat && body.contains("thinking_budget") && body["thinking_budget"].is_number_integer()) sp.think_budget = body["thinking_budget"].get<int>();
         } catch (const std::exception& e) { bad(res, 400, e.what(), "invalid_request_error"); return; }
         if (const CatalogEntry* ce = catalog_find(model)) {   // a Dara model that is not installed: 404 with the download hint, before streaming starts
             if (installed_path(reg.models_dir, *ce, *ce->file("model")).empty()) { not_found(res, model, "model '" + ce->id + "' is not installed"); return; }
@@ -1261,7 +1278,7 @@ int dara_serve_main(int argc, char** argv) {
             }
             log_result(chat ? "chat" : "completion", r);
             json choice = {{"index", 0}, {"finish_reason", r.finish_reason == "cancelled" ? "stop" : r.finish_reason}};
-            if (chat) choice["message"] = {{"role", "assistant"}, {"content", r.text}};
+            if (chat) { choice["message"] = {{"role", "assistant"}, {"content", r.text}}; if (!r.reasoning.empty()) choice["message"]["reasoning_content"] = r.reasoning; }
             else choice["text"] = r.text;
             json j = {{"id", id}, {"object", obj}, {"created", now}, {"model", used}, {"choices", json::array({choice})}};
             add_dara_fields(j, r);
@@ -1285,11 +1302,16 @@ int dara_serve_main(int argc, char** argv) {
                 alive = send(chunk(chat ? json{{"content", t}} : json(t), nullptr));
                 return alive;   // a closed connection cancels the generation
             };
+            Engine::TextFn rfn = [&](const std::string& t) {   // the thinking: its own delta field, as DeepSeek / vLLM / llama.cpp do
+                if (!alive) return false;
+                alive = send(chunk(json{{"reasoning_content", t}}, nullptr));
+                return alive;
+            };
             GenResult r; std::string err; int code = 0;
             const bool ok = run_locked(model, [&](Engine& e) {
                 used = e.info().id;
                 if (chat && !started) { started = true; alive = send(chunk(json{{"role", "assistant"}, {"content", ""}}, nullptr)); }
-                return chat ? e.chat(msgs, sp, fn) : e.complete(prompt, sp, fn);
+                return chat ? e.chat(msgs, sp, fn, rfn) : e.complete(prompt, sp, fn);
             }, r, err, code);
             if (!ok) {
                 send(error_json(err, code == 404 ? "model_not_found" : code == 400 ? "invalid_request_error" : "server_error"));
