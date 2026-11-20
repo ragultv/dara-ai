@@ -3,5 +3,5 @@ build/
 *.safetensors
 __pycache__/
 .venv/
-models/
+/models/
 release/

@@ -1,0 +1,171 @@
+{
+  "data": [
+    {
+      "created": 1795071569,
+      "dara": {
+        "base_model": "Gemma 4 E2B (instruct)",
+        "config": {
+          "context": 131072,
+          "flash": true,
+          "head": "gpu",
+          "kv": "q8",
+          "layers": 35,
+          "layers_on_gpu": 35,
+          "reason": "INT8 (default): high quality, 131072 tokens, every layer and the output head on the GPU; Flash keeps at least 32K tokens here, so it is on",
+          "source": "recommended",
+          "vision": true
+        },
+        "context": 131072,
+        "description": "Smallest and fastest tier: chat, quick answers, image understanding. Up to 128K context on 4 GB GPUs.",
+        "download": null,
+        "download_size_mb": 3938.01,
+        "family": "gemma4",
+        "files": [
+          {
+            "installed": true,
+            "kind": "model",
+            "name": "gemma-4-E2B-it-Q4_K_M.gguf",
+            "size_mb": 2962.82,
+            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/gemma-4-E2B-it-Q4_K_M.gguf"
+          },
+          {
+            "installed": true,
+            "kind": "mmproj",
+            "name": "mmproj-F16.gguf",
+            "size_mb": 939.99,
+            "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/0314792d7f1f7e229411f620751375812bb9faf2/mmproj-F16.gguf"
+          },
+          {
+            "installed": true,
+            "kind": "flash",
+            "name": "drafter_nano_v2.dflash",
+            "size_mb": 35.2,
+            "url": "https://github.com/ragultv/dara-ai/releases/download/flash-drafters-v2/drafter_nano_v2.dflash"
+          }
+        ],
+        "fits_gpu": "full",
+        "flash": {
+          "active": true,
+          "available": true,
+          "installed": true
+        },
+        "full_vram_mb": 4096,
+        "loaded": true,
+        "min_vram_mb": 3072,
+        "name": "Dara Nano",
+        "quant": "Q4_K_M",
+        "status": "installed",
+        "vision": {
+          "active": true,
+          "available": true,
+          "installed": true
+        }
+      },
+      "id": "dara-nano",
+      "object": "model",
+      "owned_by": "dara"
+    },
+    {
+      "created": 1795071569,
+      "dara": {
+        "base_model": "Qwen3.5 4B",
+        "description": "Balanced tier: reasoning, coding, documents, image understanding.",
+        "download": null,
+        "download_size_mb": 3337.73,
+        "family": "qwen35",
+        "files": [
+          {
+            "installed": true,
+            "kind": "model",
+            "name": "Qwen3.5-4B-Q4_K_M.gguf",
+            "size_mb": 2613.96,
+            "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf"
+          },
+          {
+            "installed": true,
+            "kind": "mmproj",
+            "name": "mmproj-F16.gguf",
+            "size_mb": 641.27,
+            "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/mmproj-F16.gguf"
+          },
+          {
+            "installed": true,
+            "kind": "flash",
+            "name": "drafter_4b_v2.dflash",
+            "size_mb": 82.49,
+            "url": "https://github.com/ragultv/dara-ai/releases/download/flash-drafters-v2/drafter_4b_v2.dflash"
+          }
+        ],
+        "fits_gpu": "full",
+        "flash": {
+          "active": false,
+          "available": true,
+          "installed": true
+        },
+        "full_vram_mb": 4096,
+        "loaded": false,
+        "min_vram_mb": 3072,
+        "name": "Dara Core 4B",
+        "quant": "Q4_K_M",
+        "status": "installed",
+        "vision": {
+          "active": false,
+          "available": true,
+          "installed": true
+        }
+      },
+      "id": "dara-core-4b",
+      "object": "model",
+      "owned_by": "dara"
+    },
+    {
+      "created": 1795071569,
+      "dara": {
+        "base_model": "Qwen3.5 9B",
+        "description": "Most capable tier: harder reasoning and coding. Runs partly on the CPU on GPUs under 8 GB.",
+        "download": null,
+        "download_size_mb": 6293.0,
+        "family": "qwen35",
+        "files": [
+          {
+            "installed": true,
+            "kind": "model",
+            "name": "Qwen3.5-9B-Q4_K_M.gguf",
+            "size_mb": 5417.37,
+            "url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/Qwen3.5-9B-Q4_K_M.gguf"
+          },
+          {
+            "installed": true,
+            "kind": "mmproj",
+            "name": "mmproj-F16.gguf",
+            "size_mb": 875.63,
+            "url": "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/mmproj-F16.gguf"
+          }
+        ],
+        "fits_gpu": "partial",
+        "flash": {
+          "active": false,
+          "available": false,
+          "installed": false,
+          "note": "no drafter exists for this model yet"
+        },
+        "full_vram_mb": 8192,
+        "loaded": false,
+        "min_vram_mb": 4096,
+        "name": "Dara Pro 9B",
+        "quant": "Q4_K_M",
+        "status": "installed",
+        "vision": {
+          "active": false,
+          "available": true,
+          "installed": true
+        }
+      },
+      "id": "dara-pro-9b",
+      "object": "model",
+      "owned_by": "dara"
+    }
+  ],
+  "models_dir": "D:\\darap-ai\\models",
+  "object": "list"
+}

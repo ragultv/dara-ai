@@ -1,0 +1,63 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "The three primary colors are **red, yellow, and blue**.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "context": {
+    "capacity": 131072,
+    "compacted": false,
+    "dropped_messages": 0,
+    "summarized_messages": 0,
+    "summary_cached": false,
+    "truncated_last_message": false,
+    "used": 27
+  },
+  "created": 1795071569,
+  "id": "chatcmpl-1795071569-1",
+  "model": "dara-nano",
+  "object": "chat.completion",
+  "speculative": {
+    "acceptance": 16.67,
+    "accepted": 2,
+    "drafted": 12,
+    "flash_stood_down_at_pass": null,
+    "mode": "flash",
+    "model_passes": 11,
+    "note": null,
+    "tokens_per_pass": 1.27,
+    "verify_steps": 5
+  },
+  "timings": {
+    "compact_ms": 0.0,
+    "decode_ms": 229.1,
+    "decode_tokens": 14,
+    "decode_tokens_per_second": 56.74,
+    "image_memory": {
+      "from_free_vram_mb": 0.0,
+      "from_unused_context_mb": 0.0,
+      "scratch_mb": 0.0
+    },
+    "image_ms": 0.0,
+    "prefill_ms": 76.68,
+    "prefill_tokens": 14,
+    "prefill_tokens_per_second": 182.58,
+    "queue_ms": 0.0,
+    "total_ms": 306.67,
+    "ttft_ms": 77.57
+  },
+  "usage": {
+    "completion_tokens": 14,
+    "prompt_tokens": 14,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "image_tokens": 0
+    },
+    "total_tokens": 28
+  }
+}

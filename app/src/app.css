@@ -1,0 +1,495 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+@theme {
+  --color-bg: var(--color-bg);
+  --color-bg-subtle: var(--color-bg-subtle);
+  --color-surface: var(--color-surface);
+  --color-surface-raised: var(--color-surface-raised);
+  --color-surface-sunken: var(--color-surface-sunken);
+  --color-border: var(--color-border);
+  --color-border-strong: var(--color-border-strong);
+  --color-text: var(--color-text);
+  --color-text-muted: var(--color-text-muted);
+  --color-text-subtle: var(--color-text-subtle);
+  --color-primary: var(--color-primary);
+  --color-primary-hover: var(--color-primary-hover);
+  --color-primary-active: var(--color-primary-active);
+  --color-on-primary: var(--color-on-primary);
+  --color-primary-subtle: var(--color-primary-subtle);
+  --color-primary-subtle-hover: var(--color-primary-subtle-hover);
+  --color-on-primary-subtle: var(--color-on-primary-subtle);
+  --color-link: var(--color-link);
+  --color-focus: var(--color-focus);
+  --color-success: var(--color-success);
+  --color-success-subtle: var(--color-success-subtle);
+  --color-warning: var(--color-warning);
+  --color-warning-subtle: var(--color-warning-subtle);
+  --color-danger: var(--color-danger);
+  --color-danger-subtle: var(--color-danger-subtle);
+  --color-code-bg: var(--color-code-bg);
+  --color-overlay: var(--color-overlay);
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-mono);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-full: var(--radius-full);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+}
+
+:root {
+  font-family: var(--font-ui);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overscroll-behavior: none;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Logo variants: dara-light.png on light pages, dara.png on dark ones (see ui/Logo.tsx) */
+.logo-on-dark {
+  display: none;
+}
+:root[data-theme="dark"] .logo-on-light {
+  display: none;
+}
+:root[data-theme="dark"] .logo-on-dark {
+  display: inline-block;
+}
+
+/* While the theme flips, nothing may animate: the whole window changes in the same frame */
+.theme-switching,
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+  animation-duration: 0s !important;
+}
+
+/* Label that shimmers while the model is thinking (static under reduced motion) */
+.reasoning-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-text-muted) 0%,
+    var(--color-text) 45%,
+    var(--color-text-muted) 90%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: reasoning-shimmer 1.6s linear infinite;
+}
+@keyframes reasoning-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-shimmer {
+    animation: none;
+    color: var(--color-text-muted);
+    background-image: none;
+  }
+}
+
+/* Font of the assistant's replies: a serif, like Claude's. Settings > Appearance can switch it to the interface font. */
+:root {
+  --font-reply:
+    "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, Cambria, "Times New Roman", serif;
+}
+
+#root,
+#app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+* {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+button,
+a,
+input[type="checkbox"],
+input[type="radio"],
+[role="button"],
+[role="tab"],
+[role="radio"] {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"],
+.selectable-text,
+.oprel-markdown,
+.oprel-markdown *,
+.oprel-code-content,
+.oprel-code-content * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+textarea:focus,
+textarea:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* =========================================================================
+   Oprel-Grade Markdown & Code Highlighting System
+   ========================================================================= */
+
+.oprel-markdown {
+  font-family: var(--font-reply);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  color: var(--color-text);
+  word-break: break-word;
+}
+
+.oprel-markdown > *:first-child {
+  margin-top: 0 !important;
+}
+
+.oprel-markdown > *:last-child {
+  margin-bottom: 0 !important;
+}
+
+.oprel-markdown p {
+  margin: 0.8rem 0;
+}
+
+.oprel-markdown strong,
+.oprel-markdown b {
+  font-weight: 650;
+  color: var(--color-text);
+}
+
+.oprel-markdown a {
+  color: var(--color-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--color-border-strong);
+}
+
+.oprel-markdown a:hover {
+  text-decoration-color: var(--color-text);
+}
+
+/* headings are bold, not loud: like Claude, "Core colors" is the same size as the text around it */
+.oprel-markdown h1,
+.oprel-markdown h2,
+.oprel-markdown h3,
+.oprel-markdown h4,
+.oprel-markdown h5,
+.oprel-markdown h6 {
+  font-weight: 650;
+  line-height: 1.4;
+  margin-top: 1.6rem;
+  margin-bottom: 0.5rem;
+  color: var(--color-text);
+}
+
+.oprel-markdown h1 {
+  font-size: 1.25em;
+}
+.oprel-markdown h2 {
+  font-size: 1.12em;
+}
+.oprel-markdown h3,
+.oprel-markdown h4,
+.oprel-markdown h5,
+.oprel-markdown h6 {
+  font-size: 1em;
+}
+
+.oprel-markdown ul,
+.oprel-markdown ol {
+  margin: 0.7rem 0;
+  padding-left: 1.75rem;
+}
+
+.oprel-markdown ul {
+  list-style-type: disc;
+}
+.oprel-markdown ol {
+  list-style-type: decimal;
+}
+
+.oprel-markdown li {
+  margin: 0.4rem 0;
+  padding-left: 0.25rem;
+}
+
+.oprel-markdown li::marker {
+  color: var(--color-text-muted);
+}
+
+.oprel-markdown li > p {
+  margin: 0.3rem 0;
+}
+
+.oprel-markdown li > ul,
+.oprel-markdown li > ol {
+  margin: 0.3rem 0;
+}
+
+.oprel-markdown blockquote {
+  border-left: 3px solid var(--color-border-strong);
+  margin: 1rem 0;
+  padding: 0.1rem 0 0.1rem 1rem;
+  color: var(--color-text-muted);
+}
+
+.oprel-markdown hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 1.5rem 0;
+}
+
+/* Tables: no box, no vertical lines. A bold header row and a thin rule between rows. */
+.oprel-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: inherit;
+  margin: 1.1rem 0;
+}
+
+.oprel-markdown th {
+  font-weight: 650;
+  color: var(--color-text);
+  padding: 0.8rem 1.25rem 0.8rem 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.oprel-markdown td {
+  padding: 0.8rem 1.25rem 0.8rem 0;
+  color: var(--color-text);
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.oprel-markdown th:last-child,
+.oprel-markdown td:last-child {
+  padding-right: 0;
+}
+
+.oprel-markdown tr:last-child td {
+  border-bottom: none;
+}
+
+/* inline code: a quiet chip in the code font (colors get a swatch) */
+.oprel-inline-code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  padding: 0.12em 0.4em;
+  border-radius: 0.375rem;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.oprel-inline-code .hex-swatch {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-right: 0.45em;
+  border-radius: 0.25rem;
+  vertical-align: -0.08em;
+  border: 1px solid var(--color-border-strong);
+}
+
+/* the model's thinking is set in the interface font, smaller and quieter than the answer */
+.reasoning-body .oprel-markdown {
+  font-family: var(--font-ui);
+  font-size: 0.78125rem;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+}
+.reasoning-body .oprel-markdown p {
+  margin: 0.5rem 0;
+}
+.reasoning-body .oprel-markdown strong,
+.reasoning-body .oprel-markdown b {
+  color: var(--color-text);
+}
+.reasoning-body .oprel-markdown li {
+  margin: 0.25rem 0;
+}
+
+/* Oprel Code Block Container */
+.oprel-code-block {
+  width: 100%;
+  border-radius: 0.75rem;
+  background: #0d0b14;
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+  margin: 0.75rem 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+
+.oprel-code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 38px;
+  min-height: 38px;
+  max-height: 38px;
+  padding: 0 0.85rem;
+  background: #07050a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 0;
+}
+
+.oprel-code-lang {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: #94a3b8;
+  font-weight: 600;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.oprel-code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: transparent;
+  border: none;
+  border-radius: 0.375rem;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 0.2rem 0.45rem;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+
+.oprel-code-copy-btn:hover {
+  color: #ffffff;
+  background: transparent;
+  opacity: 1;
+}
+
+.oprel-code-content {
+  overflow-x: auto;
+  padding: 0.85rem 1rem !important;
+  margin: 0 !important;
+  background: #0d0b14;
+}
+
+.oprel-code-content pre {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  line-height: 1.6 !important;
+  font-family: var(--font-mono) !important;
+}
+
+.oprel-code-content code {
+  font-family: var(--font-mono) !important;
+  font-size: 0.8125rem !important;
+  background: transparent !important;
+  padding: 0 !important;
+  border: none !important;
+  color: #f8fafc !important;
+  white-space: pre !important;
+  word-break: normal !important;
+  word-wrap: normal !important;
+}
+
+/* Shiki Syntax Token Highlighting */
+.tok-keyword {
+  color: #c084fc !important;
+  font-weight: 600;
+}
+.tok-string {
+  color: #34d399 !important;
+}
+.tok-number {
+  color: #fbbf24 !important;
+}
+.tok-comment {
+  color: #64748b !important;
+  font-style: italic;
+}
+.tok-bool {
+  color: #f472b6 !important;
+  font-weight: 600;
+}
+
+.oprel-code-content::-webkit-scrollbar {
+  height: 6px;
+}
+
+.oprel-code-content::-webkit-scrollbar-track {
+  background: #07050a;
+}
+
+.oprel-code-content::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+/* Slim modern scrollbars for thread views */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-strong);
+}

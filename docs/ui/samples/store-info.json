@@ -1,0 +1,10 @@
+{
+  "attachments": 0,
+  "attachments_dir": "<data-dir>\\attachments",
+  "conversations": 1,
+  "messages": 2,
+  "path": "<data-dir>\\dara.db",
+  "schema_version": 1,
+  "settings": 13,
+  "size_bytes": 4096
+}

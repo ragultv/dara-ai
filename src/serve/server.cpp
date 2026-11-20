@@ -36,6 +36,7 @@
 #include "serve/engine.h"
 #include "serve/metrics.h"
 #include "serve/options.h"
+#include "serve/store.h"
 
 #ifdef _WIN32
 #include <process.h>
@@ -133,13 +134,25 @@ SampleParams parse_sampling(const json& b, int default_max) {
     return sp;
 }
 
+// reasoning effort -> thinking-token budget (0 = off). Names follow OpenAI / Hermes / Claude Code; "extra" and "xhigh" are the same level.
+int effort_budget(const std::string& e) {
+    if (e == "none" || e == "off" || e == "minimal" || e.empty()) return 0;
+    if (e == "low") return 512;
+    if (e == "medium") return 2048;
+    if (e == "high") return 4096;
+    if (e == "xhigh" || e == "extra") return 8192;
+    if (e == "max") return 32768;
+    throw std::invalid_argument("unknown reasoning_effort '" + e + "' (none, low, medium, high, xhigh, max)");
+}
+
 double r2(double v) { return std::round(v * 100.0) / 100.0; }
 
 json usage_json(const GenResult& r) {
     return {{"prompt_tokens", r.usage.prompt_tokens},
             {"completion_tokens", r.usage.completion_tokens},
             {"total_tokens", r.usage.total_tokens()},
-            {"prompt_tokens_details", {{"cached_tokens", r.usage.cached_tokens}, {"image_tokens", r.usage.image_tokens}}}};
+            {"prompt_tokens_details", {{"cached_tokens", r.usage.cached_tokens}, {"image_tokens", r.usage.image_tokens}}},
+            {"completion_tokens_details", {{"reasoning_tokens", r.usage.reasoning_tokens}}}};
 }
 
 json timings_json(const GenResult& r) {
@@ -152,6 +165,8 @@ json timings_json(const GenResult& r) {
             {"prefill_ms", r2(t.prefill_ms)},
             {"prefill_tokens_per_second", r2(t.prefill_tps())},
             {"ttft_ms", r2(t.ttft_ms)},
+            {"thinking_ms", r2(t.thinking_ms)},
+            {"thinking_cut", r.think_cut},
             {"decode_tokens", t.decoded},
             {"decode_ms", r2(t.decode_ms)},
             {"decode_tokens_per_second", r2(t.decode_tps())},
@@ -179,7 +194,12 @@ void add_dara_fields(json& j, const GenResult& r) {
 
 std::string dump(const json& j) { return j.dump(-1, ' ', false, json::error_handler_t::replace); }
 
-json error_json(const std::string& msg, const char* type) { return {{"error", {{"message", msg}, {"type", type}}}}; }
+json error_json(const std::string& msg, const char* type) {
+    json e = {{"error", {{"message", msg}, {"type", type}}}};
+    // machine-readable reason the app can act on (it offers to install / load the image encoder)
+    if (msg.find("no image encoder") != std::string::npos) e["error"]["code"] = "vision_unavailable";
+    return e;
+}
 
 double mb(uint64_t b) { return r2(b / 1048576.0); }
 
@@ -834,7 +854,9 @@ int dara_serve_main(int argc, char** argv) {
     struct { std::mutex mu; std::thread th; } async_load;   // POST /dara/models/load with "async": true
     reg.models_dir = default_models_dir();
     LoadSpec initial;
-    std::string host = "127.0.0.1", api_key;
+    std::string host = "127.0.0.1", api_key, data_dir = Store::default_data_dir();
+    bool no_store = false;
+    if (const char* k = std::getenv("DARA_API_KEY"); k && *k) api_key = k;   // preferred over --api-key: arguments are visible to other processes
     int port = 11435, default_max = 1024;
     std::vector<std::string> cors = {"http://localhost", "http://127.0.0.1", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"};
     for (int i = 1; i < argc; ++i) {
@@ -859,13 +881,16 @@ int dara_serve_main(int argc, char** argv) {
         else if (a == "--compact-reserve") reg.base.compact_reserve = std::atoi(next().c_str());
         else if (a == "--max-tokens") default_max = std::atoi(next().c_str());
         else if (a == "--api-key") api_key = next();
+        else if (a == "--data-dir") data_dir = next();
+        else if (a == "--no-store") no_store = true;
         else if (a == "--cors-origin") cors.push_back(next());
         else if (initial.model.empty() && a[0] != '-') initial.model = a;
         else {
             std::fprintf(stderr, "unknown argument %s\n"
                          "usage: dara serve [--model <id or .gguf>] [--models-dir DIR] [--port 11435] [--host 127.0.0.1] [--vision | --mmproj <gguf>|auto]\n"
                          "                  [--flash auto|on|off|<drafter.dflash>] [--no-spec] [--ctx auto|N] [--min-context N] [--image-max-tokens N]\n"
-                         "                  [--max-tokens N] [--api-key KEY] [--cors-origin ORIGIN]\n"
+                         "                  [--max-tokens N] [--api-key KEY (or DARA_API_KEY)] [--cors-origin ORIGIN]\n"
+                         "                  [--data-dir DIR (app database; default %%LOCALAPPDATA%%/Dara, or DARA_DATA_DIR)] [--no-store]\n"
                          "model ids: %s\n", a.c_str(), Registry::ids().c_str());
             return 2;
         }
@@ -905,12 +930,29 @@ int dara_serve_main(int argc, char** argv) {
         return "";
     };
     svr.set_pre_routing_handler([&](const httplib::Request& req, httplib::Response& res) {
+        // DNS rebinding defense: when bound to loopback or standard hosts, validate Host header
+        const std::string host_hdr = req.get_header_value("Host");
+        if (!host_hdr.empty()) {
+            std::string h = host_hdr;
+            const size_t colon = h.rfind(':');
+            if (colon != std::string::npos && (h.find(']') == std::string::npos || colon > h.find(']'))) {
+                h = h.substr(0, colon);
+            }
+            bool host_ok = false;
+            if (h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "[::1]") host_ok = true;
+            if (!host.empty() && (h == host || host == "0.0.0.0" || host == "::")) host_ok = true;
+            if (!host_ok) {
+                res.status = 403;
+                res.set_content(dump(error_json("access denied: invalid Host header (DNS rebinding defense)", "security_error")), "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
         const std::string o = allowed_origin(req);
         if (!o.empty()) {
             res.set_header("Access-Control-Allow-Origin", o);
             res.set_header("Vary", "Origin");
             res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
         }
         if (req.method == "OPTIONS") { res.status = 204; return httplib::Server::HandlerResponse::Handled; }
         if (!api_key.empty() && req.path != "/health") {
@@ -1094,10 +1136,24 @@ int dara_serve_main(int argc, char** argv) {
         reg.unload();
         res.set_content(dump({{"status", "unloaded"}}), "application/json");
     });
+    svr.Post("/dara/shutdown", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content(dump({{"status", "shutting_down"}}), "application/json");
+        std::thread([&svr]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            svr.stop();
+        }).detach();
+    });
 
     // ---- options, benchmark, version ----
     Benchmarks benches;
     CalibrationStore calib(CalibrationStore::default_path());
+    std::unique_ptr<Store> store;
+    std::string store_problem = "disabled with --no-store";
+    if (!no_store) {
+        try { store = std::make_unique<Store>(data_dir); store_problem.clear(); }
+        catch (const std::exception& e) { store_problem = e.what(); std::fprintf(stderr, "WARNING: the app database is not available (%s); chat history endpoints answer 503\n", e.what()); }
+    }
+    register_store_routes(svr, store.get(), store_problem);
     svr.Get("/dara/version", [&](const httplib::Request&, httplib::Response& res) {
         res.set_content(dump({{"version", DARA_VERSION}, {"api", 1}, {"built", std::string(__DATE__) + " " + __TIME__}, {"calibration_file", calib.path()}}), "application/json");
     });
@@ -1202,6 +1258,9 @@ int dara_serve_main(int argc, char** argv) {
                 else if (f.is_string()) { const std::string v = f.get<std::string>(); sp.flash = v == "on" || v == "true" ? 1 : v == "off" || v == "false" ? 0 : -1; }
             }
             if (body.contains("cache_write") && body["cache_write"].is_boolean()) sp.cache_write = body["cache_write"].get<bool>();
+            // thinking: "reasoning_effort": none | low | medium | high | xhigh | max (OpenAI name), or "thinking_budget": N tokens (-1 = no cap)
+            if (chat && body.contains("reasoning_effort") && body["reasoning_effort"].is_string()) sp.think_budget = effort_budget(body["reasoning_effort"].get<std::string>());
+            if (chat && body.contains("thinking_budget") && body["thinking_budget"].is_number_integer()) sp.think_budget = body["thinking_budget"].get<int>();
         } catch (const std::exception& e) { bad(res, 400, e.what(), "invalid_request_error"); return; }
         if (const CatalogEntry* ce = catalog_find(model)) {   // a Dara model that is not installed: 404 with the download hint, before streaming starts
             if (installed_path(reg.models_dir, *ce, *ce->file("model")).empty()) { not_found(res, model, "model '" + ce->id + "' is not installed"); return; }
@@ -1219,7 +1278,7 @@ int dara_serve_main(int argc, char** argv) {
             }
             log_result(chat ? "chat" : "completion", r);
             json choice = {{"index", 0}, {"finish_reason", r.finish_reason == "cancelled" ? "stop" : r.finish_reason}};
-            if (chat) choice["message"] = {{"role", "assistant"}, {"content", r.text}};
+            if (chat) { choice["message"] = {{"role", "assistant"}, {"content", r.text}}; if (!r.reasoning.empty()) choice["message"]["reasoning_content"] = r.reasoning; }
             else choice["text"] = r.text;
             json j = {{"id", id}, {"object", obj}, {"created", now}, {"model", used}, {"choices", json::array({choice})}};
             add_dara_fields(j, r);
@@ -1243,11 +1302,16 @@ int dara_serve_main(int argc, char** argv) {
                 alive = send(chunk(chat ? json{{"content", t}} : json(t), nullptr));
                 return alive;   // a closed connection cancels the generation
             };
+            Engine::TextFn rfn = [&](const std::string& t) {   // the thinking: its own delta field, as DeepSeek / vLLM / llama.cpp do
+                if (!alive) return false;
+                alive = send(chunk(json{{"reasoning_content", t}}, nullptr));
+                return alive;
+            };
             GenResult r; std::string err; int code = 0;
             const bool ok = run_locked(model, [&](Engine& e) {
                 used = e.info().id;
                 if (chat && !started) { started = true; alive = send(chunk(json{{"role", "assistant"}, {"content", ""}}, nullptr)); }
-                return chat ? e.chat(msgs, sp, fn) : e.complete(prompt, sp, fn);
+                return chat ? e.chat(msgs, sp, fn, rfn) : e.complete(prompt, sp, fn);
             }, r, err, code);
             if (!ok) {
                 send(error_json(err, code == 404 ? "model_not_found" : code == 400 ? "invalid_request_error" : "server_error"));

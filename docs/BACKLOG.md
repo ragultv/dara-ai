@@ -62,3 +62,5 @@ tier's budget.
 - **Images when the context is nearly full:** the encode borrows the unused tail of the K/V caches, which is cut into small pieces per layer; when
   the conversation fills the context the big buffers come from free VRAM instead. Splitting the largest working buffers (MLP activations, q/k/v) so they
   fit the pieces would make a full context cheaper still. A CPU fallback for encoding would remove the last failure case.
+- **Server hardening for the desktop app:** (done: the API key is read from `DARA_API_KEY`) validate the
+  `Host` header (accept only `127.0.0.1:<port>` / `localhost:<port>`) against DNS rebinding; `POST /dara/shutdown` for a graceful stop from the app.
