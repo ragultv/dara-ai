@@ -60,9 +60,26 @@ customRenderer.code = function ({ text, lang }: { text: string; lang?: string })
   return `<div class="oprel-code-block"><div class="oprel-code-header"><span class="oprel-code-lang">${language}</span><button type="button" class="oprel-code-copy-btn" aria-label="Copy code block"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span class="copy-label">Copy code</span></button></div><div class="oprel-code-content"><pre><code class="language-${language}">${highlighted}</code></pre></div></div>`;
 };
 
+// A color written as inline code (#7C3AED) gets a small swatch, as in Claude's replies. Only a plain hex value ever reaches a style attribute.
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
 customRenderer.codespan = function ({ text }: { text: string }) {
-  return `<code class="oprel-inline-code">${text}</code>`;
+  const plain = text.trim();
+  const swatch = HEX_COLOR.test(plain)
+    ? `<span class="hex-swatch" style="background:${plain}"></span>`
+    : "";
+  return `<code class="oprel-inline-code">${swatch}${escapeHtml(text)}</code>`;
 };
+
+// Model output must never carry styling of its own: a style attribute survives only on our own swatch, and only as a background color.
+DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+  if (data.attrName !== "style") return;
+  const ok =
+    node instanceof Element &&
+    node.classList.contains("hex-swatch") &&
+    /^background:\s*#[0-9a-fA-F]{3,8}$/.test(data.attrValue);
+  if (!ok) data.keepAttr = false;
+});
 
 marked.setOptions({
   gfm: true,
@@ -118,6 +135,7 @@ export const Markdown: React.FC<MarkdownProps> = ({ content, className = "" }) =
         "target",
         "rel",
         "class",
+        "style",
         "type",
         "aria-label",
         "width",

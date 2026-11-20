@@ -1,19 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useRouter } from "../router/useRouter.ts";
+import { Logo } from "../ui/Logo.tsx";
 
 /** True inside the Tauri window (the browser dev view has the browser's own chrome). */
 export const isTauriWindow = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
-const PAGE_TITLES: Record<string, string> = {
-  chat: "Chat",
-  models: "Models",
-  options: "Options",
-  monitor: "Monitor",
-  settings: "Settings",
-  kit: "Kit"
-};
 
 const glyph = {
   minimize: <path d="M1 5.5h8" />,
@@ -39,13 +30,13 @@ const ControlButton: React.FC<{
     title={label}
     onClick={onClick}
     tabIndex={-1}
-    className={`h-full w-11 inline-flex items-center justify-center text-text-muted transition-colors cursor-default ${
+    className={`h-full w-14 inline-flex items-center justify-center text-text-muted transition-colors cursor-default ${
       danger ? "hover:bg-danger hover:text-white" : "hover:bg-surface-raised hover:text-text"
     }`}
   >
     <svg
-      width="10"
-      height="10"
+      width="11"
+      height="11"
       viewBox="0 0 10 10"
       fill="none"
       stroke="currentColor"
@@ -57,9 +48,8 @@ const ControlButton: React.FC<{
   </button>
 );
 
-/** Custom window title bar (the native one is off, see tauri.conf.json): app mark and name, current page, minimize / maximize / close. */
+/** Custom window title bar (the native one is off, see tauri.conf.json): the Dara logo only, minimize / maximize / close. */
 export const TitleBar: React.FC = () => {
-  const route = useRouter((s) => s.current);
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -93,21 +83,11 @@ export const TitleBar: React.FC = () => {
   return (
     <header
       data-tauri-drag-region
-      className="relative flex h-8 shrink-0 items-center justify-between border-b border-border bg-bg-subtle text-xs select-none"
+      className="relative flex h-12 shrink-0 items-center justify-between border-b border-border bg-bg-subtle text-xs select-none"
     >
-      <div data-tauri-drag-region className="flex items-center gap-2 pl-3">
-        <img data-tauri-drag-region src="/dara.png" alt="" className="h-4 w-4 object-contain" />
-        <span data-tauri-drag-region className="font-semibold text-text">
-          Dara
-        </span>
+      <div data-tauri-drag-region className="flex h-full items-center pl-4">
+        <Logo alt="Dara" className="h-8 w-8 object-contain pointer-events-none" />
       </div>
-
-      <span
-        data-tauri-drag-region
-        className="pointer-events-none absolute left-1/2 -translate-x-1/2 text-text-muted"
-      >
-        {PAGE_TITLES[route] ?? "Dara"}
-      </span>
 
       <div className="flex h-full items-stretch">
         <ControlButton label="Minimize" icon="minimize" onClick={() => void win.minimize()} />

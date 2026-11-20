@@ -199,3 +199,13 @@ export function statsFromRaw(raw: Partial<ChatStats> | null | undefined): Messag
   };
   return out;
 }
+
+/**
+ * Token counts for tight spaces: 131072 -> "131k", 8192 -> "8.2k", 900 -> "900". Always thousands of 1000, so it reads the same as the
+ * exact number shown in the context popup (131,072). The popup also says "128K" is the same size when the number is a power of two.
+ */
+export function formatTokensShort(n: number): string {
+  if (n < 1000) return String(n);
+  const k = n / 1000;
+  return `${k >= 100 ? Math.round(k) : Math.round(k * 10) / 10}k`;
+}

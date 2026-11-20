@@ -10,6 +10,7 @@ import { NumberTicker } from "../../ui/NumberTicker.tsx";
 import { toast } from "../../ui/Toast.tsx";
 import { ComposerAttachments } from "./ComposerAttachments.tsx";
 import { FlashToggle } from "./FlashToggle.tsx";
+import { ThinkingEffort } from "./ThinkingEffort.tsx";
 import { ContextBreakdown } from "./ContextBreakdown.tsx";
 import { useChatStore, getContextView } from "../../stores/useChatStore.ts";
 import { useModelsStore } from "../../stores/useModelsStore.ts";
@@ -17,6 +18,7 @@ import { useServerStore } from "../../stores/useServerStore.ts";
 import { useSettingsStore } from "../../stores/useSettingsStore.ts";
 import { addonSizeMb, addonState, enableAddon, useAddonProgress } from "../../chat/addons.ts";
 import { prepareImage } from "../../utils/image.ts";
+import { formatTokensShort } from "../../chat/context.ts";
 
 const MAX_IMAGES = 6;
 
@@ -221,9 +223,7 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
         className={`relative rounded-2xl bg-surface border transition-all shadow-sm p-3 space-y-2 ${
-          isDragging
-            ? "border-border-strong "
-            : "border-border focus-within:border-border-strong"
+          isDragging ? "border-border-strong " : "border-border focus-within:border-border-strong"
         }`}
       >
         <ComposerAttachments
@@ -361,6 +361,8 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
 
             <FlashToggle />
 
+            <ThinkingEffort />
+
             <span className="text-border" aria-hidden="true">
               |
             </span>
@@ -380,9 +382,7 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
                 <span className="tabular-nums">
                   {ctx.estimated ? "~" : ""}
                   <NumberTicker value={ctx.used} /> /{" "}
-                  {ctx.capacity
-                    ? `${(ctx.capacity / 1024).toFixed(ctx.capacity % 1024 === 0 ? 0 : 1)}k`
-                    : "-"}
+                  {ctx.capacity ? formatTokensShort(ctx.capacity) : "-"}
                 </span>
                 {ctx.capacity ? (
                   <span className="text-[9px] text-text-subtle">({contextPercent}%)</span>

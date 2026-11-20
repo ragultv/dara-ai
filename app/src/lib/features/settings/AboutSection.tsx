@@ -4,6 +4,7 @@ import { Badge } from "../../ui/Badge.tsx";
 import { KeyValue } from "../monitor/KeyValue.tsx";
 import { SettingsSection } from "./SettingsSection.tsx";
 import type { ServerFacts } from "./useServerFacts.ts";
+import { Logo } from "../../ui/Logo.tsx";
 
 interface AboutSectionProps {
   facts: ServerFacts;
@@ -26,7 +27,7 @@ export const AboutSection: React.FC<AboutSectionProps> = ({ facts }) => {
   return (
     <SettingsSection id="settings-about" icon="info" title="About">
       <div className="flex items-center gap-2.5">
-        <img src="/dara.png" alt="" className="h-6 w-6 shrink-0 object-contain" />
+        <Logo alt="" className="h-6 w-6 shrink-0 object-contain" />
         <span className="text-sm font-bold text-text">Dara</span>
         {appVersion && (
           <Badge variant="primary" size="sm">

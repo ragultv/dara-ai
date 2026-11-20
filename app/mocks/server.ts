@@ -268,9 +268,12 @@ export function createMockServer(options: MockServerOptions = {}): {
       });
       req.on("end", () => {
         let isStream = false;
+        let thinking = false;
         try {
           const parsed = JSON.parse(body);
           isStream = Boolean(parsed.stream);
+          thinking =
+            typeof parsed.reasoning_effort === "string" && parsed.reasoning_effort !== "none";
         } catch {
           // default false
         }
@@ -283,6 +286,18 @@ export function createMockServer(options: MockServerOptions = {}): {
             "Cache-Control": "no-cache",
             Connection: "keep-alive"
           });
+          if (thinking) {
+            // reasoning deltas first, then the recorded answer (the shape the engine streams)
+            const thoughts = [
+              "Let me work through this. ",
+              "First, restate the question. ",
+              "Then check the answer once more."
+            ];
+            const mk = (delta: Record<string, string>) =>
+              `data: ${JSON.stringify({ id: "chatcmpl-mock", object: "chat.completion.chunk", created: 0, model: "dara-nano", choices: [{ index: 0, finish_reason: null, delta }] })}\n\n`;
+            res.write(mk({ role: "assistant" } as unknown as Record<string, string>));
+            for (const t of thoughts) res.write(mk({ reasoning_content: t }));
+          }
           res.end(data);
         } else {
           const chatPath = path.join(samplesDir, "chat-response.json");

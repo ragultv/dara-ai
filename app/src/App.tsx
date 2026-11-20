@@ -5,6 +5,7 @@ import { useServerStore } from "./lib/stores/useServerStore.ts";
 import { useModelsStore } from "./lib/stores/useModelsStore.ts";
 import { useSettingsStore } from "./lib/stores/useSettingsStore.ts";
 import { useChatStore } from "./lib/stores/useChatStore.ts";
+import { useAppearanceStore } from "./lib/stores/useAppearanceStore.ts";
 
 import { LeftRail } from "./lib/shell/LeftRail.tsx";
 import { Header } from "./lib/shell/Header.tsx";
@@ -25,6 +26,7 @@ export const App: React.FC = () => {
   const currentRoute = useRouter((s) => s.current);
 
   const initTheme = useThemeStore((s) => s.init);
+  const initAppearance = useAppearanceStore((s) => s.init);
   const initServer = useServerStore((s) => s.init);
   const fetchModels = useModelsStore((s) => s.fetchModels);
   const initSettings = useSettingsStore((s) => s.init);
@@ -37,13 +39,14 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     initTheme();
+    initAppearance();
     void initServer().catch(() => {
       // Local fallback in case server initialization errors
       void fetchModels();
       void initSettings();
       void loadConversations();
     });
-  }, [initTheme, initServer, fetchModels, initSettings, loadConversations]);
+  }, [initTheme, initAppearance, initServer, fetchModels, initSettings, loadConversations]);
 
   // Pages without their own scroll container scroll inside the viewport instead of overflowing it.
   const scrollable = (page: ReactNode) => (
@@ -85,15 +88,15 @@ export const App: React.FC = () => {
       {isTauriWindow() && <TitleBar />}
       <div className="flex min-h-0 flex-1">
         {/* Left Sidebar Navigation */}
-        <LeftRail
-          isCollapsed={isRailCollapsed}
-          onToggle={() => setIsRailCollapsed(!isRailCollapsed)}
-        />
+        <LeftRail isCollapsed={isRailCollapsed} />
 
         {/* Main App Container */}
         <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative">
           {/* Top Header */}
-          <Header />
+          <Header
+            railCollapsed={isRailCollapsed}
+            onToggleRail={() => setIsRailCollapsed(!isRailCollapsed)}
+          />
 
           {/* Dynamic Route Viewport */}
           <div className="flex-1 overflow-hidden relative bg-bg">{renderRoute()}</div>

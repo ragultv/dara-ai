@@ -8,6 +8,7 @@ import { MessagePair } from "../lib/components/assistant-ui/MessagePair.tsx";
 import { toast } from "../lib/ui/Toast.tsx";
 import { enableAddon } from "../lib/chat/addons.ts";
 import type { ContextWindow } from "../lib/chat/types.ts";
+import { Logo } from "../lib/ui/Logo.tsx";
 
 function groupConversations(convs: Conversation[]) {
   const now = new Date();
@@ -161,7 +162,7 @@ export const ChatPage: React.FC = () => {
             /* Empty State Hero */
             <div className="h-full flex flex-col items-center justify-center max-w-xl mx-auto text-center space-y-6 p-4">
               <div className="flex flex-col items-center space-y-2">
-                <img src="/dara.png" alt="Dara" className="w-12 h-12 object-contain" />
+                <Logo alt="Dara" className="w-14 h-14 object-contain" />
                 <h2 className="text-xl font-bold tracking-tight text-text">Dara Studio</h2>
                 <p className="text-xs text-text-muted leading-relaxed max-w-sm">
                   High-throughput offline AI running directly on your GPU with flash drafting and

@@ -18,6 +18,7 @@ import { Tabs } from "../lib/ui/Tabs.tsx";
 import { EmptyState } from "../lib/ui/EmptyState.tsx";
 import { ErrorState } from "../lib/ui/ErrorState.tsx";
 import { Markdown } from "../lib/ui/Markdown.tsx";
+import { Reasoning } from "../lib/components/assistant-ui/Reasoning.tsx";
 import { toast } from "../lib/ui/Toast.tsx";
 
 export const KitPage: React.FC = () => {
@@ -85,14 +86,42 @@ export const KitPage: React.FC = () => {
         <Toggle label="Toggle Switch" checked={toggleChecked} onchange={setToggleChecked} />
       </section>
 
+      {/* Reasoning (the model's thinking) */}
+      <section className="space-y-4">
+        <h2 className="text-xs font-bold uppercase tracking-wider text-text-subtle">Reasoning</h2>
+        <Reasoning
+          streaming
+          text={
+            "Thinking Process:\n\n1.  **Analyze the Request:** The user wants the product of 17 and 23.\n2.  **Calculate:** 17 x 20 = 340, 17 x 3 = 51, so 340 + 51 = 391.\n3.  **Check the result:** 23 x 17 = 230 + 161 = 391. Both agree."
+          }
+        />
+        <Reasoning
+          streaming={false}
+          durationMs={12400}
+          text={
+            "Thinking Process:\n\n1.  **Analyze the Request:** The user wants the product of 17 and 23.\n2.  **Calculate:** 17 x 20 = 340, 17 x 3 = 51, so 340 + 51 = 391."
+          }
+        />
+        <Reasoning
+          streaming={false}
+          durationMs={61000}
+          cut
+          text={
+            "Let me plan the trip day by day. Day 1: arrive in Tokyo, settle in, evening walk in Shinjuku..."
+          }
+        />
+      </section>
+
       {/* Markdown Showcase */}
       <section className="space-y-4">
         <h2 className="text-xs font-bold uppercase tracking-wider text-text-subtle">
           Markdown & Code Blocks
         </h2>
-        <Markdown
-          content={`Here is a code block:\n\`\`\`python\ndef merge_sort(arr):\n    # Base case: single element is sorted\n    if len(arr) <= 1:\n        return arr\n    mid = len(arr) // 2\n    left = merge_sort(arr[:mid])\n    right = merge_sort(arr[mid:])\n    return merge(left, right)\n\`\`\``}
-        />
+        <div className="font-[family-name:var(--font-reply)]">
+          <Markdown
+            content={`I've made a full royal purple theme with both light and dark modes. Switch between them by setting \`data-theme="dark"\` on \`<html>\`.\n\n### Core colors\n\n| Role | Color | Hex |\n| --- | --- | --- |\n| Primary | Royal violet | \`#7C3AED\` (hover \`#6D28D9\`, pressed \`#5B21B6\`) |\n| Deep royal | Dark violet for headings and gradients | \`#2E1065\` |\n| Secondary | Soft orchid violet, for highlights, active states and glows | \`#C084FC\` |\n| Accent (optional) | Gold, for badges and "pro" or "new" tags | \`#E8C468\` |\n\n**Dark mode** uses a near-black with a purple tint, which looks more premium than flat black:\n\n- Background \`#09050F\`, sidebar \`#0D0818\`, cards \`#120B1E\`, input \`#150E24\`\n- Borders \`#241A38\`, text \`#F4EFFB\`, muted text \`#A99CC0\`\n\n**Light mode** uses a soft lavender-white:\n\n- Background \`#FBF9FF\`, sidebar \`#F3EEFC\`, cards \`#FFFFFF\`\n- Borders \`#E4DBF2\`, text \`#1A1128\`\n\nHere is a code block:\n\`\`\`python\ndef merge_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    mid = len(arr) // 2\n    return merge(merge_sort(arr[:mid]), merge_sort(arr[mid:]))\n\`\`\``}
+          />
+        </div>
       </section>
     </div>
   );

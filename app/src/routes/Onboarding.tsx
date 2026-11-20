@@ -15,6 +15,7 @@ import {
   recommendTier
 } from "../lib/features/models/modelHelpers.ts";
 import { formatContext, formatMb } from "../lib/utils/format.ts";
+import { Logo } from "../lib/ui/Logo.tsx";
 
 export const Onboarding: React.FC = () => {
   const models = useModelsStore((s) => s.models);
@@ -50,7 +51,7 @@ export const Onboarding: React.FC = () => {
       <div className="flex flex-col items-center p-8 max-w-5xl mx-auto space-y-8 text-left select-text">
         <header className="text-center space-y-3 max-w-xl">
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-surface-raised border border-border mx-auto">
-            <img src="/dara.png" alt="Dara" className="w-8 h-8 object-contain" />
+            <Logo alt="Dara" className="w-8 h-8 object-contain" />
           </div>
           <h1 className="text-3xl font-bold tracking-tight text-text">Welcome to Dara</h1>
           <p className="text-sm text-text-muted leading-relaxed">

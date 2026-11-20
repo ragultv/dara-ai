@@ -4,7 +4,12 @@ import { useModelsStore } from "../stores/useModelsStore.ts";
 import { useServerStore } from "../stores/useServerStore.ts";
 import { Icon } from "../ui/Icon.tsx";
 
-export const Header: React.FC = () => {
+interface HeaderProps {
+  railCollapsed: boolean;
+  onToggleRail: () => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({ railCollapsed, onToggleRail }) => {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const currentRoute = useRouter((s) => s.current);
 
@@ -45,6 +50,15 @@ export const Header: React.FC = () => {
     <header className="h-12 border-b border-border bg-bg-subtle/80 backdrop-blur-md px-5 flex items-center justify-between shrink-0 select-none z-20">
       {/* Left: Page Title / Breadcrumb */}
       <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          aria-label={railCollapsed ? "Open sidebar" : "Close sidebar"}
+          title={railCollapsed ? "Open sidebar" : "Close sidebar"}
+          onClick={onToggleRail}
+          className="-ml-2 p-1.5 rounded-md text-text-muted hover:text-text hover:bg-surface-raised cursor-pointer focus-visible:outline-2 focus-visible:outline-focus"
+        >
+          <Icon name={railCollapsed ? "panel-left-open" : "panel-left-close"} size={16} />
+        </button>
         <span className="text-xs font-bold text-text-muted uppercase tracking-wider">
           {routeName}
         </span>

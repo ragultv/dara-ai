@@ -34,12 +34,19 @@ function getSystemTheme(): "light" | "dark" {
 function applyThemeToDom(effective: "light" | "dark") {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
+  if (root.getAttribute("data-theme") === effective) return;
+  // Freeze every transition while the colors change so the whole window flips at once instead of component by component.
+  root.classList.add("theme-switching");
   root.setAttribute("data-theme", effective);
   if (effective === "dark") {
     root.classList.add("dark");
   } else {
     root.classList.remove("dark");
   }
+  void root.offsetHeight; // commit the new colors with transitions off
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => root.classList.remove("theme-switching"))
+  );
 }
 
 function cacheChoice(choice: ThemeChoice): void {

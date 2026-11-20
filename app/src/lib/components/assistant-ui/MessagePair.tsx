@@ -3,6 +3,8 @@ import { Icon } from "../../ui/Icon.tsx";
 import { Markdown } from "../../ui/Markdown.tsx";
 import { MessageActions } from "./MessageActions.tsx";
 import type { UiMessage } from "../../chat/types.ts";
+import { Logo } from "../../ui/Logo.tsx";
+import { Reasoning } from "./Reasoning.tsx";
 
 interface MessagePairProps {
   message: UiMessage;
@@ -140,23 +142,34 @@ export const MessagePair: React.FC<MessagePairProps> = ({
   }
 
   // Assistant message
-  if (!isStreaming && !message.content.trim() && !message.error) {
+  if (!isStreaming && !message.content.trim() && !message.error && !message.reasoning?.trim()) {
     return null; // no empty phantom bubbles
   }
 
   const hasError = Boolean(message.error);
   const hasText = message.content.trim().length > 0;
+  const hasReasoning = Boolean(message.reasoning?.trim());
+  // the thought is still being written while the reply streams and no answer text has started
+  const thinkingNow = isStreaming && hasReasoning && !hasText;
   const hitLimit = message.finishReason === "length" && !isStreaming && !hasError;
 
   return (
     <div className="flex gap-3 group text-left">
-      <img
-        src="/dara.png"
+      <Logo
         alt="Dara AI"
-        className={`w-7 h-7 object-contain shrink-0 mt-0.5 ${isStreaming ? "animate-pulse" : ""}`}
+        className={`w-7 h-7 object-contain shrink-0 ${isStreaming ? "animate-pulse" : ""}`}
       />
       <div className="flex-1 min-w-0 space-y-1">
-        {isStreaming && !hasText && (
+        {hasReasoning && (
+          <Reasoning
+            text={message.reasoning ?? ""}
+            streaming={thinkingNow}
+            durationMs={message.reasoningMs}
+            cut={message.reasoningCut}
+          />
+        )}
+
+        {isStreaming && !hasText && !hasReasoning && (
           <div className="flex items-center gap-2 h-7 text-text-subtle">
             <span className="w-1.5 h-1.5 rounded-full bg-text-muted animate-pulse" />
             <span className="text-xs text-text-muted font-medium">Generating response...</span>
@@ -233,7 +246,7 @@ export const MessagePair: React.FC<MessagePairProps> = ({
           </div>
         )}
 
-        {!isStreaming && hasText && !hasError && (
+        {!isStreaming && (hasText || hasReasoning) && !hasError && (
           <div className="pt-1">
             <MessageActions
               content={message.content}
