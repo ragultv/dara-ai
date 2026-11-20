@@ -1,6 +1,14 @@
 import type { ReasoningEffort } from "../chat/effort.ts";
 import { runEdit } from "./askDara.ts";
-import { applyOps, describeChange, joinBlocks, parseOps, splitBlocks } from "./blocks.ts";
+import {
+  applyOps,
+  describeChange,
+  joinBlocks,
+  parseOps,
+  plainQuote,
+  quoteOccurrence,
+  splitBlocks
+} from "./blocks.ts";
 import { complete } from "./completion.ts";
 import {
   buildOpsMessages,
@@ -51,6 +59,8 @@ export interface AssistantResult {
   summary: string;
   changed: boolean;
   stopped: boolean;
+  /** questions Dara wants to put to the user as comments, each anchored to words in the document */
+  questions: Array<{ quote: string; nth: number; body: string }>;
 }
 
 const unchanged = (run: AssistantRun, summary: string, stopped: boolean): AssistantResult => ({
@@ -58,7 +68,8 @@ const unchanged = (run: AssistantRun, summary: string, stopped: boolean): Assist
   title: run.title,
   summary,
   changed: false,
-  stopped
+  stopped,
+  questions: []
 });
 
 export async function runAssistant(run: AssistantRun): Promise<AssistantResult> {
@@ -119,12 +130,16 @@ async function editBlocks(run: AssistantRun): Promise<AssistantResult> {
   steps[1] = { label: "Work out the changes", state: "done" };
   run.hooks.steps([...steps]);
   const changed = markdown !== run.markdown;
-  let summary = changed ? describeChange(applied) : "Nothing needed to change.";
+  const questions = applied.questions.map((q) => {
+    const quote = plainQuote(blocks[q.n - 1]!);
+    return { quote, nth: quoteOccurrence(blocks, q.n - 1, quote), body: q.text };
+  });
+  let summary = changed || questions.length ? describeChange(applied) : "Nothing needed to change.";
   if (applied.skipped)
     summary += ` Skipped ${applied.skipped} ${applied.skipped === 1 ? "edit" : "edits"} that named a block that does not exist.`;
   if (res.aborted)
     summary = `Stopped. ${changed ? "Kept what was done so far. " : ""}${summary}`.trim();
-  return { markdown, title: run.title, summary, changed, stopped: res.aborted };
+  return { markdown, title: run.title, summary, changed, stopped: res.aborted, questions };
 }
 
 async function writeNew(run: AssistantRun): Promise<AssistantResult> {
@@ -184,7 +199,8 @@ async function writeNew(run: AssistantRun): Promise<AssistantResult> {
       title: run.title,
       summary: "Wrote the document.",
       changed: true,
-      stopped: run.signal.aborted
+      stopped: run.signal.aborted,
+      questions: []
     };
   }
 
@@ -244,5 +260,12 @@ async function writeNew(run: AssistantRun): Promise<AssistantResult> {
       ? `Stopped after ${n} of ${plan.sections.length} sections. Kept what was written.`
       : "Stopped before any section was written."
     : `Wrote ${title ? `"${title}"` : "the document"} in ${n} ${n === 1 ? "section" : "sections"}.`;
-  return { markdown, title: n > 0 ? title : run.title, summary, changed: n > 0, stopped };
+  return {
+    markdown,
+    title: n > 0 ? title : run.title,
+    summary,
+    changed: n > 0,
+    stopped,
+    questions: []
+  };
 }

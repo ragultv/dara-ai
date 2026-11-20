@@ -125,6 +125,7 @@ export const OPS_SYSTEM_PROMPT = [
   "@replace N   - the new Markdown for block N follows on the next lines",
   "@insert N    - new Markdown blocks follow, placed after block N (@insert 0 puts them at the start)",
   "@delete N    - remove block N",
+  "@comment N   - ask the user a question about block N; the question follows on the next lines. Use it ONLY when you truly need a decision from the user: do not guess, ask, and leave that text as it is.",
   "Only touch the blocks the instruction needs. Blocks you do not mention stay exactly as they are, so never repeat them.",
   "Write the new text without the [N] marker. Use plain Markdown: # headings, **bold**, - lists, | tables |, > quotes, fenced code.",
   "A list or a table is ONE block: replace it as a whole. No greeting, no explanation, no code fence around the answer."

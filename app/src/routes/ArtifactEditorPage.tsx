@@ -1,19 +1,34 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { EditorContent } from "@tiptap/react";
 import { useRouter } from "../lib/router/useRouter.ts";
 import { useArtifactsStore } from "../lib/stores/useArtifactsStore.ts";
 import { useModelsStore } from "../lib/stores/useModelsStore.ts";
+import { useCommentsStore } from "../lib/stores/useCommentsStore.ts";
 import { setMarkdown, useDocEditor } from "../lib/artifacts/useDocEditor.ts";
 import { DocToolbar } from "../lib/artifacts/DocToolbar.tsx";
 import { TableControls } from "../lib/artifacts/TableControls.tsx";
 import { SelectionMenu } from "../lib/artifacts/SelectionMenu.tsx";
-import { DocChat } from "../lib/artifacts/DocChat.tsx";
+import { DocChat, type PanelTab } from "../lib/artifacts/DocChat.tsx";
+import { DocComments } from "../lib/artifacts/DocComments.tsx";
+import {
+  findQuote,
+  quoteForSelection,
+  refreshCommentMarks
+} from "../lib/artifacts/extensions/commentMarks.ts";
+import { insertMedia } from "../lib/artifacts/extensions/media.ts";
+import {
+  buildThreads,
+  commentInstruction,
+  mentionsDara,
+  type Thread
+} from "../lib/artifacts/threads.ts";
 import { useDocAssistant } from "../lib/artifacts/useDocAssistant.ts";
 import { displayTitle, exportFileName, relativeTime } from "../lib/artifacts/format.ts";
 import { Icon } from "../lib/ui/Icon.tsx";
 import { Button } from "../lib/ui/Button.tsx";
 import { Dialog } from "../lib/ui/Dialog.tsx";
 import { Skeleton } from "../lib/ui/Skeleton.tsx";
+import { toast } from "../lib/ui/Toast.tsx";
 
 const SAVE_TEXT = { idle: "", saving: "Saving...", saved: "Saved", error: "Not saved" } as const;
 
@@ -28,15 +43,126 @@ const DocView: React.FC = () => {
   const navigate = useRouter((s) => s.navigate);
   const modelLoaded = useModelsStore((s) => s.models.some((m) => m.dara.loaded));
 
-  const editor = useDocEditor({ initial: doc.content, onChange: setContent });
+  const [chatOpen, setChatOpen] = useState(true);
+  const [panelTab, setPanelTab] = useState<PanelTab>("chat");
+  const [draft, setDraft] = useState<{ quote: string; nth: number } | null>(null);
+  const [prefill, setPrefill] = useState<{ text: string; nonce: number } | null>(null);
+  const showPanel = (tab: PanelTab) => {
+    setChatOpen(true);
+    setPanelTab(tab);
+  };
+
+  const editor = useDocEditor({
+    initial: doc.content,
+    onChange: (md) => setContent(md),
+    docId: doc.id,
+    comments: {
+      getAnchors: () =>
+        useCommentsStore
+          .getState()
+          .items.filter((c) => c.parent_id === null && !c.resolved && c.quote)
+          .map((c) => ({ id: c.id, quote: c.quote, nth: c.nth })),
+      getActive: () => useCommentsStore.getState().activeId,
+      onSelect: (id) => {
+        useCommentsStore.getState().setActive(id);
+        showPanel("comments");
+      }
+    },
+    onMediaProblem: (m) => toast.show(m, "error")
+  });
   const titleRef = useRef<HTMLInputElement>(null);
   const [pageEl, setPageEl] = useState<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [chatOpen, setChatOpen] = useState(true);
-  const [panelTab, setPanelTab] = useState<"chat" | "history">("chat");
   const { busy, send, stop, undo } = useDocAssistant(editor, doc.id);
+
+  // the comments belong to the document: read them when it opens, redraw the highlights when they change
+  const comments = useCommentsStore((s) => s.items);
+  const activeThread = useCommentsStore((s) => s.activeId);
+  useEffect(() => {
+    void useCommentsStore.getState().load(doc.id);
+    return () => useCommentsStore.getState().reset();
+  }, [doc.id]);
+  useEffect(() => {
+    if (editor) refreshCommentMarks(editor);
+  }, [editor, comments, activeThread]);
+  const openThreads = useMemo(
+    () => buildThreads(comments).filter((t) => !t.root.resolved).length,
+    [comments]
+  );
+
+  const startComment = () => {
+    if (!editor) return;
+    const q = quoteForSelection(editor);
+    if (!q) {
+      toast.show("Select some words, or put the cursor in a paragraph, to comment on it.", "info");
+      return;
+    }
+    setDraft({ quote: q.quote, nth: q.nth });
+    showPanel("comments");
+  };
+
+  /** Wakes Dara for a thread: she reads it, changes the document if it calls for that, and answers in the thread. */
+  const askAboutThread = (rootId: string, thread: Thread, display: string) =>
+    void send(commentInstruction(thread), {
+      display,
+      onResult: async (r) => {
+        if (r.stopped) return;
+        await useCommentsStore
+          .getState()
+          .add({ author: "dara", parent_id: rootId, body: r.summary });
+      }
+    });
+
+  const submitDraft = async (body: string, askDara: boolean) => {
+    if (!draft) return;
+    const c = await useCommentsStore.getState().add({ body, quote: draft.quote, nth: draft.nth });
+    setDraft(null);
+    if (!c) return;
+    useCommentsStore.getState().setActive(c.id);
+    if (askDara) askAboutThread(c.id, { root: c, replies: [] }, `Comment: ${body.slice(0, 100)}`);
+  };
+
+  const replyToThread = async (thread: Thread, body: string) => {
+    const c = await useCommentsStore.getState().add({ body, parent_id: thread.root.id });
+    if (!c) return;
+    const daraTookPart =
+      thread.root.author === "dara" || thread.replies.some((r) => r.author === "dara");
+    if (daraTookPart || mentionsDara(body))
+      askAboutThread(
+        thread.root.id,
+        { root: thread.root, replies: [...thread.replies, c] },
+        `Reply: ${body.slice(0, 100)}`
+      );
+  };
+
+  const focusThread = (root: { id: string; quote: string; nth: number }) => {
+    if (!editor) return;
+    const hit = findQuote(editor.state.doc, root.quote, root.nth);
+    if (!hit) {
+      toast.show("That text is no longer in the document.", "info");
+      return;
+    }
+    editor.chain().focus().setTextSelection(hit).scrollIntoView().run();
+    useCommentsStore.getState().setActive(root.id);
+  };
+
+  const askDara = () => {
+    if (!editor) return;
+    const { from, to } = editor.state.selection;
+    const picked =
+      from !== to ? editor.state.doc.textBetween(from, to, " ").trim().slice(0, 300) : "";
+    setPrefill({ text: picked ? `About "${picked}": ` : "", nonce: Date.now() });
+    showPanel("chat");
+  };
+
+  const addMedia = (file: File) => {
+    if (editor)
+      void insertMedia(editor, doc.id, file).then(
+        (problem) => problem && toast.show(problem, "error")
+      );
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -177,7 +303,7 @@ const DocView: React.FC = () => {
               <div ref={setPageEl} className="relative">
                 <EditorContent editor={editor} />
                 {/* the selection menu is moved out of this wrapper by its tooltip: keep it before anything React adds or removes */}
-                <SelectionMenu editor={editor} />
+                <SelectionMenu editor={editor} onComment={startComment} />
                 <TableControls editor={editor} container={pageEl} disabled={busy} />
               </div>
             ) : (
@@ -190,7 +316,13 @@ const DocView: React.FC = () => {
         {editor && (
           <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-6">
             <div className="pointer-events-auto">
-              <DocToolbar editor={editor} disabled={busy} />
+              <DocToolbar
+                editor={editor}
+                disabled={busy}
+                onMedia={addMedia}
+                onComment={startComment}
+                onAsk={askDara}
+              />
             </div>
           </div>
         )}
@@ -209,6 +341,19 @@ const DocView: React.FC = () => {
           onOpenModels={() => navigate("models")}
           tab={panelTab}
           onTab={setPanelTab}
+          openThreads={openThreads}
+          prefill={prefill}
+          commentsSlot={
+            <DocComments
+              draft={draft}
+              busy={busy}
+              modelLoaded={modelLoaded}
+              onDraftSubmit={(b, ask) => void submitDraft(b, ask)}
+              onDraftCancel={() => setDraft(null)}
+              onReply={(t, b) => void replyToThread(t, b)}
+              onFocusThread={focusThread}
+            />
+          }
           updatedAt={doc.updated_at}
           onRestored={(md) => editor && setMarkdown(editor, md)}
         />

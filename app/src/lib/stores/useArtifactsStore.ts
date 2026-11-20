@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { newId, storeApi } from "../api/store-api.ts";
+import { ApiError } from "../api/errors.ts";
 import type { ArtifactKind, DbArtifact, DbArtifactSummary } from "../api/types.ts";
 
 // Artifacts (docs/ui/09-artifacts.md): the gallery list and the one open document. The database is the source of truth; the open
@@ -201,6 +202,14 @@ export const useArtifactsStore = create<ArtifactsState>((set, get) => {
     duplicate: async (id) => {
       try {
         await get().flush();
+        // the server copies the document with its images and videos; an older server without that call gets a text-only copy
+        try {
+          const copy = await storeApi.duplicateArtifact(id, { id: newId() });
+          set((s) => ({ items: [summaryOf(copy), ...s.items] }));
+          return copy.id;
+        } catch (err) {
+          if (!(err instanceof ApiError) || err.status !== 404) throw err;
+        }
         const src = await storeApi.getArtifact(id);
         return await get().create(src.kind, {
           title: src.title ? `${src.title} (copy)` : "",

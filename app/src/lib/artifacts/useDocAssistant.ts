@@ -5,7 +5,15 @@ import { useArtifactsStore } from "../stores/useArtifactsStore.ts";
 import { useDocChatStore } from "../stores/useDocChatStore.ts";
 import { useEffortStore } from "../stores/useEffortStore.ts";
 import { getMarkdown, setMarkdown } from "./useDocEditor.ts";
-import { runAssistant } from "./assistant.ts";
+import { useCommentsStore } from "../stores/useCommentsStore.ts";
+import { runAssistant, type AssistantResult } from "./assistant.ts";
+
+export interface SendOptions {
+  /** what the chat shows as the user's message, when the instruction is longer than what they typed (a comment reply) */
+  display?: string;
+  /** called with the outcome once the task has finished without an error */
+  onResult?: (result: AssistantResult) => void | Promise<void>;
+}
 
 /** Runs the assistant against the open editor: live preview into the page, progress into the chat, one Undo per answer. */
 export function useDocAssistant(editor: Editor | null, docId: string) {
@@ -16,7 +24,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const send = useCallback(
-    async (instruction: string) => {
+    async (instruction: string, opts: SendOptions = {}) => {
       const text = instruction.trim();
       if (!editor || !text || abortRef.current) return;
       const chat = useDocChatStore.getState();
@@ -29,7 +37,9 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
       abortRef.current = controller;
       setBusy(true);
       chat.clearUndo(docId);
-      chat.push(docId, { id: newId(), role: "user", text });
+      const userMsg = { id: newId(), role: "user" as const, text: opts.display ?? text };
+      chat.push(docId, userMsg);
+      void chat.persist(docId, userMsg);
       chat.push(docId, {
         id: msgId,
         role: "assistant",
@@ -43,6 +53,11 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
       });
       const patch = (p: Parameters<typeof chat.patch>[2]) =>
         useDocChatStore.getState().patch(docId, msgId, p);
+      /** saves the answer with the document once it has an outcome (done, stopped or failed) */
+      const save = () => {
+        const m = (useDocChatStore.getState().byDoc[docId] ?? []).find((x) => x.id === msgId);
+        if (m) void useDocChatStore.getState().persist(docId, m);
+      };
 
       editor.setEditable(false);
       let last = 0;
@@ -82,7 +97,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
         if (result.changed) {
           setMarkdown(editor, result.markdown);
           useArtifactsStore.getState().setContent(result.markdown, {
-            snapshot: `Before Dara: ${text.replace(/\s+/g, " ").slice(0, 70)}`
+            snapshot: `Before Dara: ${(opts.display ?? text).replace(/\s+/g, " ").slice(0, 70)}`
           });
           if (result.title !== (useArtifactsStore.getState().doc?.title ?? ""))
             useArtifactsStore.getState().setTitle(result.title);
@@ -91,12 +106,22 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
           if ((useArtifactsStore.getState().doc?.title ?? "") !== startTitle)
             useArtifactsStore.getState().setTitle(startTitle);
         }
+        // questions Dara needs answered go to the comments, next to the words they are about
+        for (const q of result.questions)
+          await useCommentsStore.getState().add({
+            author: "dara",
+            body: q.body,
+            quote: q.quote,
+            nth: q.nth
+          });
         patch({
           text: result.summary,
           reasoningStreaming: false,
           status: result.stopped ? "stopped" : "done",
           undo: result.changed ? { markdown: snapshot, title: startTitle } : null
         });
+        save();
+        await opts.onResult?.(result);
       } catch (err) {
         setMarkdown(editor, snapshot);
         if ((useArtifactsStore.getState().doc?.title ?? "") !== startTitle)
@@ -107,6 +132,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
           reasoningStreaming: false,
           status: "error"
         });
+        save();
       } finally {
         abortRef.current = null;
         editor.setEditable(true);

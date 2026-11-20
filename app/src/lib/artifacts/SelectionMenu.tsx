@@ -42,7 +42,10 @@ const Btn: React.FC<{
   </button>
 );
 
-export const SelectionMenu: React.FC<{ editor: Editor }> = ({ editor }) => {
+export const SelectionMenu: React.FC<{ editor: Editor; onComment: () => void }> = ({
+  editor,
+  onComment
+}) => {
   const [, tick] = useState(0);
   const [styleOpen, setStyleOpen] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
@@ -136,6 +139,8 @@ export const SelectionMenu: React.FC<{ editor: Editor }> = ({ editor }) => {
           </form>
         ) : (
           <>
+            <Btn label="Comment" icon="message-circle" onClick={onComment} />
+            <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
             <div className="relative">
               <button
                 type="button"

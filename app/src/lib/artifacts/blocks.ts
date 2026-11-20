@@ -38,9 +38,10 @@ export function numberBlocks(blocks: string[]): string {
 export type BlockOp =
   | { op: "replace"; n: number; text: string }
   | { op: "insert"; n: number; text: string } // after block n; 0 = at the very start
-  | { op: "delete"; n: number };
+  | { op: "delete"; n: number }
+  | { op: "comment"; n: number; text: string }; // a question for the user about block n; the text is left as it is
 
-const OP_LINE = /^@(replace|insert|delete)(?:\s+after)?\s+\[?(\d+)\]?\s*:?\s*$/i;
+const OP_LINE = /^@(replace|insert|delete|comment)(?:\s+after)?\s+\[?(\d+)\]?\s*:?\s*$/i;
 
 /**
  * Reads the model's answer. Each operation starts on its own line:
@@ -51,7 +52,8 @@ const OP_LINE = /^@(replace|insert|delete)(?:\s+after)?\s+\[?(\d+)\]?\s*:?\s*$/i
  */
 export function parseOps(raw: string): BlockOp[] {
   const ops: BlockOp[] = [];
-  let cur: { op: "replace" | "insert" | "delete"; n: number; body: string[] } | null = null;
+  let cur: { op: "replace" | "insert" | "delete" | "comment"; n: number; body: string[] } | null =
+    null;
   let fence: string | null = null;
   const close = () => {
     if (!cur) return;
@@ -98,6 +100,8 @@ export interface ApplyResult {
   skipped: number;
   /** the block numbers that do not exist */
   missing: number[];
+  /** questions Dara wants to ask, each about an existing block */
+  questions: Array<{ n: number; text: string }>;
 }
 
 /** Applies operations to the original blocks. Numbers always refer to the original numbering. */
@@ -107,9 +111,16 @@ export function applyOps(blocks: string[], ops: BlockOp[]): ApplyResult {
   const after = new Map<number, string[]>();
   let skipped = 0;
   const missing: number[] = [];
+  const questions: Array<{ n: number; text: string }> = [];
   for (const o of ops) {
     const exists = o.n >= 1 && o.n <= blocks.length;
-    if (o.op === "insert") {
+    if (o.op === "comment") {
+      if (exists) questions.push({ n: o.n, text: o.text });
+      else {
+        skipped++;
+        missing.push(o.n);
+      }
+    } else if (o.op === "insert") {
       const at = Math.min(Math.max(0, o.n), blocks.length); // after the end is the end
       after.set(at, [...(after.get(at) ?? []), o.text]);
     } else if (!exists) {
@@ -135,18 +146,62 @@ export function applyOps(blocks: string[], ops: BlockOp[]): ApplyResult {
     inserted: [...after.values()].reduce((a, v) => a + v.length, 0),
     deleted: remove.size,
     skipped,
-    missing
+    missing,
+    questions
   };
 }
 
 /** "Changed 2 blocks, added 1, removed 1." for the chat line. */
-export function describeChange(r: Pick<ApplyResult, "replaced" | "inserted" | "deleted">): string {
+export function describeChange(
+  r: Pick<ApplyResult, "replaced" | "inserted" | "deleted"> & { questions?: unknown[] }
+): string {
   const part = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
   const bits: string[] = [];
   if (r.replaced) bits.push(`changed ${part(r.replaced, "block", "blocks")}`);
   if (r.inserted) bits.push(`added ${part(r.inserted, "block", "blocks")}`);
   if (r.deleted) bits.push(`removed ${part(r.deleted, "block", "blocks")}`);
+  const asked = r.questions?.length ?? 0;
+  if (asked) bits.push(`asked ${part(asked, "question", "questions")} in the comments`);
   if (!bits.length) return "Nothing needed to change.";
   const s = bits.join(", ");
   return s[0]!.toUpperCase() + s.slice(1) + ".";
+}
+
+/** The plain words a block starts with (no Markdown marks), as a comment anchor. Empty when the block has no words to point at (code). */
+export function plainQuote(block: string): string {
+  let t = block.split("\n")[0] ?? "";
+  if (/^\s*(```|~~~)/.test(t)) return "";
+  if (/^\s*\|/.test(t))
+    t =
+      t
+        .split("|")
+        .map((c) => c.trim())
+        .find((c) => c && !/^[-: ]+$/.test(c)) ?? "";
+  t = t.replace(/^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+(\[[ xX]\]\s+)?|\d+[.)]\s+)/, "");
+  t = t
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`~]/g, "")
+    .trim();
+  if (t.length > 80) {
+    t = t.slice(0, 80);
+    const sp = t.lastIndexOf(" ");
+    if (sp > 40) t = t.slice(0, sp);
+  }
+  return t.trim();
+}
+
+/** Which occurrence of the block's quote this is: how many times the same words appear in the blocks before it. */
+export function quoteOccurrence(blocks: readonly string[], index: number, quote: string): number {
+  if (!quote) return 0;
+  let n = 0;
+  for (let i = 0; i < index; i++) {
+    const plain = blocks[i]!.replace(/[*_`~]/g, "");
+    let at = plain.indexOf(quote);
+    while (at !== -1) {
+      n++;
+      at = plain.indexOf(quote, at + quote.length);
+    }
+  }
+  return n;
 }
