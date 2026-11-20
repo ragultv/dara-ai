@@ -159,3 +159,24 @@ describe("sections", () => {
     expect(text).toContain("1. A - first");
   });
 });
+
+describe("retry after a bad block number", () => {
+  it("reports which numbers do not exist", () => {
+    const r = applyOps(
+      ["a", "b"],
+      [
+        { op: "replace", n: 7, text: "x" },
+        { op: "delete", n: 9 },
+        { op: "replace", n: 1, text: "A" }
+      ]
+    );
+    expect(r.missing).toEqual([7, 9]);
+  });
+  it("quotes the answer back with the real range", async () => {
+    const { buildRetryMessages } = await import("../../src/lib/artifacts/plan.ts");
+    const m = buildRetryMessages([{ role: "user", content: "q" }], "@replace 7\nx", [7], 3);
+    expect(m.map((x) => x.role)).toEqual(["user", "assistant", "user"]);
+    expect(String(m[2]!.content)).toContain("block 7 does not exist");
+    expect(String(m[2]!.content)).toContain("numbered 1 to 3");
+  });
+});

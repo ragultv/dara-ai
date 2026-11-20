@@ -139,3 +139,24 @@ export function buildOpsMessages(blocks: string[], instruction: string): ChatMes
     }
   ];
 }
+
+/**
+ * The follow-up when an answer named blocks that do not exist. Claude Docs refuses such a call and the model resends it corrected; Dara
+ * does the same once, quoting its own answer back with the real range.
+ */
+export function buildRetryMessages(
+  first: ChatMessage[],
+  answer: string,
+  missing: number[],
+  blockCount: number
+): ChatMessage[] {
+  const list = [...new Set(missing)].join(", ");
+  return [
+    ...first,
+    { role: "assistant", content: answer },
+    {
+      role: "user",
+      content: `That was refused and nothing was applied: block ${list} ${missing.length === 1 ? "does" : "do"} not exist. The document has ${blockCount} ${blockCount === 1 ? "block" : "blocks"}, numbered 1 to ${blockCount}. Resend all the operations, corrected, in the same format.`
+    }
+  ];
+}

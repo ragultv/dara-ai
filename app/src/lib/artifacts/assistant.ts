@@ -4,6 +4,7 @@ import { applyOps, describeChange, joinBlocks, parseOps, splitBlocks } from "./b
 import { complete } from "./completion.ts";
 import {
   buildOpsMessages,
+  buildRetryMessages,
   buildPlanMessages,
   buildSectionMessages,
   cleanSectionBody,
@@ -71,18 +72,30 @@ async function editBlocks(run: AssistantRun): Promise<AssistantResult> {
   ];
   run.hooks.steps(steps);
 
-  const res = await complete({
-    messages: buildOpsMessages(blocks, run.instruction),
-    temperature: 0.2,
-    maxTokens: 4096,
-    effort: run.effort,
-    signal: run.signal,
-    onReasoning: run.hooks.reasoning,
-    onContent: (raw) => {
-      const ops = parseOps(raw);
-      if (ops.length) run.hooks.setDoc(joinBlocks(applyOps(blocks, ops).blocks));
-    }
-  });
+  const first = buildOpsMessages(blocks, run.instruction);
+  const ask = (messages: typeof first) =>
+    complete({
+      messages,
+      temperature: 0.2,
+      maxTokens: 4096,
+      effort: run.effort,
+      signal: run.signal,
+      onReasoning: run.hooks.reasoning,
+      onContent: (raw) => {
+        const ops = parseOps(raw);
+        if (ops.length) run.hooks.setDoc(joinBlocks(applyOps(blocks, ops).blocks));
+      }
+    });
+  let res = await ask(first);
+  // an answer that names blocks that do not exist is sent back once, like a refused call
+  const firstTry = applyOps(blocks, parseOps(res.content));
+  if (!res.aborted && firstTry.missing.length) {
+    steps.push({ label: "Fix block numbers", state: "active" });
+    run.hooks.steps([...steps]);
+    run.hooks.setDoc(run.markdown);
+    res = await ask(buildRetryMessages(first, res.content, firstTry.missing, blocks.length));
+    steps[steps.length - 1] = { label: "Fix block numbers", state: "done" };
+  }
 
   const ops = parseOps(res.content);
   if (ops.length === 0) {
