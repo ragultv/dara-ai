@@ -12,6 +12,8 @@ import {
   type DocChatMsg
 } from "../stores/useDocChatStore.ts";
 
+export type PanelTab = "chat" | "comments" | "history";
+
 interface Props {
   docId: string;
   docIsEmpty: boolean;
@@ -22,8 +24,13 @@ interface Props {
   onUndo: (msgId: string) => void;
   onClose: () => void;
   onOpenModels: () => void;
-  tab: "chat" | "history";
-  onTab: (tab: "chat" | "history") => void;
+  tab: PanelTab;
+  onTab: (tab: PanelTab) => void;
+  /** the Comments tab content, and how many threads are open (the badge on the tab) */
+  commentsSlot: React.ReactNode;
+  openThreads: number;
+  /** text to put in the message box (and focus it) when the Ask Dara button is used */
+  prefill: { text: string; nonce: number } | null;
   updatedAt: number;
   onRestored: (markdown: string) => void;
 }
@@ -128,10 +135,19 @@ export const DocChat: React.FC<Props> = ({
   onOpenModels,
   tab,
   onTab,
+  commentsSlot,
+  openThreads,
+  prefill,
   updatedAt,
   onRestored
 }) => {
   const messages = useDocChatStore(selectMessages(docId));
+  const clearChat = useDocChatStore((s) => s.clear);
+
+  // the chat belongs to the document: read what was saved with it
+  useEffect(() => {
+    void useDocChatStore.getState().load(docId);
+  }, [docId]);
   const [text, setText] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -141,6 +157,18 @@ export const DocChat: React.FC<Props> = ({
     const el = listRef.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  // the Ask Dara button puts words in the box (the selected text) and moves the cursor there
+  useEffect(() => {
+    if (!prefill) return;
+    setText(prefill.text);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, [prefill]);
 
   // the box grows with what is typed, up to a limit, then scrolls
   useEffect(() => {
@@ -165,7 +193,7 @@ export const DocChat: React.FC<Props> = ({
     >
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-border pl-3 pr-2">
         <div role="tablist" aria-label="Panel" className="flex items-center gap-1">
-          {(["chat", "history"] as const).map((t) => (
+          {(["chat", "comments", "history"] as const).map((t) => (
             <button
               key={t}
               type="button"
@@ -178,7 +206,12 @@ export const DocChat: React.FC<Props> = ({
                   : "text-text-muted hover:bg-surface-raised hover:text-text"
               }`}
             >
-              {t === "chat" ? "Chat" : "History"}
+              {t === "chat" ? "Chat" : t === "comments" ? "Comments" : "History"}
+              {t === "comments" && openThreads > 0 && (
+                <span className="ml-1.5 rounded-full bg-primary px-1.5 py-px text-[10px] font-semibold text-white">
+                  {openThreads}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -192,6 +225,8 @@ export const DocChat: React.FC<Props> = ({
           <Icon name="x" size={15} />
         </button>
       </div>
+
+      {tab === "comments" && commentsSlot}
 
       {tab === "history" && (
         <DocHistory docId={docId} updatedAt={updatedAt} onRestored={onRestored} />
@@ -229,7 +264,22 @@ export const DocChat: React.FC<Props> = ({
               </div>
             </div>
           ) : (
-            messages.map((m) => <Bubble key={m.id} msg={m} onUndo={onUndo} />)
+            <>
+              {messages.map((m) => (
+                <Bubble key={m.id} msg={m} onUndo={onUndo} />
+              ))}
+              {!busy && (
+                <div className="flex justify-center pt-1">
+                  <button
+                    type="button"
+                    onClick={() => void clearChat(docId)}
+                    className="cursor-pointer text-[11px] text-text-subtle underline-offset-2 hover:text-text hover:underline"
+                  >
+                    Clear chat
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
 

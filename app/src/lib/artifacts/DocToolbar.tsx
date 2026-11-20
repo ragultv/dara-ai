@@ -1,10 +1,15 @@
 import React, { useEffect, useReducer, useRef, useState } from "react";
 import type { Editor } from "@tiptap/react";
 import { Icon } from "../ui/Icon.tsx";
+import { MEDIA_ACCEPT } from "./extensions/media.ts";
 
 interface Props {
   editor: Editor;
   disabled?: boolean;
+  /** a file picked with the image or video button */
+  onMedia: (file: File) => void;
+  onComment: () => void;
+  onAsk: () => void;
 }
 
 const TEXT_STYLES: Array<{
@@ -66,7 +71,14 @@ const Btn: React.FC<{
 );
 
 /** The formatting bar under the document: text style, emphasis, lists, table, code, quote. */
-export const DocToolbar: React.FC<Props> = ({ editor, disabled = false }) => {
+export const DocToolbar: React.FC<Props> = ({
+  editor,
+  disabled = false,
+  onMedia,
+  onComment,
+  onAsk
+}) => {
+  const fileRef = useRef<HTMLInputElement>(null);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
   const [styleOpen, setStyleOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -197,6 +209,25 @@ export const DocToolbar: React.FC<Props> = ({ editor, disabled = false }) => {
         }
       />
       <Btn
+        label="Image or video"
+        icon="image"
+        disabled={disabled}
+        onClick={() => fileRef.current?.click()}
+      />
+      <input
+        ref={fileRef}
+        type="file"
+        accept={MEDIA_ACCEPT}
+        hidden
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (f) onMedia(f);
+        }}
+      />
+      <Btn
         label="Code block"
         icon="square-code"
         disabled={disabled}
@@ -216,6 +247,17 @@ export const DocToolbar: React.FC<Props> = ({ editor, disabled = false }) => {
         disabled={disabled}
         onClick={() => editor.chain().focus().setHorizontalRule().run()}
       />
+      <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
+      <Btn label="Comment" icon="message-circle" disabled={disabled} onClick={onComment} />
+      <button
+        type="button"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={onAsk}
+        className="ml-0.5 flex h-8 cursor-pointer items-center gap-1.5 rounded-md bg-surface-sunken px-3 text-xs font-semibold text-text transition-colors hover:bg-primary-subtle-hover"
+      >
+        <Icon name="sparkles" size={13} />
+        Ask Dara
+      </button>
     </div>
   );
 };

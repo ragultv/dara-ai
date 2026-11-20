@@ -627,3 +627,134 @@ textarea:focus-visible {
     animation: none;
   }
 }
+
+/* ---- document editor extras: folding, comment highlights, media, widgets ---- */
+
+/* a chevron before each heading folds the section under it */
+.doc-editor h1,
+.doc-editor h2,
+.doc-editor h3 {
+  position: relative;
+}
+.doc-editor .fold-toggle {
+  position: absolute;
+  left: -1.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background-color 120ms ease;
+}
+.doc-editor .fold-toggle svg {
+  transform: rotate(90deg);
+  transition: transform 150ms ease;
+}
+.doc-editor .fold-toggle[data-folded="true"] {
+  opacity: 1;
+}
+.doc-editor .fold-toggle[data-folded="true"] svg {
+  transform: rotate(0deg);
+}
+.doc-editor h1:hover .fold-toggle,
+.doc-editor h2:hover .fold-toggle,
+.doc-editor h3:hover .fold-toggle,
+.doc-editor .fold-toggle:focus-visible {
+  opacity: 1;
+}
+.doc-editor .fold-toggle:hover {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+.doc-editor .section-folded {
+  display: none;
+}
+
+/* the words a comment thread points at */
+.doc-editor .comment-mark {
+  background: var(--color-primary-subtle);
+  border-bottom: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  cursor: pointer;
+}
+.doc-editor .comment-mark-active {
+  background: var(--color-primary-subtle-hover);
+  border-bottom-color: var(--color-primary);
+}
+
+/* images and video */
+.doc-editor .doc-media {
+  margin: 1rem 0;
+}
+.doc-editor .doc-media img,
+.doc-editor .doc-media video {
+  display: block;
+  max-width: 100%;
+  max-height: 32rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-border);
+}
+.doc-editor .doc-media-note {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  border: 1px dashed var(--color-border);
+  border-radius: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.85em;
+}
+
+/* a widget (a code block whose language is "widget") is shown live; its code is hidden until asked for */
+.doc-editor .widget-code:not(.widget-code-open) {
+  display: none;
+}
+.doc-editor .doc-widget {
+  margin: 1rem 0;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  background: var(--color-surface);
+}
+.doc-editor .doc-widget-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-text-subtle);
+}
+.doc-editor .doc-widget-bar button {
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.doc-editor .doc-widget-bar button:hover {
+  color: var(--color-text);
+}
+.doc-editor .doc-widget-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+.doc-editor .doc-widget .wl-hide {
+  display: none;
+}
+.doc-editor .widget-code-open + .doc-widget .wl-show {
+  display: none;
+}
+.doc-editor .widget-code-open + .doc-widget .wl-hide {
+  display: inline;
+}
