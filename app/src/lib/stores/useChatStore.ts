@@ -1,0 +1,867 @@
+import { create } from "zustand";
+import { apiClient } from "../api/client.ts";
+import { ApiError } from "../api/errors.ts";
+import { storeApi, newId } from "../api/store-api.ts";
+import type {
+  ChatMessage,
+  ChatRequest,
+  ContentPart,
+  DbConversationDetail,
+  DbConversationSummary,
+  DbMessage
+} from "../api/types.ts";
+import {
+  SUMMARY_MAX_TOKENS,
+  buildSummaryMessages,
+  currentSummary,
+  currentWindowMessages,
+  dropStaleWindows,
+  estimateMessageTokens,
+  estimateMessagesTokens,
+  estimateTokens,
+  pickRolloverStart,
+  planMaxTokens,
+  rolloverNeeded,
+  statsFromRaw,
+  summarySystemMessage,
+  windowStartIndex
+} from "../chat/context.ts";
+import type { ContextView, ContextWindow, Conversation, UiMessage } from "../chat/types.ts";
+import { toDataUri } from "../utils/image.ts";
+import { toast } from "../ui/Toast.tsx";
+import { useModelsStore } from "./useModelsStore.ts";
+import { useServerStore } from "./useServerStore.ts";
+import { useSettingsStore } from "./useSettingsStore.ts";
+
+export type { Conversation, UiMessage, ContextWindow } from "../chat/types.ts";
+
+export type ChatPhase = "idle" | "generating" | "summarizing";
+
+interface ChatState {
+  conversations: Conversation[];
+  activeConversationId: string | null;
+  isGenerating: boolean;
+  phase: ChatPhase;
+  streamingText: string;
+  currentTps: number | undefined;
+  /** false when the app database cannot be reached (old engine build, or it failed to open): history then lives in this browser only. */
+  storeAvailable: boolean;
+
+  loadConversations: () => Promise<void>;
+  createConversation: (title?: string) => string;
+  selectConversation: (id: string) => void;
+  deleteConversation: (id: string) => Promise<void>;
+  renameConversation: (id: string, title: string) => void;
+  setConversationSettings: (
+    id: string,
+    patch: Partial<Pick<Conversation, "temperature" | "maxTokens" | "flash" | "systemPrompt">>
+  ) => void;
+  sendMessage: (text: string, images?: string[], modelId?: string) => Promise<void>;
+  stopGeneration: () => void;
+  regenerate: (messageId?: string, modelId?: string) => void;
+  editAndResend: (messageId: string, newText: string, modelId?: string) => void;
+  continueGeneration: (modelId?: string) => void;
+  /** Starts a new context window now (summarizes the earlier messages; they stay stored and visible). */
+  rollOver: (id: string) => Promise<boolean>;
+  getActiveConversation: () => Conversation | null;
+}
+
+const LOCAL_KEY = "dara_conversations_v3";
+const LEGACY_KEY = "dara_conversations_v2";
+const CHECKPOINT_MS = 4000;
+const CONTINUE_TEXT = "Please continue from exactly where you stopped.";
+
+let abortController: AbortController | null = null;
+let tokenBuffer = "";
+let rafId: number | null = null;
+
+// ---- helpers --------------------------------------------------------------------------------------------------------------------------------------
+
+const objectUrls = new Map<string, string>();
+
+function revokeUrls(conv: Conversation): void {
+  for (const m of conv.messages) {
+    for (const id of m.attachmentIds ?? []) {
+      const u = objectUrls.get(id);
+      if (u) {
+        URL.revokeObjectURL(u);
+        objectUrls.delete(id);
+      }
+    }
+  }
+}
+
+/** Serializes database writes per conversation so a reply is patched only after it was appended, and positions stay in order. */
+const queues = new Map<string, Promise<unknown>>();
+let lastStoreToast = 0;
+
+function reportStoreError(err: unknown): void {
+  const status = err instanceof ApiError ? err.status : 0;
+  if (status === 404 || status === 503) useChatStore.setState({ storeAvailable: false });
+  const now = Date.now();
+  if (now - lastStoreToast < 20000) return;
+  lastStoreToast = now;
+  const msg = err instanceof Error ? err.message : "unknown error";
+  toast.show(`Could not save to the chat history database: ${msg}`, "error");
+}
+
+function enqueue(convId: string, job: () => Promise<unknown>): Promise<void> {
+  const prev = queues.get(convId) ?? Promise.resolve();
+  const next = prev.then(job).catch(reportStoreError);
+  queues.set(convId, next);
+  return next.then(() => undefined);
+}
+
+function loadedModelInfo() {
+  return useModelsStore.getState().getLoadedModel();
+}
+
+/** The loaded model's real context (it changes with the K/V format, Flash and vision), else what the last reply reported. */
+export function contextCapacity(
+  conv: Pick<Conversation, "context"> | null | undefined
+): number | undefined {
+  const fromModel = loadedModelInfo()?.dara.config?.context;
+  if (typeof fromModel === "number" && fromModel > 0) return fromModel;
+  return conv?.context?.capacity;
+}
+
+export function getContextView(conv: Conversation | null | undefined): {
+  used: number;
+  capacity: number | undefined;
+  estimated: boolean;
+} {
+  return {
+    used: conv?.context?.used ?? 0,
+    capacity: contextCapacity(conv),
+    estimated: conv?.context?.estimated === true
+  };
+}
+
+function inferenceDefaults() {
+  const s = useSettingsStore.getState().inference;
+  return {
+    temperature: s.defaultTemperature,
+    maxTokens: s.defaultMaxTokens,
+    systemPrompt: s.systemPrompt,
+    flash: s.defaultFlash
+  };
+}
+
+function blankConversation(title = "New Chat"): Conversation {
+  const d = inferenceDefaults();
+  const now = Date.now();
+  return {
+    id: newId(),
+    title,
+    createdAt: now,
+    updatedAt: now,
+    messages: [],
+    temperature: d.temperature,
+    maxTokens: 0,
+    flash: d.flash !== "off",
+    systemPrompt: d.systemPrompt,
+    windows: [],
+    persisted: false,
+    loaded: true
+  };
+}
+
+function paramsOf(c: Conversation): Record<string, unknown> {
+  return {
+    temperature: c.temperature ?? 0.7,
+    max_tokens: c.maxTokens ?? 0,
+    flash: c.flash !== false,
+    windows: c.windows
+  };
+}
+
+function summaryToConversation(s: DbConversationSummary): Conversation {
+  const p = s.params ?? {};
+  const windows = Array.isArray(p.windows) ? (p.windows as ContextWindow[]) : [];
+  return {
+    id: s.id,
+    title: s.title,
+    createdAt: s.created_at,
+    updatedAt: s.updated_at,
+    messages: [],
+    temperature: typeof p.temperature === "number" ? p.temperature : 0.7,
+    maxTokens: typeof p.max_tokens === "number" ? p.max_tokens : 0,
+    flash: typeof p.flash === "boolean" ? p.flash : true,
+    systemPrompt: s.system_prompt,
+    windows,
+    persisted: true,
+    loaded: false
+  };
+}
+
+function dbMessageToUi(m: DbMessage): UiMessage {
+  const raw = m.stats ?? undefined;
+  const finish = m.finish_reason ?? undefined;
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    attachmentIds: m.attachments.map((a) => a.id),
+    ...(finish ? { finishReason: finish } : {}),
+    ...(finish === "interrupted" ? { interrupted: true } : {}),
+    ...(m.error ? { error: m.error } : {}),
+    ...(raw ? { raw, stats: statsFromRaw(raw) } : {}),
+    createdAt: m.created_at
+  };
+}
+
+function updateConv(id: string, fn: (c: Conversation) => Conversation): void {
+  useChatStore.setState((s) => ({
+    conversations: s.conversations.map((c) => (c.id === id ? fn(c) : c))
+  }));
+}
+
+function findConv(id: string): Conversation | undefined {
+  return useChatStore.getState().conversations.find((c) => c.id === id);
+}
+
+function saveLocal(): void {
+  if (useChatStore.getState().storeAvailable) return;
+  try {
+    const light = useChatStore.getState().conversations.map((c) => ({
+      ...c,
+      messages: c.messages.map((m) => ({ ...m, images: undefined }))
+    }));
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(light));
+  } catch {
+    // storage full or blocked: nothing else to do
+  }
+}
+
+function ensurePersisted(conv: Conversation): void {
+  if (conv.persisted) return;
+  updateConv(conv.id, (c) => ({ ...c, persisted: true }));
+  const cur = findConv(conv.id) ?? conv;
+  void enqueue(conv.id, () =>
+    storeApi.createConversation({
+      id: cur.id,
+      title: cur.title,
+      system_prompt: cur.systemPrompt ?? "",
+      params: paramsOf(cur),
+      ...(loadedModelInfo()?.id ? { model: loadedModelInfo()?.id as string } : {})
+    })
+  );
+}
+
+/** Fetches a stored conversation's messages and its images (shown through blob: URLs, because <img> cannot send the API key). */
+async function hydrate(id: string): Promise<void> {
+  const conv = findConv(id);
+  if (!conv || conv.loaded || !conv.persisted) return;
+  let detail: DbConversationDetail;
+  try {
+    detail = await storeApi.getConversation(id);
+  } catch (err) {
+    reportStoreError(err);
+    return;
+  }
+  const messages = detail.messages.map(dbMessageToUi);
+  const windows = Array.isArray(detail.params?.windows)
+    ? (detail.params.windows as ContextWindow[])
+    : conv.windows;
+  updateConv(id, (c) => ({
+    ...c,
+    messages,
+    windows: dropStaleWindows(windows, messages),
+    loaded: true
+  }));
+  for (const m of detail.messages) {
+    if (m.attachments.length === 0) continue;
+    const urls: string[] = [];
+    for (const a of m.attachments) {
+      let url = objectUrls.get(a.id);
+      if (!url) {
+        try {
+          url = URL.createObjectURL(await storeApi.getAttachmentBlob(a.id));
+          objectUrls.set(a.id, url);
+        } catch {
+          continue;
+        }
+      }
+      urls.push(url);
+    }
+    if (urls.length > 0) {
+      updateConv(id, (c) => ({
+        ...c,
+        messages: c.messages.map((x) => (x.id === m.id ? { ...x, images: urls } : x))
+      }));
+    }
+  }
+}
+
+/** Chats the previous app version kept in localStorage (its database writes never succeeded): copied into the database once. */
+async function importLegacy(): Promise<number> {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(LEGACY_KEY);
+  } catch {
+    return 0;
+  }
+  if (!raw) return 0;
+  let old: Array<{
+    title?: string;
+    createdAt?: number;
+    messages?: Array<{ role: string; content: string; images?: string[] }>;
+    temperature?: number;
+    systemPrompt?: string;
+  }>;
+  try {
+    old = JSON.parse(raw) as typeof old;
+  } catch {
+    return 0;
+  }
+  let n = 0;
+  for (const oc of Array.isArray(old) ? old.slice(0, 100) : []) {
+    const msgs = (oc.messages ?? []).filter(
+      (m) =>
+        (m.role === "user" || m.role === "assistant") && (m.content?.trim() || m.images?.length)
+    );
+    if (msgs.length === 0) continue;
+    const id = newId();
+    await storeApi.createConversation({
+      id,
+      title: oc.title || "Imported chat",
+      system_prompt: oc.systemPrompt ?? "",
+      params: { temperature: oc.temperature ?? 0.7, max_tokens: 0, flash: true, windows: [] }
+    });
+    for (const m of msgs) {
+      const mid = newId();
+      await storeApi.appendMessage(id, {
+        id: mid,
+        role: m.role as "user" | "assistant",
+        content: m.content ?? ""
+      });
+      for (const img of m.images ?? []) {
+        if (img.startsWith("data:")) await storeApi.addAttachment(mid, img).catch(() => undefined);
+      }
+    }
+    n++;
+  }
+  try {
+    localStorage.removeItem(LEGACY_KEY);
+  } catch {
+    // ignore
+  }
+  return n;
+}
+
+function userFacingError(err: unknown): { message: string; code?: string | undefined } {
+  if (err instanceof ApiError) {
+    if (err.code === "vision_unavailable") {
+      return { message: "Image support is not loaded for this model.", code: "vision_unavailable" };
+    }
+    return { message: err.message, code: err.code };
+  }
+  return { message: err instanceof Error ? err.message : "Connection failed" };
+}
+
+// ---- store ----------------------------------------------------------------------------------------------------------------------------------------
+
+export const useChatStore = create<ChatState>((set, get) => ({
+  conversations: [],
+  activeConversationId: null,
+  isGenerating: false,
+  phase: "idle",
+  streamingText: "",
+  currentTps: undefined,
+  storeAvailable: true,
+
+  getActiveConversation: () => {
+    const { conversations, activeConversationId } = get();
+    return conversations.find((c) => c.id === activeConversationId) ?? null;
+  },
+
+  loadConversations: async () => {
+    // 1. the server's database
+    try {
+      let list = await storeApi.listConversations(200, 0);
+      set({ storeAvailable: true });
+      const imported = await importLegacy().catch(() => 0);
+      if (imported > 0) {
+        list = await storeApi.listConversations(200, 0);
+        toast.show(
+          `Moved ${imported} earlier conversation${imported === 1 ? "" : "s"} into the database.`,
+          "info"
+        );
+      }
+      const convs = list.data.map(summaryToConversation);
+      const blank = blankConversation();
+      const keepBlank = get().conversations.find((c) => !c.persisted && c.messages.length === 0);
+      const all = convs.length > 0 ? convs : [keepBlank ?? blank];
+      const active = all[0]?.id ?? null;
+      set({ conversations: all, activeConversationId: active });
+      if (active) void hydrate(active);
+      return;
+    } catch {
+      set({ storeAvailable: false });
+    }
+    // 2. this browser's copy (engine without the database)
+    try {
+      const stored = localStorage.getItem(LOCAL_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as Conversation[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const convs = parsed.map((c) => ({
+            ...c,
+            windows: c.windows ?? [],
+            persisted: false,
+            loaded: true
+          }));
+          set({ conversations: convs, activeConversationId: convs[0]?.id ?? null });
+          return;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    const blank = blankConversation();
+    set({ conversations: [blank], activeConversationId: blank.id });
+  },
+
+  createConversation: (title = "New Chat") => {
+    const empty = get().conversations.find(
+      (c) =>
+        c.id === get().activeConversationId && c.messages.length === 0 && c.windows.length === 0
+    );
+    if (empty && title === "New Chat") return empty.id; // do not pile up empty chats
+    const conv = blankConversation(title);
+    set((s) => ({ conversations: [conv, ...s.conversations], activeConversationId: conv.id }));
+    saveLocal();
+    return conv.id;
+  },
+
+  selectConversation: (id) => {
+    set({ activeConversationId: id });
+    void hydrate(id);
+  },
+
+  deleteConversation: async (id) => {
+    const conv = findConv(id);
+    const rest = get().conversations.filter((c) => c.id !== id);
+    const nextActive =
+      get().activeConversationId === id ? (rest[0]?.id ?? null) : get().activeConversationId;
+    if (conv) revokeUrls(conv);
+    set({ conversations: rest, activeConversationId: nextActive });
+    if (rest.length === 0) {
+      const blank = blankConversation();
+      set({ conversations: [blank], activeConversationId: blank.id });
+    } else if (nextActive) {
+      void hydrate(nextActive);
+    }
+    saveLocal();
+    if (conv?.persisted) void enqueue(id, () => storeApi.deleteConversation(id));
+  },
+
+  renameConversation: (id, title) => {
+    const t = title.trim().slice(0, 120);
+    if (!t) return;
+    updateConv(id, (c) => ({ ...c, title: t }));
+    const c = findConv(id);
+    if (c?.persisted) void enqueue(id, () => storeApi.patchConversation(id, { title: t }));
+    saveLocal();
+  },
+
+  setConversationSettings: (id, patch) => {
+    updateConv(id, (c) => ({ ...c, ...patch }));
+    const c = findConv(id);
+    if (c?.persisted) {
+      void enqueue(id, () =>
+        storeApi.patchConversation(id, {
+          params: paramsOf(findConv(id) ?? c),
+          ...(patch.systemPrompt !== undefined ? { system_prompt: patch.systemPrompt } : {})
+        })
+      );
+    }
+    saveLocal();
+  },
+
+  rollOver: async (id) => {
+    if (get().isGenerating) return false;
+    const conv = findConv(id);
+    if (!conv) return false;
+    const capacity = contextCapacity(conv) ?? 4096;
+    const winStart = windowStartIndex(conv.messages, conv.windows);
+    const startIdx = pickRolloverStart(conv.messages, winStart);
+    if (startIdx === null) return false;
+    const startMsg = conv.messages[startIdx];
+    if (!startMsg) return false;
+    const toSummarize = conv.messages.slice(winStart, startIdx);
+    const previous = currentSummary(conv.messages, conv.windows);
+
+    set({ isGenerating: true, phase: "summarizing" });
+    try {
+      const target = loadedModelInfo()?.id ?? useServerStore.getState().loadedModel ?? undefined;
+      const req: ChatRequest = {
+        ...(target ? { model: target } : {}),
+        messages: buildSummaryMessages({
+          previousSummary: previous,
+          messages: toSummarize,
+          capacity
+        }),
+        temperature: 0.2,
+        max_tokens: SUMMARY_MAX_TOKENS,
+        flash: false,
+        cache_write: false
+      };
+      const res = await apiClient.chat(req);
+      const summary = (res.choices?.[0]?.message?.content ?? "").trim();
+      if (!summary) throw new Error("The model returned an empty summary");
+      const win: ContextWindow = {
+        startMessageId: startMsg.id,
+        summary,
+        createdAt: Date.now(),
+        summarizedMessages: toSummarize.length
+      };
+      const kept = conv.messages.slice(startIdx);
+      const sysTokens = estimateTokens(conv.systemPrompt ?? "");
+      const used = sysTokens + estimateTokens(summary) + estimateMessagesTokens(kept);
+      updateConv(id, (c) => ({
+        ...c,
+        windows: [...c.windows, win],
+        context: {
+          capacity: res.context?.capacity ?? capacity,
+          used,
+          compacted: false,
+          summarized_messages: toSummarize.length,
+          dropped_messages: 0,
+          truncated_last_message: false,
+          summary_cached: false,
+          estimated: true
+        }
+      }));
+      const cur = findConv(id);
+      if (cur?.persisted)
+        void enqueue(id, () =>
+          storeApi.patchConversation(id, { params: paramsOf(findConv(id) ?? cur) })
+        );
+      saveLocal();
+      return true;
+    } catch (err) {
+      toast.show(
+        `Could not start a new context window: ${err instanceof Error ? err.message : "unknown error"}`,
+        "error"
+      );
+      return false;
+    } finally {
+      set({ isGenerating: false, phase: "idle" });
+    }
+  },
+
+  sendMessage: async (text, images = [], modelId) => {
+    if (!text.trim() && images.length === 0) return;
+    if (get().isGenerating) return;
+
+    let convId = get().activeConversationId;
+    if (!convId || !findConv(convId))
+      convId = get().createConversation(text.slice(0, 40).trim() || "New Chat");
+    let conv = findConv(convId);
+    if (!conv) return;
+    const id = convId;
+    set({ isGenerating: true, phase: "generating", streamingText: "", currentTps: undefined });
+
+    const loaded = loadedModelInfo();
+    const targetModel =
+      modelId ??
+      loaded?.id ??
+      useServerStore.getState().loadedModel ??
+      useModelsStore.getState().models.find((m) => m.dara.status === "installed")?.id;
+    if (!targetModel) {
+      toast.show("Install and load a model first (Models page).", "error");
+      set({ isGenerating: false, phase: "idle" });
+      return;
+    }
+
+    // Make room first when this turn would not fit: older messages stay stored, a summary carries on in a new context window.
+    const cap0 = contextCapacity(conv);
+    if (cap0) {
+      const pending = estimateMessageTokens({ content: text, images });
+      const used = conv.context?.used ?? 0;
+      if (rolloverNeeded({ used, capacity: cap0, pendingTokens: pending })) {
+        set({ isGenerating: false, phase: "idle" });
+        await get().rollOver(id);
+        set({ isGenerating: true, phase: "generating" });
+        conv = findConv(id) ?? conv;
+      }
+    }
+
+    const now = Date.now();
+    const userMsg: UiMessage = {
+      id: newId(),
+      role: "user",
+      content: text,
+      createdAt: now,
+      ...(images.length > 0 ? { images } : {})
+    };
+    const assistantMsg: UiMessage = {
+      id: newId(),
+      role: "assistant",
+      content: "",
+      createdAt: now + 1
+    };
+    const isFirst = conv.messages.length === 0;
+    const title = isFirst && text.trim() ? text.trim().slice(0, 40) : conv.title;
+    updateConv(id, (c) => ({
+      ...c,
+      title,
+      updatedAt: now,
+      messages: [...c.messages, userMsg, assistantMsg]
+    }));
+    ensurePersisted(findConv(id) ?? conv);
+    if (isFirst && title !== conv.title)
+      void enqueue(id, () => storeApi.patchConversation(id, { title }));
+    void enqueue(id, async () => {
+      await storeApi.appendMessage(id, {
+        id: userMsg.id,
+        role: "user",
+        content: userMsg.content,
+        created_at: now
+      });
+      const ids: string[] = [];
+      for (const img of images) {
+        try {
+          ids.push((await storeApi.addAttachment(userMsg.id, img)).id);
+        } catch (err) {
+          reportStoreError(err);
+        }
+      }
+      if (ids.length > 0)
+        updateConv(id, (c) => ({
+          ...c,
+          messages: c.messages.map((m) => (m.id === userMsg.id ? { ...m, attachmentIds: ids } : m))
+        }));
+      await storeApi.appendMessage(id, {
+        id: assistantMsg.id,
+        role: "assistant",
+        content: "",
+        created_at: now + 1
+      });
+    });
+    saveLocal();
+
+    // ---- build the request from the current window ----
+    const latest = findConv(id) ?? conv;
+    const windowMsgs = currentWindowMessages(latest.messages, latest.windows).filter(
+      (m) => m.id !== assistantMsg.id && (m.role === "user" || m.content.trim() !== "")
+    );
+    const summary = currentSummary(latest.messages, latest.windows);
+    const apiMessages: ChatMessage[] = [];
+    if (latest.systemPrompt?.trim())
+      apiMessages.push({ role: "system", content: latest.systemPrompt.trim() });
+    if (summary) apiMessages.push(summarySystemMessage(summary));
+    try {
+      for (const m of windowMsgs) {
+        if (m.images && m.images.length > 0) {
+          const parts: ContentPart[] = [];
+          for (const img of m.images)
+            parts.push({ type: "image_url", image_url: { url: await toDataUri(img) } });
+          if (m.content) parts.push({ type: "text", text: m.content });
+          apiMessages.push({ role: m.role, content: parts });
+        } else {
+          apiMessages.push({ role: m.role, content: m.content });
+        }
+      }
+    } catch {
+      toast.show("An attached image could not be read; sending the text only.", "error");
+    }
+
+    const capacity = contextCapacity(latest);
+    const promptEstimate =
+      estimateTokens(latest.systemPrompt ?? "") +
+      estimateTokens(summary) +
+      estimateMessagesTokens(windowMsgs);
+    const wanted =
+      latest.maxTokens && latest.maxTokens > 0
+        ? latest.maxTokens
+        : inferenceDefaults().maxTokens || 4096;
+    const maxTokens = capacity
+      ? planMaxTokens({ capacity, promptTokens: Math.max(promptEstimate, 0), wanted })
+      : wanted;
+    const flashOn = loaded?.dara.flash?.active === true;
+    const chatReq: ChatRequest = {
+      model: targetModel,
+      messages: apiMessages,
+      stream: true,
+      temperature: latest.temperature ?? 0.7,
+      max_tokens: maxTokens,
+      ...(flashOn ? { flash: latest.flash !== false } : {})
+    };
+
+    abortController = new AbortController();
+    tokenBuffer = "";
+    let finish: string | undefined;
+    let raw: UiMessage["raw"];
+    let lastCheckpoint = Date.now();
+
+    const patchAssistant = (patch: Partial<UiMessage>) =>
+      updateConv(id, (c) => ({
+        ...c,
+        messages: c.messages.map((m) => (m.id === assistantMsg.id ? { ...m, ...patch } : m))
+      }));
+    const flush = () => {
+      set({ streamingText: tokenBuffer });
+      patchAssistant({ content: tokenBuffer });
+    };
+
+    try {
+      const stream = await apiClient.streamChat(chatReq, abortController.signal);
+      for await (const chunk of stream) {
+        const serverError = (chunk as unknown as { error?: { message?: string } }).error;
+        if (serverError) throw new Error(serverError.message || "The engine reported an error");
+
+        const choice = chunk.choices?.[0];
+        if (choice?.finish_reason) finish = choice.finish_reason;
+        const delta = choice?.delta?.content;
+        if (delta) {
+          tokenBuffer += delta;
+          if (rafId === null) {
+            rafId = requestAnimationFrame(() => {
+              rafId = null;
+              flush();
+            });
+          }
+          if (Date.now() - lastCheckpoint > CHECKPOINT_MS) {
+            lastCheckpoint = Date.now();
+            const snapshot = tokenBuffer;
+            void enqueue(id, () => storeApi.patchMessage(assistantMsg.id, { content: snapshot }));
+          }
+        }
+
+        if (chunk.timings || chunk.usage) {
+          raw = {
+            ...(chunk.usage ? { usage: chunk.usage } : {}),
+            ...(chunk.timings ? { timings: chunk.timings } : {}),
+            ...(chunk.context ? { context: chunk.context } : {}),
+            ...(chunk.speculative ? { speculative: chunk.speculative } : {})
+          } as UiMessage["raw"];
+          const tps = chunk.timings?.decode_tokens_per_second;
+          if (tps) set({ currentTps: tps });
+        }
+        if (chunk.context) {
+          const ctx: ContextView = {
+            capacity: chunk.context.capacity,
+            used: chunk.context.used,
+            compacted: chunk.context.compacted,
+            summarized_messages: chunk.context.summarized_messages,
+            dropped_messages: chunk.context.dropped_messages,
+            truncated_last_message: chunk.context.truncated_last_message ?? false,
+            summary_cached: chunk.context.summary_cached ?? false
+          };
+          updateConv(id, (c) => ({ ...c, context: ctx }));
+        }
+      }
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      flush();
+      patchAssistant({ finishReason: finish ?? "stop", raw, stats: statsFromRaw(raw) });
+    } catch (err: unknown) {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      if (abortController?.signal.aborted) {
+        finish = "interrupted";
+        patchAssistant({
+          content: tokenBuffer,
+          interrupted: true,
+          finishReason: "interrupted",
+          raw,
+          stats: statsFromRaw(raw)
+        });
+      } else {
+        finish = "error";
+        const e = userFacingError(err);
+        patchAssistant({
+          content: tokenBuffer,
+          error: e.message,
+          errorCode: e.code,
+          finishReason: "error"
+        });
+      }
+    } finally {
+      abortController = null;
+      set({ isGenerating: false, phase: "idle", currentTps: undefined });
+      const final = findConv(id)?.messages.find((m) => m.id === assistantMsg.id);
+      if (final) {
+        void enqueue(id, () =>
+          storeApi.patchMessage(assistantMsg.id, {
+            content: final.content,
+            finish_reason: final.finishReason ?? finish ?? "stop",
+            error: final.error ?? null,
+            stats: (final.raw as Record<string, unknown> | undefined) ?? null
+          })
+        );
+      }
+      saveLocal();
+    }
+
+    // A reply that filled the window: start the next context window now, while the user reads.
+    const after = findConv(id);
+    const ctx = after?.context;
+    if (
+      after &&
+      ctx &&
+      finish !== "error" &&
+      rolloverNeeded({ used: ctx.used, capacity: contextCapacity(after) ?? ctx.capacity })
+    ) {
+      void get().rollOver(id);
+    }
+  },
+
+  stopGeneration: () => {
+    abortController?.abort();
+  },
+
+  regenerate: (messageId, modelId) => {
+    const conv = get().getActiveConversation();
+    if (!conv || conv.messages.length === 0 || get().isGenerating) return;
+    let target = conv.messages.length - 1;
+    if (messageId) {
+      const found = conv.messages.findIndex((m) => m.id === messageId);
+      if (found !== -1) target = found;
+    }
+    let userIdx = -1;
+    for (let i = target; i >= 0; i--) {
+      if (conv.messages[i]?.role === "user") {
+        userIdx = i;
+        break;
+      }
+    }
+    const userMsg = conv.messages[userIdx];
+    if (!userMsg) return;
+    const kept = conv.messages.slice(0, userIdx);
+    updateConv(conv.id, (c) => ({
+      ...c,
+      messages: kept,
+      windows: dropStaleWindows(c.windows, kept)
+    }));
+    if (conv.persisted) void enqueue(conv.id, () => storeApi.deleteMessagesFrom(conv.id, userIdx));
+    void get().sendMessage(userMsg.content, userMsg.images ?? [], modelId);
+  },
+
+  editAndResend: (messageId, newText, modelId) => {
+    const conv = get().getActiveConversation();
+    if (!conv || get().isGenerating) return;
+    const idx = conv.messages.findIndex((m) => m.id === messageId);
+    const original = conv.messages[idx];
+    if (idx === -1 || !original) return;
+    const kept = conv.messages.slice(0, idx);
+    updateConv(conv.id, (c) => ({
+      ...c,
+      messages: kept,
+      windows: dropStaleWindows(c.windows, kept)
+    }));
+    if (conv.persisted) void enqueue(conv.id, () => storeApi.deleteMessagesFrom(conv.id, idx));
+    void get().sendMessage(newText, original.images ?? [], modelId);
+  },
+
+  continueGeneration: (modelId) => {
+    if (get().isGenerating) return;
+    void get().sendMessage(CONTINUE_TEXT, [], modelId);
+  }
+}));

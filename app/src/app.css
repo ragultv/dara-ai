@@ -65,12 +65,29 @@ body {
   -webkit-user-select: text;
 }
 
+#root,
 #app {
   height: 100%;
   width: 100%;
   overflow: hidden;
   user-select: text;
   -webkit-user-select: text;
+}
+
+* {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+button,
+a,
+input[type="checkbox"],
+input[type="radio"],
+[role="button"],
+[role="tab"],
+[role="radio"] {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 input,
@@ -101,7 +118,6 @@ textarea:focus-visible {
   outline: none !important;
   box-shadow: none !important;
 }
-
 
 /* =========================================================================
    Oprel-Grade Markdown & Code Highlighting System
@@ -146,10 +162,18 @@ textarea:focus-visible {
   color: var(--color-text);
 }
 
-.oprel-markdown h1 { font-size: 1.15rem; }
-.oprel-markdown h2 { font-size: 1.05rem; }
-.oprel-markdown h3 { font-size: 0.95rem; }
-.oprel-markdown h4 { font-size: 0.9rem; }
+.oprel-markdown h1 {
+  font-size: 1.15rem;
+}
+.oprel-markdown h2 {
+  font-size: 1.05rem;
+}
+.oprel-markdown h3 {
+  font-size: 0.95rem;
+}
+.oprel-markdown h4 {
+  font-size: 0.9rem;
+}
 
 .oprel-markdown ul,
 .oprel-markdown ol {
@@ -157,8 +181,12 @@ textarea:focus-visible {
   padding-left: 1.4rem;
 }
 
-.oprel-markdown ul { list-style-type: disc; }
-.oprel-markdown ol { list-style-type: decimal; }
+.oprel-markdown ul {
+  list-style-type: disc;
+}
+.oprel-markdown ol {
+  list-style-type: decimal;
+}
 
 .oprel-markdown li {
   margin: 0.25rem 0;
@@ -318,11 +346,24 @@ textarea:focus-visible {
 }
 
 /* Shiki Syntax Token Highlighting */
-.tok-keyword { color: #c084fc !important; font-weight: 600; }
-.tok-string { color: #34d399 !important; }
-.tok-number { color: #fbbf24 !important; }
-.tok-comment { color: #64748b !important; font-style: italic; }
-.tok-bool { color: #f472b6 !important; font-weight: 600; }
+.tok-keyword {
+  color: #c084fc !important;
+  font-weight: 600;
+}
+.tok-string {
+  color: #34d399 !important;
+}
+.tok-number {
+  color: #fbbf24 !important;
+}
+.tok-comment {
+  color: #64748b !important;
+  font-style: italic;
+}
+.tok-bool {
+  color: #f472b6 !important;
+  font-weight: 600;
+}
 
 .oprel-code-content::-webkit-scrollbar {
   height: 6px;

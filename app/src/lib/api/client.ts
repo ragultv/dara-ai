@@ -11,6 +11,7 @@ import type {
   VersionInfo,
   ChatRequest,
   ChatChunk,
+  ChatResponse,
   OptionsResponse,
   BenchmarkJob
 } from "./types.ts";
@@ -113,6 +114,37 @@ export class DaraApiClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** GET that returns the raw bytes (images): an <img src> cannot send the Authorization header. */
+  async requestBlob(endpoint: string, options: { signal?: AbortSignal } = {}): Promise<Blob> {
+    const url = `${this.baseUrl}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
+    const headers = new Headers();
+    if (this.apiKey) headers.set("Authorization", `Bearer ${this.apiKey}`);
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers,
+        ...(options.signal ? { signal: options.signal } : {})
+      });
+    } catch (err: unknown) {
+      throw new ApiError(0, err instanceof Error ? err.message : "Network error", "network_error");
+    }
+    if (!response.ok) {
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        body = await response.text();
+      }
+      throw ApiError.fromResponseBody(
+        response.status,
+        body,
+        `Request to ${endpoint} failed with status ${response.status}`
+      );
+    }
+    return response.blob();
   }
 
   async getHealth(signal?: AbortSignal, timeoutMs = 3000): Promise<Health> {
@@ -228,6 +260,16 @@ export class DaraApiClient {
     return this.request<VersionInfo>("/dara/version", opts);
   }
 
+  async shutdown(signal?: AbortSignal): Promise<void> {
+    const opts: RequestInit = {
+      method: "POST"
+    };
+    if (signal) {
+      opts.signal = signal;
+    }
+    await this.request<{ status: string }>("/dara/shutdown", opts).catch(() => {});
+  }
+
   async streamChat(
     req: ChatRequest,
     signal?: AbortSignal
@@ -269,19 +311,39 @@ export class DaraApiClient {
     return parseSseStream(response.body.getReader());
   }
 
-  async getModelOptions(modelId: string, signal?: AbortSignal): Promise<OptionsResponse> {
+  /** One non-streaming chat completion (used for context-window summaries). */
+  async chat(req: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+    const opts: RequestInit & { timeoutMs: number } = {
+      method: "POST",
+      body: JSON.stringify({ ...req, stream: false }),
+      timeoutMs: 600000
+    };
+    if (signal) opts.signal = signal;
+    return this.request<ChatResponse>("/v1/chat/completions", opts);
+  }
+
+  async getModelOptions(
+    modelId: string,
+    signal?: AbortSignal,
+    query = ""
+  ): Promise<OptionsResponse> {
     const opts: RequestInit = {
       method: "GET"
     };
     if (signal) {
       opts.signal = signal;
     }
-    return this.request<OptionsResponse>(`/dara/models/${modelId}/options`, opts);
+    return this.request<OptionsResponse>(`/dara/models/${modelId}/options${query}`, opts);
   }
 
-  async startBenchmark(modelId: string, signal?: AbortSignal): Promise<BenchmarkJob> {
+  async startBenchmark(
+    modelId: string,
+    body: { formats?: string[]; vision?: boolean; force?: boolean } = {},
+    signal?: AbortSignal
+  ): Promise<BenchmarkJob> {
     const opts: RequestInit = {
-      method: "POST"
+      method: "POST",
+      body: JSON.stringify(body)
     };
     if (signal) {
       opts.signal = signal;

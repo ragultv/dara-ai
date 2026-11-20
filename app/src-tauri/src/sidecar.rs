@@ -1,3 +1,4 @@
+use crate::engine_settings::{self, EngineSettings};
 use rand::RngCore;
 use serde::Serialize;
 use std::net::TcpListener;
@@ -19,27 +20,41 @@ pub struct ServerManager {
     connection: Mutex<ServerConnection>,
     binary_path: Option<PathBuf>,
     child: Mutex<Option<Child>>,
+    /// What the running engine was started with (the port may differ from the saved one if it was busy).
+    running: Mutex<EngineSettings>,
     restart_count: AtomicU32,
     is_stopping: AtomicBool,
     has_failed: AtomicBool,
+    /// True while `restart_engine` swaps the child; the watchdog must not respawn then.
+    is_restarting: AtomicBool,
+    monitor_started: AtomicBool,
+    restart_lock: Mutex<()>,
 }
 
 impl ServerManager {
     pub fn new() -> Arc<Self> {
-        let port = Self::find_free_port();
+        let mut settings = engine_settings::load_from(&engine_settings::config_path());
+        // The saved port may be taken by another program: fall back to a free one for this run.
+        if !engine_settings::is_port_free(settings.port, settings.allow_lan) {
+            settings.port = Self::find_free_port();
+        }
         let api_key = Self::generate_api_key();
         let binary_path = Self::locate_binary();
 
-        let base_url = format!("http://127.0.0.1:{port}");
+        let base_url = format!("http://127.0.0.1:{}", settings.port);
         let connection = ServerConnection { base_url, api_key };
 
         Arc::new(Self {
             connection: Mutex::new(connection),
             binary_path,
             child: Mutex::new(None),
+            running: Mutex::new(settings),
             restart_count: AtomicU32::new(0),
             is_stopping: AtomicBool::new(false),
             has_failed: AtomicBool::new(false),
+            is_restarting: AtomicBool::new(false),
+            monitor_started: AtomicBool::new(false),
+            restart_lock: Mutex::new(()),
         })
     }
 
@@ -59,14 +74,79 @@ impl ServerManager {
             return;
         }
 
+        self.ensure_monitor();
+    }
+
+    fn ensure_monitor(self: &Arc<Self>) {
+        if self.monitor_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let manager = Arc::clone(self);
         std::thread::spawn(move || {
             manager.monitor_loop();
         });
     }
 
-    pub fn stop(&self) {
-        self.is_stopping.store(true, Ordering::SeqCst);
+    /// What the engine is running with right now.
+    pub fn running_settings(&self) -> EngineSettings {
+        self.running.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    pub fn saved_settings(&self) -> EngineSettings {
+        engine_settings::load_from(&engine_settings::config_path())
+    }
+
+    /// Validates and saves new engine settings. They apply at the next (re)start.
+    pub fn save_settings(&self, input: &EngineSettings) -> Result<EngineSettings, String> {
+        let running_port = self.running_settings().port;
+        let valid = engine_settings::validate(input, running_port, |p| {
+            engine_settings::is_port_free(p, input.allow_lan)
+        })?;
+        engine_settings::save_to(&engine_settings::config_path(), &valid)?;
+        Ok(valid)
+    }
+
+    /// Stops the engine and starts it again with the saved settings (and a new key when asked).
+    pub fn restart(self: &Arc<Self>, regenerate_key: bool) -> Result<ServerConnection, String> {
+        let _guard = self.restart_lock.lock().map_err(|e| e.to_string())?;
+        if self.is_stopping.load(Ordering::SeqCst) {
+            return Err("The app is closing.".to_string());
+        }
+        self.is_restarting.store(true, Ordering::SeqCst);
+        let result = self.restart_inner(regenerate_key);
+        self.is_restarting.store(false, Ordering::SeqCst);
+        result?;
+        self.ensure_monitor();
+        self.get_connection()
+    }
+
+    fn restart_inner(&self, regenerate_key: bool) -> Result<(), String> {
+        let saved = self.saved_settings();
+        let old_port = self.running_settings().port;
+        // Check before stopping anything, so a bad value keeps the current engine alive.
+        let valid = engine_settings::validate(&saved, old_port, |p| {
+            engine_settings::is_port_free(p, saved.allow_lan)
+        })?;
+
+        self.kill_child();
+        self.restart_count.store(0, Ordering::SeqCst);
+        self.has_failed.store(false, Ordering::SeqCst);
+
+        {
+            let mut conn = self.connection.lock().map_err(|e| e.to_string())?;
+            conn.base_url = format!("http://127.0.0.1:{}", valid.port);
+            if regenerate_key {
+                conn.api_key = Self::generate_api_key();
+            }
+        }
+        {
+            let mut running = self.running.lock().map_err(|e| e.to_string())?;
+            *running = valid;
+        }
+        self.spawn_process()
+    }
+
+    fn kill_child(&self) {
         if let Ok(mut guard) = self.child.lock() {
             if let Some(ref mut child) = *guard {
                 let _ = child.kill();
@@ -74,6 +154,11 @@ impl ServerManager {
             }
             *guard = None;
         }
+    }
+
+    pub fn stop(&self) {
+        self.is_stopping.store(true, Ordering::SeqCst);
+        self.kill_child();
     }
 
     fn spawn_process(&self) -> Result<(), String> {
@@ -94,26 +179,14 @@ impl ServerManager {
             }
         }
 
-        let (port_str, key_str) = {
+        let key = {
             let conn = self.connection.lock().map_err(|e| e.to_string())?;
-            let port = conn
-                .base_url
-                .split(':')
-                .next_back()
-                .unwrap_or("11435")
-                .to_string();
-            (port, conn.api_key.clone())
+            conn.api_key.clone()
         };
+        let settings = self.running_settings();
 
-        // Determine models directory and ensure it exists on disk
-        let models_dir = if let Ok(custom) = std::env::var("DARA_MODELS") {
-            PathBuf::from(custom)
-        } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            PathBuf::from(local_app_data).join("Dara").join("models")
-        } else {
-            PathBuf::from("models")
-        };
-
+        // Make sure the models folder exists on disk.
+        let models_dir = settings.effective_models_dir();
         if let Err(e) = std::fs::create_dir_all(&models_dir) {
             eprintln!(
                 "[Dara] Notice: Could not pre-create models directory {}: {e}",
@@ -121,19 +194,11 @@ impl ServerManager {
             );
         }
 
-        // Note: Never log key_str
+        // The key goes in the environment, not on the command line (visible in the process list).
+        // Never log it.
         let mut cmd = Command::new(binary);
-        cmd.args([
-            "serve",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port_str,
-            "--api-key",
-            &key_str,
-            "--models-dir",
-            &models_dir.to_string_lossy(),
-        ]);
+        cmd.args(settings.serve_args());
+        cmd.env("DARA_API_KEY", &key);
 
         let child = cmd.spawn().map_err(|e| {
             format!(
@@ -153,6 +218,10 @@ impl ServerManager {
             if self.is_stopping.load(Ordering::SeqCst) {
                 break;
             }
+            if self.is_restarting.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
 
             let status_res = {
                 let mut guard = match self.child.lock() {
@@ -162,7 +231,9 @@ impl ServerManager {
                 if let Some(ref mut child) = *guard {
                     child.try_wait()
                 } else {
-                    break;
+                    drop(guard);
+                    std::thread::sleep(Duration::from_millis(400));
+                    continue;
                 }
             };
 

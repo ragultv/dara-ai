@@ -22,7 +22,7 @@ export function createMockServer(options: MockServerOptions = {}): {
   const server = http.createServer((req, res) => {
     // Enable CORS for testing & local webview dev
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
 
     if (req.method === "OPTIONS") {
@@ -111,6 +111,42 @@ export function createMockServer(options: MockServerOptions = {}): {
           log: ["Benchmark cancelled by user."]
         })
       );
+      return;
+    }
+
+    // App database endpoints (docs/ui/08-database.md): reads serve the recorded samples, writes are accepted and echo a plausible reply.
+    const sampleFor: Record<string, string> = {
+      "/dara/store": "store-info.json",
+      "/dara/settings": "settings.json",
+      "/dara/conversations": "conversations.json",
+      "/dara/model-configs": "model-configs.json",
+      "/dara/search": "search.json"
+    };
+    const sampleFile = sampleFor[pathname];
+    if (sampleFile && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(fs.readFileSync(path.join(samplesDir, sampleFile), "utf-8"));
+      return;
+    }
+    if (
+      pathname.startsWith("/dara/conversations/") &&
+      req.method === "GET" &&
+      !pathname.endsWith("/messages")
+    ) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(fs.readFileSync(path.join(samplesDir, "conversation.json"), "utf-8"));
+      return;
+    }
+    if (
+      (pathname.startsWith("/dara/conversations") ||
+        pathname.startsWith("/dara/messages") ||
+        pathname.startsWith("/dara/settings") ||
+        pathname.startsWith("/dara/model-configs") ||
+        pathname === "/dara/data") &&
+      req.method !== "GET"
+    ) {
+      res.writeHead(req.method === "POST" ? 201 : 200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ deleted: req.method === "DELETE" }));
       return;
     }
 
