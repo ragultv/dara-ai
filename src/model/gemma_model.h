@@ -160,6 +160,7 @@ private:
     int* h_next_ = nullptr;            // pinned host copy of the chosen token
     DevBuf<int64_t> d_pos_;            // position of the single token being decoded, read by RoPE / KV append / attention
     int64_t* h_pos_ = nullptr;         // pinned host copy uploaded before each decode step
+    float* h_logits_ = nullptr;        // pinned staging row for forward_greedy's sampled path (no per-token 1 MB allocation or pageable copy)
     bool use_graphs_ = true;
     int graph_failures_ = 0;           // consecutive graph failures (3 disable graphs)
     // profiler state

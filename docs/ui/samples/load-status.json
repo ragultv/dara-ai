@@ -1,0 +1,11 @@
+{
+  "config": {
+    "reason": "INT8 (default): high quality, 131072 tokens, every layer and the output head on the GPU; Flash keeps at least 32K tokens here, so it is on",
+    "source": "recommended"
+  },
+  "model": "dara-nano",
+  "percent": 100,
+  "seconds": 5.54,
+  "stage": "ready",
+  "state": "ready"
+}

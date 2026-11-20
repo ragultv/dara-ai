@@ -1,0 +1,27 @@
+# Node dependencies
+node_modules/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+.svelte-kit/
+
+# Generated tokens (copied from docs/ui/tokens.css on prebuild)
+src/tokens.css
+
+# Rust & Tauri target directories
+src-tauri/target/
+src-tauri/gen/
+
+# Test output and logs
+test-results/
+playwright-report/
+*.log
+debug.log
+
+# Environment variables
+.env
+.env.*
+!.env.example
+app/tsconfig.tsbuildinfo

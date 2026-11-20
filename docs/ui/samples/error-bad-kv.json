@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "unknown K/V format 'bogus' (auto, q8, k8v4, q4, tq4, k16v8)",
+    "type": "invalid_request_error"
+  }
+}

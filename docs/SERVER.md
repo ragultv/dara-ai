@@ -44,7 +44,9 @@ dara rm <id>
 | `--min-context N` | `0` | floor for `--ctx auto` (0: none; `dara --min-context` keeps its own default of 32768) |
 | `--image-max-tokens N` | `400` | Qwen image token cap |
 | `--max-tokens N` | `1024` | default reply length when a request does not set one |
-| `--api-key KEY` | | require `Authorization: Bearer KEY` |
+| `--api-key KEY` | | require `Authorization: Bearer KEY`. The `DARA_API_KEY` environment variable does the same and is preferred (arguments are visible to other processes) |
+| `--data-dir DIR` | `%LOCALAPPDATA%\Dara` (or `DARA_DATA_DIR`) | where the app database `dara.db` and its `attachments` folder live (chat history, settings, per-model configuration) |
+| `--no-store` | | run without the app database (its endpoints answer 503) |
 | `--cors-origin ORIGIN` | localhost + Tauri origins | extra allowed browser origin |
 Requests run one at a time (a queue); `/dara/stats` and `/metrics` answer while a request runs.
 
@@ -69,6 +71,7 @@ Requests run one at a time (a queue); `/dara/stats` and `/metrics` answer while 
 | `POST /dara/tokenize` | `{"messages": [...]}` or `{"text": "..."}` -> token count |
 | `POST /dara/compact` | `{"messages": [...], "max_tokens": N}` -> the messages as the context maintainer would send them |
 | `GET /dara/stats` | everything below, as JSON |
+| `/dara/conversations`, `/dara/messages`, `/dara/attachments`, `/dara/settings`, `/dara/model-configs`, `/dara/search`, `/dara/store`, `/dara/data` | the app database: chat history, settings, per-model configuration, image attachments, full-text search, export and delete-all. Reference: [ui/08-database.md](ui/08-database.md); test: `tests/store_api_test.py` |
 | `GET /metrics` | the same as Prometheus text |
 
 ### Per-request numbers
@@ -168,7 +171,33 @@ context, from free VRAM), `/dara/stats` the largest image (`model.image_scratch_
 GPU so short of memory that the scratch cannot be found, the request fails with a message saying so (shorten the conversation, lower
 `--image-max-tokens`, or load a smaller context).
 
+**Images across turns (Nano).** The prompt cache covers image turns: when the conversation grows, the K/V of earlier images is reused (an image counts as
+the same only if its pixels and position match, otherwise the cache is cut just before it) and only images past the reused prefix are encoded. Encoded
+images are also kept in a small cache (8, by content hash), so re-sending a picture skips the encode. Measured on a GTX 1650 with Nano: a follow-up turn
+after an image went from 1.8-5.4 s to 0.14-0.25 s time to first token, and a new image costs ~1.9 s however long the conversation is (before, each turn
+re-encoded every earlier image and re-prefilled the whole history: 14-20 s at 7-9k tokens in the app). Core / Pro still re-prefill image conversations.
+
 Embeddings are bit-identical to the resident encoder (tests/vision_stream_test.cu; the previous build's logits on image prompts match byte for byte).
+
+## Thinking (reasoning effort)
+
+`POST /v1/chat/completions` accepts `"reasoning_effort"`: `none` (default, no thinking), `low`, `medium`, `high`, `xhigh` (also `extra`) or `max`; or
+`"thinking_budget": N` (reasoning tokens; -1 = no cap). The names follow OpenAI, Hermes Agent and Claude Code. Each level is a **cap on thinking tokens**:
+
+| Effort | low | medium | high | xhigh | max |
+| --- | --- | --- | --- | --- | --- |
+| Thinking tokens (at most) | 512 | 2,048 | 4,096 | 8,192 | 32,768 |
+
+The model thinks first (Qwen: `<think>...</think>`; Nano: Gemma's `<|channel>thought ... <channel|>` with `<|think|>` in the system turn), and the engine returns the
+thinking **separately from the answer**: `message.reasoning_content` (non-streaming) or `delta.reasoning_content` chunks that come before the `content` chunks
+(streaming), the same shape DeepSeek, vLLM and llama.cpp use. `max_tokens` limits the **answer** only; the thinking budget comes on top of it.
+
+If the model is still thinking when its cap is reached, the engine closes the thought for it (`</think>` / `<channel|>`) and the model writes its answer from there
+(`timings.thinking_cut: true`). The reply reports `usage.completion_tokens_details.reasoning_tokens` and `timings.thinking_ms`. Context summaries never think.
+Switching effort on and off changes the prompt (Nano: the system turn), so the next request re-reads the conversation instead of reusing the cache.
+
+Measured on a GTX 1650: Nano, "What is 17 * 23?" at `low`: 205 thinking tokens, 2.7 s, then the answer. A cap of 40 tokens on a long question closes the thought at
+0.5 s and the answer follows. Qwen3.5 4B tends to overthink even simple questions, so it reaches the `low` (512) and `medium` (2,048) caps there.
 
 ## Flash and speculative decoding
 

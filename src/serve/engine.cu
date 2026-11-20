@@ -199,6 +199,9 @@ struct Engine::Impl {
     // special ids
     std::vector<int32_t> eog;
     int32_t img_pad = -1, img_open = -1, img_close = -1;
+    // thinking markers: Qwen <think> ... </think> (the generation prompt opens it); Gemma <|channel>thought ... <channel|> (the model opens it)
+    int32_t think_close = -1, ch_open = -1, ch_close = -1;
+    bool think_on = false;   // the request being rendered asks for thinking
     // stats
     mutable std::mutex smu;
     EngineStats st;
@@ -260,7 +263,7 @@ struct Engine::Impl {
                 }
             }
             *gen_at = out.size();
-            if (add_gen) { S("<|im_start|>"); T("assistant\n<think>\n\n</think>\n\n"); }
+            if (add_gen) { S("<|im_start|>"); T(think_on ? "assistant\n<think>\n" : "assistant\n<think>\n\n</think>\n\n"); }
         } else {
             std::vector<dara::tokenizer::ChatMessage> cm;
             for (const Message& m : msgs) {
@@ -270,8 +273,8 @@ struct Engine::Impl {
                 if (role == "system" && !cm.empty()) role = "user";   // the template supports one leading system turn
                 cm.push_back({role, canon_role(m.role) == "user" ? content_with_slots(m) : strip_slots(m.text())});   // images: user messages only
             }
-            const auto without = dara::tokenizer::render_gemma_chat_pieces(cm, false, false);
-            const auto with = add_gen ? dara::tokenizer::render_gemma_chat_pieces(cm, true, false) : without;
+            const auto without = dara::tokenizer::render_gemma_chat_pieces(cm, false, think_on);
+            const auto with = add_gen ? dara::tokenizer::render_gemma_chat_pieces(cm, true, think_on) : without;
             for (const auto& p : with) out.push_back({p.text, p.structural});
             *gen_at = without.size();
         }
@@ -334,6 +337,7 @@ struct Engine::Impl {
         else { gm->rewind(0); gm->clear_soft_tokens(); }
         kv_tokens.clear();
         kv_images = false;
+        held_imgs.clear();
         flash_valid = 0;
     }
     void invalidate() {   // after a failed request: nothing held is trusted
@@ -450,29 +454,52 @@ struct Engine::Impl {
 
     // ---- one generation over a token prompt ---------------------------------------------------------------------------------------------
     // images: per image, the encoded rows and its merged grid (Qwen) / token count (Gemma)
-    struct Img { std::vector<float> rows; int gh = 0, gw = 0, n = 0; };
+    // Nano: the encode is deferred (`pending` holds the preprocessed patches) until the prompt cache says which images' positions must be fed at all.
+    struct Img { std::vector<float> rows; int gh = 0, gw = 0, n = 0; uint64_t hash = 0; std::shared_ptr<dara::model::VisionInput> pending; };
+    struct HeldImg { size_t p0; int n; uint64_t hash; };
+    std::vector<HeldImg> held_imgs;          // Nano: the images whose soft tokens the held K/V state was computed from
+    double image_ms_acc = 0;                 // encode time spent inside generate() (deferred encodes), added to timings.image_ms
+    std::vector<std::pair<uint64_t, std::vector<float>>> img_cache;   // recently encoded images (hash -> soft-token rows), newest last
+    static constexpr size_t kImgCacheMax = 8;
 
-    void generate(Prompt& pr, std::vector<Img>& imgs, const SampleParams& sp, const TextFn& on_text, GenResult& r, Clock::time_point t_start,
+    void generate(Prompt& pr, std::vector<Img>& imgs, const SampleParams& sp, const TextFn& on_text, const TextFn& on_reasoning, GenResult& r, Clock::time_point t_start,
                   bool count_stats, bool allow_cache) {
         const size_t cap = capacity();
         const std::vector<int32_t>& ids = pr.ids;
         if (ids.empty()) throw std::invalid_argument("empty prompt");
         if (ids.size() >= cap) throw std::length_error("prompt (" + std::to_string(ids.size()) + " tokens) does not fit the context (" + std::to_string(cap) + ")");
-        const int max_new = static_cast<int>(std::min<size_t>(static_cast<size_t>(std::max(1, sp.max_tokens)), cap - ids.size()));
+        // thinking: the budget (plus the few tokens that close the thought) comes on top of max_tokens, which then limits the answer alone
+        const bool think_mode = think_on && sp.think_budget != 0 && (qwen ? think_close >= 0 : (ch_open >= 0 && ch_close >= 0));
+        const size_t think_allow = !think_mode ? 0 : (sp.think_budget > 0 ? static_cast<size_t>(sp.think_budget) + 16 : cap);
+        const int max_new = static_cast<int>(std::min<size_t>(static_cast<size_t>(std::max(1, sp.max_tokens)) + think_allow, cap - ids.size()));
         const bool greedy = sp.temperature <= 0 || sp.top_k == 1;
         const bool has_img = !imgs.empty();
 
         // ---- prompt cache: how much of the held state can be kept ----
         size_t reuse = 0;
-        if (allow_cache && !has_img && !kv_images) {
-            if (qwen) {
-                if (qckpt.valid && !qckpt_tokens.empty() && qckpt_tokens.size() <= ids.size() && std::equal(qckpt_tokens.begin(), qckpt_tokens.end(), ids.begin()))
-                    reuse = qckpt_tokens.size() - 1;   // the checkpoint holds all but the last of these tokens
-            } else {
-                size_t l = 0;
-                while (l < kv_tokens.size() && l < ids.size() && kv_tokens[l] == ids[l]) ++l;
-                reuse = l > 0 ? l - 1 : 0;              // re-feed one token: the drafter and the next-token logits need it
+        if (!qwen) {   // Nano: image placeholders hold the pad id in the sequence (the per-layer table reads it), so compare in that form
+            for (const auto& [p0, k] : pr.images) for (int j = 0; j < imgs[static_cast<size_t>(k)].n; ++j) pr.ids[p0 + static_cast<size_t>(j)] = 0;
+        }
+        if (allow_cache && qwen && !has_img && !kv_images) {
+            if (qckpt.valid && !qckpt_tokens.empty() && qckpt_tokens.size() <= ids.size() && std::equal(qckpt_tokens.begin(), qckpt_tokens.end(), ids.begin()))
+                reuse = qckpt_tokens.size() - 1;   // the checkpoint holds all but the last of these tokens
+        } else if (allow_cache && !qwen) {
+            size_t l = 0;
+            while (l < kv_tokens.size() && l < ids.size() && kv_tokens[l] == ids[l]) ++l;
+            // An image's K/V is only valid if the same image (same pixels) was held at the same position: cut the match before the first image
+            // that differs or is only partly matched. The soft tokens are plain input embeddings (causal attention), so everything before such an
+            // image stays exact.
+            for (const auto& [p0, k] : pr.images) {
+                const Img& im = imgs[static_cast<size_t>(k)];
+                if (p0 >= l) break;
+                bool same = p0 + static_cast<size_t>(im.n) <= l;
+                if (same) {
+                    same = false;
+                    for (const HeldImg& h : held_imgs) if (h.p0 == p0 && h.n == im.n && h.hash == im.hash) { same = true; break; }
+                }
+                if (!same) { l = p0; break; }
             }
+            reuse = l > 0 ? l - 1 : 0;              // re-feed one token: the drafter and the next-token logits need it
         }
         // speculative decoding (prompt lookup + the Flash drafter), for greedy and sampled requests alike; "flash": false turns it off
         if (reuse == 0) { flash_paused = false; spec_paused = false; }   // a new conversation: speculation gets a fresh chance
@@ -500,16 +527,20 @@ struct Engine::Impl {
         if (use_flash) flash->rewind(reuse);
         flash_valid = std::min(flash_valid, reuse);
 
-        // images: soft tokens at their placeholder positions
+        // images: soft tokens at their placeholder positions. Nano feeds (and so encodes) only the images that reach past the reused prefix.
         for (const auto& [p0, k] : pr.images) {
             Img& im = imgs[static_cast<size_t>(k)];
             if (qwen) qm->add_image(p0, im.gh, im.gw, std::move(im.rows));
-            else {
-                for (int j = 0; j < im.n; ++j) pr.ids[p0 + static_cast<size_t>(j)] = 0;   // <pad>: the per-layer table reads it
+            else if (p0 + static_cast<size_t>(im.n) > reuse) {
+                ensure_rows(im);
                 gm->add_soft_tokens(p0, im.n, std::move(im.rows));
             }
         }
         kv_images = has_img;
+        if (!qwen) {
+            held_imgs.clear();
+            for (const auto& [p0, k] : pr.images) held_imgs.push_back({p0, imgs[static_cast<size_t>(k)].n, imgs[static_cast<size_t>(k)].hash});
+        }
 
         // ---- prefill ----
         const auto tp = Clock::now();
@@ -546,6 +577,38 @@ struct Engine::Impl {
         bool eog_hit = false;
         Clock::time_point t_first;
         auto is_eog = [&](int32_t id) { return std::find(eog.begin(), eog.end(), id) != eog.end(); };
+        // ---- thinking state ----
+        bool thinking = think_mode && qwen;            // Qwen: the prompt already opened the thought; Gemma: it starts at the model's <|channel>
+        bool think_done = !think_mode;
+        bool in_channel = false, budget_hit = false;
+        int think_count = 0, think_end_gen = 0;
+        double think_end_ms = 0;
+        bool label_pending = think_mode && !qwen;      // Gemma writes "thought\n" right after <|channel>: not part of the reasoning text
+        std::string label_buf;
+        bool rsn_cancelled = false;
+        const int answer_cap = std::max(1, sp.max_tokens);
+        auto emit_reasoning = [&](const std::string& piece) -> bool {
+            std::string p = piece;
+            if (label_pending) {
+                label_buf += p;
+                const size_t nl = label_buf.find('\n');
+                if (nl == std::string::npos && label_buf.size() < 16) return true;
+                if (label_buf.compare(0, 7, "thought") == 0 && nl != std::string::npos) p = label_buf.substr(nl + 1);
+                else p = label_buf;
+                label_pending = false;
+                label_buf.clear();
+            }
+            if (p.empty()) return true;
+            r.reasoning += p;
+            if (on_reasoning && !on_reasoning(p)) { rsn_cancelled = true; return false; }
+            return true;
+        };
+        auto end_thought = [&]() {
+            think_done = true; thinking = false; budget_hit = false;
+            think_end_gen = generated;
+            think_end_ms = std::chrono::duration<double, std::milli>(Clock::now() - t_first).count();
+            if (label_pending) { label_pending = false; if (!label_buf.empty()) emit_reasoning(label_buf); label_buf.clear(); }
+        };
         auto accept = [&](int32_t id) -> bool {   // one generated token; false: generation ends
             seq.push_back(id);
             ++generated;
@@ -557,12 +620,48 @@ struct Engine::Impl {
                 st.live_tps = generated > 1 && dms > 0 ? (generated - 1) * 1000.0 / dms : 0;
             }
             if (is_eog(id)) { eog_hit = true; return false; }
+            if (think_mode && !think_done) {
+                if (qwen) {
+                    if (id == think_close) { end_thought(); return generated < max_new; }
+                } else if (!in_channel) {
+                    if (id == ch_open) { in_channel = true; thinking = true; return generated < max_new; }
+                    end_thought();   // the model answered without thinking: this token is already the answer
+                } else if (id == ch_close) {
+                    in_channel = false; end_thought(); return generated < max_new;
+                }
+                if (thinking) {
+                    ++think_count;
+                    const std::string piece = qd ? qd->push(id) : gd->push(id);
+                    if (!piece.empty() && !emit_reasoning(piece)) return false;
+                    // the cap is checked between passes (not inside a verified run), so the state stays aligned with seq
+                    if (sp.think_budget > 0 && think_count >= sp.think_budget) budget_hit = true;
+                    return generated < max_new;
+                }
+            }
             const std::string piece = qd ? qd->push(id) : gd->push(id);
             if (!piece.empty() && !out.push(piece)) return false;
+            if (think_mode && generated - think_end_gen >= answer_cap) return false;   // the answer has its own max_tokens
             return generated < max_new;
         };
         int passes = 0;
         bool go = accept(first);
+        dara::model::RunStats plain_rs;
+        auto plain_decode = [&]() {
+            while (go && !budget_hit) {
+                const int32_t cur = seq.back();
+                int32_t nx;
+                if (greedy) {
+                    if (qwen) { std::vector<int32_t> a1; qm->forward(&cur, 1, 0, nullptr, &plain_rs, &a1); nx = a1.at(0); }
+                    else nx = gm->forward_greedy(cur, &plain_rs);
+                } else {
+                    if (qwen) row = qm->forward(&cur, 1, 0, nullptr, &plain_rs);
+                    else gm->forward_greedy(cur, &plain_rs, &row);
+                    nx = sample(row, sp, seq, rng);
+                }
+                ++passes;
+                go = accept(nx);
+            }
+        };
         if (go && spec_on) {
             // speculative decoding: drafts (prompt lookup first, else the Flash drafter) are verified in one forward and the state is rolled back past
             // the first rejected draft. Greedy: a draft is kept while it equals the model's argmax (output identical to plain greedy decoding).
@@ -584,9 +683,12 @@ struct Engine::Impl {
             // declined to draft (low confidence) -- those still pay for keeping it in step
             int fl_win_passes = 0, fl_win_tokens = 0;
             bool ngram_off = false;
-            constexpr int kFlashWindowPasses = 48;
-            constexpr float kFlashMinTokensPerPass = 1.25f;
-            constexpr float kFlashMinAccept = 0.7f;   // below this, a verify step of 1 + k tokens costs more than it saves (measured on a GTX 1650)
+            // Core 4B / 9B: measured on a GTX 1650. Nano: its verify pass is cheap and the drafter only drafts when confident (--flash-min-p), so
+            // even ~0.8 accepted drafts per step wins (prose +12%, code +35% in the unthrottled driver); the Core thresholds stood it down in the
+            // slow first words of an answer and left plain decoding for the whole conversation.
+            const int kFlashWindowPasses = qwen ? 48 : 96;
+            const float kFlashMinTokensPerPass = qwen ? 1.25f : 1.15f;
+            const float kFlashMinAccept = qwen ? 0.7f : 0.5f;   // below this, a verify step of 1 + k tokens costs more than it saves
             const int ngram_max = 4, ngram_min = 3;
             auto lookup = [&](int limit) {
                 draft.clear();
@@ -603,7 +705,7 @@ struct Engine::Impl {
                 }
             };
             dara::model::RunStats rs;
-            while (go) {
+            while (go && !budget_hit) {
                 const int budget = max_new - generated;   // tokens that may still be added after the verify step's own token
                 const int32_t cur = seq.back();
                 draft.clear();
@@ -716,20 +818,26 @@ struct Engine::Impl {
                 for (int32_t id : to_add) if (!(go = accept(id))) break;   // a stop inside the run: seq stays a prefix of the held state
             }
         } else {
-            dara::model::RunStats rs;
-            while (go) {
-                const int32_t cur = seq.back();
-                int32_t nx;
-                if (greedy) {
-                    if (qwen) { std::vector<int32_t> a1; qm->forward(&cur, 1, 0, nullptr, &rs, &a1); nx = a1.at(0); }
-                    else nx = gm->forward_greedy(cur, &rs);
-                } else {
-                    if (qwen) row = qm->forward(&cur, 1, 0, nullptr, &rs);
-                    else gm->forward_greedy(cur, &rs, &row);
-                    nx = sample(row, sp, seq, rng);
-                }
-                ++passes;
+            plain_decode();
+        }
+        if (budget_hit && go && !rsn_cancelled && !out.cancelled()) {
+            // The thinking budget ran out: close the thought for the model and let it answer (plain decoding from here on).
+            std::vector<int32_t> fseq = seq;   // the state holds all of seq except its last token
+            std::vector<int32_t> closing;
+            if (qwen) { const auto a = encode_plain("\n"), b = encode_plain("\n\n"); closing.insert(closing.end(), a.begin(), a.end()); closing.push_back(think_close); closing.insert(closing.end(), b.begin(), b.end()); }
+            else closing.push_back(ch_close);
+            fseq.insert(fseq.end(), closing.begin(), closing.end());
+            if (fseq.size() + 1 >= cap) { r.finish_reason = "length"; go = false; }
+            else {
+                int32_t nx = -1; std::vector<float> lrow;
+                feed(fseq, pos(), fseq.size(), true, greedy, &nx, &lrow, false, nullptr);
+                seq = fseq;
+                r.think_cut = true;
+                end_thought();
+                if (!greedy) nx = sample(lrow, sp, seq, rng);
+                use_flash = false;
                 go = accept(nx);
+                plain_decode();
             }
         }
         const std::string tail = qd ? qd->flush() : gd->flush();
@@ -738,8 +846,12 @@ struct Engine::Impl {
         r.timings.decode_ms = generated > 0 ? ms_since(t_first) : 0;
         r.timings.decoded = generated;
         r.text = out.text();
-        r.finish_reason = out.cancelled() ? "cancelled" : (eog_hit || out.stopped()) ? "stop" : "length";
+        const bool was_cancelled = out.cancelled() || rsn_cancelled;
+        if (r.finish_reason != "length" || was_cancelled || eog_hit || out.stopped())
+            r.finish_reason = was_cancelled ? "cancelled" : (eog_hit || out.stopped()) ? "stop" : "length";
         r.usage.completion_tokens = generated;
+        r.usage.reasoning_tokens = think_count;
+        r.timings.thinking_ms = think_mode ? (think_done ? think_end_ms : r.timings.decode_ms) : 0;
         r.spec.passes = passes;
         // the state now holds every fed token: all of seq except the last generated one (never fed)
         const size_t p = pos();
@@ -777,6 +889,24 @@ struct Engine::Impl {
     }
     size_t last_image_need = 0, last_image_borrowed = 0, last_image_from_free = 0;
 
+    // Nano: the soft-token rows of `im` (from the cache, else encoded now).
+    void ensure_rows(Img& im) {
+        if (!im.rows.empty() || !im.pending) return;
+        for (auto it = img_cache.begin(); it != img_cache.end(); ++it) {
+            if (it->first != im.hash) continue;
+            im.rows = it->second;
+            auto e = std::move(*it); img_cache.erase(it); img_cache.push_back(std::move(e));
+            im.pending.reset();
+            return;
+        }
+        const auto t0 = Clock::now();
+        im.rows = with_scratch(gvis->scratch_bytes(im.pending->n), [&] { return gvis->encode(*im.pending); });
+        image_ms_acc += ms_since(t0);
+        im.pending.reset();
+        img_cache.emplace_back(im.hash, im.rows);
+        if (img_cache.size() > kImgCacheMax) img_cache.erase(img_cache.begin());
+    }
+
     std::vector<Img> encode_images(const std::vector<Message>& msgs, double* ms) {
         std::vector<Img> v;
         const auto t0 = Clock::now();
@@ -792,14 +922,16 @@ struct Engine::Impl {
                     im.gh = in.merged_h(); im.gw = in.merged_w(); im.n = im.gh * im.gw;
                     im.rows = with_scratch(qvis->scratch_bytes(in.n), [&] { return qvis->encode(in); });
                 } else {
-                    const auto in = gvis->preprocess(img);
-                    im.n = in.soft_tokens();
-                    im.rows = with_scratch(gvis->scratch_bytes(in.n), [&] { return gvis->encode(in); });
+                    im.pending = std::make_shared<dara::model::VisionInput>(gvis->preprocess(img));
+                    im.n = im.pending->soft_tokens();
+                    im.hash = fnv(1469598103934665603ull, c.image);   // the encode runs later, in generate(), only if the prompt cache cannot cover this image
                 }
                 v.push_back(std::move(im));
             }
         }
         *ms = v.empty() ? 0 : ms_since(t0);
+        image_ms_acc = 0;
+        last_image_need = 0;
         return v;
     }
 
@@ -827,6 +959,8 @@ struct Engine::Impl {
         if (!previous.empty()) u += "Summary so far:\n" + previous + "\n\n";
         u += "Conversation to summarize:\n" + text + "\nWrite the updated summary of everything above.";
         sm[1].parts.push_back({false, u, ""});
+        const bool saved_think = think_on;
+        think_on = false;   // a summary never thinks
         size_t gen_at = 0;
         const auto pieces = render(sm, true, &gen_at);
         Prompt pr = tokenize(pieces, gen_at, {});
@@ -835,7 +969,8 @@ struct Engine::Impl {
         sp.temperature = 0;
         sp.max_tokens = 384;
         GenResult r;
-        generate(pr, none, sp, nullptr, r, Clock::now(), false, false);
+        try { generate(pr, none, sp, nullptr, nullptr, r, Clock::now(), false, false); } catch (...) { think_on = saved_think; throw; }
+        think_on = saved_think;
         return trim(r.text);
     }
 
@@ -1075,6 +1210,7 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         m.img_open = m.special_id("<|vision_start|>");
         m.img_pad = m.special_id("<|image_pad|>");
         m.img_close = m.special_id("<|vision_end|>");
+        try { m.think_close = m.special_id("</think>"); } catch (...) {}
         const auto& pr = m.qm->placement();
         m.info.family = "qwen35";
         m.info.layers = m.qcfg.layers;
@@ -1107,6 +1243,7 @@ Engine::Engine(const EngineOptions& o) : impl_(std::make_unique<Impl>()) {
         m.img_open = m.special_id("<|image>");
         m.img_pad = m.special_id("<|image|>");
         m.img_close = m.special_id("<image|>");
+        try { m.ch_open = m.special_id("<|channel>"); m.ch_close = m.special_id("<channel|>"); } catch (...) {}
         const auto& pr = m.gm->placement();
         m.info.family = "gemma4";
         m.info.layers = cfg.layers;
@@ -1171,8 +1308,9 @@ std::vector<Message> Engine::compact(const std::vector<Message>& messages, int m
     return out;
 }
 
-GenResult Engine::chat(const std::vector<Message>& messages, const SampleParams& sp, const TextFn& on_text) {
+GenResult Engine::chat(const std::vector<Message>& messages, const SampleParams& sp, const TextFn& on_text, const TextFn& on_reasoning) {
     Impl& m = *impl_;
+    m.think_on = sp.think_budget != 0;
     const auto t0 = Clock::now();
     { std::lock_guard<std::mutex> lk(m.smu); m.st.busy = true; m.st.live_tokens = 0; m.st.live_tps = 0; }
     GenResult r;
@@ -1180,7 +1318,7 @@ GenResult Engine::chat(const std::vector<Message>& messages, const SampleParams&
         if (messages.empty()) throw std::invalid_argument("no messages");
         ContextInfo ci;
         double cms = 0;
-        const std::vector<Message> msgs = m.maintain(messages, sp.max_tokens, &ci, &cms);
+        const std::vector<Message> msgs = m.maintain(messages, sp.max_tokens + (sp.think_budget == 0 ? 0 : static_cast<int>(std::min<size_t>(sp.think_budget > 0 ? static_cast<size_t>(sp.think_budget) : m.capacity() / 4, m.capacity() / 4))), &ci, &cms);
         double ims = 0;
         std::vector<Impl::Img> imgs = m.encode_images(msgs, &ims);
         std::vector<int> counts;
@@ -1188,15 +1326,16 @@ GenResult Engine::chat(const std::vector<Message>& messages, const SampleParams&
         size_t gen_at = 0;
         const auto pieces = m.render(msgs, true, &gen_at);
         Impl::Prompt pr = m.tokenize(pieces, gen_at, counts);
-        m.generate(pr, imgs, sp, on_text, r, t0, true, true);
+        m.generate(pr, imgs, sp, on_text, on_reasoning, r, t0, true, true);
         r.context.compacted = ci.compacted;
         r.context.summarized_messages = ci.summarized_messages;
         r.context.dropped_messages = ci.dropped_messages;
         r.context.truncated_last = ci.truncated_last;
         r.context.summary_cached = ci.summary_cached;
         r.timings.compact_ms = cms;
+        ims += m.image_ms_acc;   // Nano: encodes that ran inside generate()
         r.timings.image_ms = ims;
-        if (ims > 0) {
+        if (ims > 0 && m.last_image_need > 0) {
             r.timings.image_scratch_mb = m.last_image_need / 1048576.0;
             r.timings.image_borrowed_mb = m.last_image_borrowed / 1048576.0;
             r.timings.image_free_vram_mb = m.last_image_from_free / 1048576.0;
@@ -1228,7 +1367,7 @@ GenResult Engine::complete(const std::string& prompt, const SampleParams& sp, co
         }
         pr.conv_len = pr.ids.size();
         std::vector<Impl::Img> none;
-        m.generate(pr, none, sp, on_text, r, t0, true, true);
+        m.generate(pr, none, sp, on_text, nullptr, r, t0, true, true);
         r.timings.total_ms = ms_since(t0);
     } catch (...) {
         m.invalidate();

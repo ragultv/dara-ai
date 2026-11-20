@@ -118,6 +118,7 @@ def main():
     ap.add_argument("--self-targets", action="store_true", help="token targets = the target model's argmax (head . next feature) instead of the stored text (features-only data from another model's text)")
     ap.add_argument("--max-seqs", type=int, default=0, help="use only the first N sequences (smoke tests)")
     ap.add_argument("--max-steps", type=int, default=0, help="stop after N optimizer steps (smoke tests)")
+    ap.add_argument("--amp", action="store_true", help="fp16 autocast + loss scaling for the drafter forward/backward (tensor-core GPUs such as a Kaggle T4); losses stay fp32")
     a = ap.parse_args()
     if os.name == "nt":   # keep the system out of idle standby while training (the dGPU may not come back from Modern Standby)
         import ctypes
@@ -154,6 +155,8 @@ def main():
     if a.max_steps: steps = min(steps, a.max_steps)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=steps, pct_start=0.05)
     remap_t = torch.tensor(remap, device=dev)
+    use_amp = a.amp and dev.startswith("cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     def batch_tensors(batch, noise):
         T = max(len(b[0]) for b in batch) - 1
@@ -199,7 +202,9 @@ def main():
         for i in range(0, len(train), a.batch):
             if step >= steps: break
             f, e, ft, tgt, mask, pos = batch_tensors(train[i: i + a.batch], a.noise)
-            y = model(f, e, pos)
+            with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+                y = model(f, e, pos)
+            y = y.float()
             reg = (F.smooth_l1_loss(y, ft, reduction="none").mean(-1) * mask).sum() / mask.sum()
             logits = y @ head_w.T
             ce = F.cross_entropy(logits.view(-1, logits.size(-1)), tgt.view(-1), ignore_index=-1, reduction="none").view_as(mask)
@@ -207,9 +212,10 @@ def main():
             ce = (ce * ok).sum() / ok.sum().clamp(min=1)
             loss = reg + 0.1 * ce
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step(); sched.step(); step += 1
+            scaler.step(opt); scaler.update(); sched.step(); step += 1
             if step % 50 == 0:
                 print(f"epoch {ep} step {step}/{steps}: loss {loss.item():.4f} (feature {reg.item():.4f}, token CE {ce.item():.3f}) {time.time() - t0:.0f}s", flush=True)
         print(f"epoch {ep}: held-out next-token accuracy {evaluate():.3f}", flush=True)

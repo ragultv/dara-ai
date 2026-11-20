@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "conversation_id": "6f1c2b9e-3a4d-4e5f-8a1b-2c3d4e5f6a7b",
+      "message_id": "1b2c3d4e-5f6a-4b7c-8d8e-9f0a1b2c3d4e",
+      "position": 1,
+      "role": "assistant",
+      "snippet": "It stores the conversation [memory] in 4 bits, so more context fits on a small GPU.",
+      "title": "Explain K/V formats",
+      "updated_at": 1795112514921
+    }
+  ],
+  "object": "list"
+}
