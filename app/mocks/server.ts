@@ -14,11 +14,22 @@ export interface MockServerOptions {
   apiKey?: string;
 }
 
+interface MockArtifact {
+  id: string;
+  kind: string;
+  title: string;
+  content: string;
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
 export function createMockServer(options: MockServerOptions = {}): {
   server: http.Server;
   start: () => Promise<number>;
   stop: () => Promise<void>;
 } {
+  const artifacts = new Map<string, MockArtifact>();
   const server = http.createServer((req, res) => {
     // Enable CORS for testing & local webview dev
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -258,6 +269,73 @@ export function createMockServer(options: MockServerOptions = {}): {
     if (pathname.startsWith("/dara/models/") && req.method === "DELETE") {
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    // ---- artifacts (docs/ui/09-artifacts.md): kept in memory for the dev mock ----
+    const artifactMatch = /^\/dara\/artifacts(?:\/([0-9a-f-]{36}))?$/i.exec(pathname);
+    if (artifactMatch) {
+      const id = artifactMatch[1];
+      const send = (status: number, body: unknown) => {
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      let raw = "";
+      req.on("data", (c) => {
+        raw += c;
+      });
+      req.on("end", () => {
+        const body = raw ? JSON.parse(raw) : {};
+        const full = (a: MockArtifact) => ({ ...a, chars: a.content.length });
+        const summary = (a: MockArtifact) => {
+          const { content, ...rest } = a;
+          return { ...rest, chars: content.length, snippet: content.slice(0, 600) };
+        };
+        if (!id && req.method === "GET") {
+          const kind = url.searchParams.get("kind");
+          const data = [...artifacts.values()]
+            .filter((a) => !kind || a.kind === kind)
+            .sort((a, b) => b.updated_at - a.updated_at);
+          return send(200, {
+            object: "list",
+            data: data.map(summary),
+            total: data.length,
+            limit: 200,
+            offset: 0
+          });
+        }
+        if (!id && req.method === "POST") {
+          const now = Date.now();
+          const a: MockArtifact = {
+            id: body.id ?? crypto.randomUUID(),
+            kind: body.kind ?? "doc",
+            title: body.title ?? "",
+            content: body.content ?? "",
+            pinned: false,
+            created_at: now,
+            updated_at: now
+          };
+          artifacts.set(a.id, a);
+          return send(201, full(a));
+        }
+        const a = id ? artifacts.get(id) : undefined;
+        if (!a) return send(404, { error: { message: "artifact not found", type: "not_found" } });
+        if (req.method === "GET") return send(200, full(a));
+        if (req.method === "PATCH") {
+          if (typeof body.title === "string") a.title = body.title;
+          if (typeof body.content === "string") a.content = body.content;
+          if (typeof body.pinned === "boolean") a.pinned = body.pinned;
+          a.updated_at = Date.now();
+          return send(200, full(a));
+        }
+        if (req.method === "DELETE") {
+          artifacts.delete(a.id);
+          return send(200, { deleted: true });
+        }
+        return send(405, {
+          error: { message: "method not allowed", type: "invalid_request_error" }
+        });
+      });
       return;
     }
 

@@ -33,6 +33,9 @@ export const Header: React.FC<HeaderProps> = ({ railCollapsed, onToggleRail }) =
         return "Model Options";
       case "settings":
         return "Settings";
+      case "artifacts":
+      case "artifact":
+        return "Artifacts";
       case "kit":
         return "UI Design Kit";
       default:
