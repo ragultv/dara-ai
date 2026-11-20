@@ -1,3 +1,4 @@
+import { useEffortStore } from "./useEffortStore.ts";
 import { create } from "zustand";
 import { apiClient } from "../api/client.ts";
 import { ApiError } from "../api/errors.ts";
@@ -206,6 +207,14 @@ function dbMessageToUi(m: DbMessage): UiMessage {
     ...(finish === "interrupted" ? { interrupted: true } : {}),
     ...(m.error ? { error: m.error } : {}),
     ...(raw ? { raw, stats: statsFromRaw(raw) } : {}),
+    ...(typeof (raw as { reasoning?: unknown } | undefined)?.reasoning === "string" &&
+    (raw as { reasoning: string }).reasoning
+      ? {
+          reasoning: (raw as { reasoning: string }).reasoning,
+          ...(raw?.timings?.thinking_ms ? { reasoningMs: raw.timings.thinking_ms } : {}),
+          ...(raw?.timings?.thinking_cut ? { reasoningCut: true } : {})
+        }
+      : {}),
     createdAt: m.created_at
   };
 }
@@ -248,6 +257,38 @@ function ensurePersisted(conv: Conversation): void {
   );
 }
 
+/** The context fill of a stored chat, from the engine's numbers saved with its last reply. Nothing is guessed: no stored number, no meter. */
+function restoredContext(
+  messages: UiMessage[],
+  windows: ContextWindow[]
+): { context: ContextView } | Record<string, never> {
+  let at = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "assistant" && messages[i]?.raw?.context) {
+      at = i;
+      break;
+    }
+  }
+  if (at < 0) return {};
+  const last = windows[windows.length - 1];
+  if (last) {
+    const start = messages.findIndex((m) => m.id === last.startMessageId);
+    if (start > at) return {}; // a newer window began after that reply, so its number no longer describes the chat
+  }
+  const c = messages[at]!.raw!.context!;
+  return {
+    context: {
+      capacity: c.capacity,
+      used: c.used,
+      compacted: c.compacted,
+      summarized_messages: c.summarized_messages,
+      dropped_messages: c.dropped_messages,
+      truncated_last_message: c.truncated_last_message ?? false,
+      summary_cached: c.summary_cached ?? false
+    }
+  };
+}
+
 /** Fetches a stored conversation's messages and its images (shown through blob: URLs, because <img> cannot send the API key). */
 async function hydrate(id: string): Promise<void> {
   const conv = findConv(id);
@@ -263,10 +304,13 @@ async function hydrate(id: string): Promise<void> {
   const windows = Array.isArray(detail.params?.windows)
     ? (detail.params.windows as ContextWindow[])
     : conv.windows;
+  const kept = dropStaleWindows(windows, messages);
   updateConv(id, (c) => ({
     ...c,
     messages,
-    windows: dropStaleWindows(windows, messages),
+    windows: kept,
+    // the meter after a restart: what the engine reported for this chat's last reply (stored with it), unless a new window began since
+    ...(c.context ? {} : restoredContext(messages, kept)),
     loaded: true
   }));
   for (const m of detail.messages) {
@@ -360,6 +404,13 @@ function userFacingError(err: unknown): { message: string; code?: string | undef
 }
 
 // ---- store ----------------------------------------------------------------------------------------------------------------------------------------
+
+/** The stats blob stored with a message: the engine's numbers plus the model's thinking (so it survives a restart). */
+function withReasoning(m: UiMessage): Record<string, unknown> | null {
+  const base = (m.raw as Record<string, unknown> | undefined) ?? {};
+  if (!m.reasoning) return Object.keys(base).length ? base : null;
+  return { ...base, reasoning: m.reasoning };
+}
 
 export const useChatStore = create<ChatState>((set, get) => ({
   conversations: [],
@@ -681,13 +732,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ? planMaxTokens({ capacity, promptTokens: Math.max(promptEstimate, 0), wanted })
       : wanted;
     const flashOn = loaded?.dara.flash?.active === true;
+    const effort = useEffortStore.getState().effort;
     const chatReq: ChatRequest = {
       model: targetModel,
       messages: apiMessages,
       stream: true,
       temperature: latest.temperature ?? 0.7,
       max_tokens: maxTokens,
-      ...(flashOn ? { flash: latest.flash !== false } : {})
+      ...(flashOn ? { flash: latest.flash !== false } : {}),
+      ...(effort !== "none" ? { reasoning_effort: effort } : {})
     };
 
     abortController = new AbortController();
@@ -695,6 +748,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     let finish: string | undefined;
     let raw: UiMessage["raw"];
     let lastCheckpoint = Date.now();
+    let reasoningBuffer = "";
+    let thinkStart: number | null = null;
+    let thinkEnd: number | null = null;
 
     const patchAssistant = (patch: Partial<UiMessage>) =>
       updateConv(id, (c) => ({
@@ -703,7 +759,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     const flush = () => {
       set({ streamingText: tokenBuffer });
-      patchAssistant({ content: tokenBuffer });
+      patchAssistant({
+        content: tokenBuffer,
+        ...(reasoningBuffer ? { reasoning: reasoningBuffer } : {})
+      });
+    };
+    const scheduleFlush = () => {
+      if (rafId === null) {
+        rafId = requestAnimationFrame(() => {
+          rafId = null;
+          flush();
+        });
+      }
+    };
+
+    // what to store about the thinking once the reply ends (the engine's own numbers win over the stopwatch here)
+    const thinkingResult = (): Partial<UiMessage> => {
+      if (!reasoningBuffer) return {};
+      const measured = thinkStart !== null ? (thinkEnd ?? Date.now()) - thinkStart : undefined;
+      const ms = raw?.timings?.thinking_ms || measured;
+      return {
+        reasoning: reasoningBuffer,
+        ...(ms ? { reasoningMs: ms } : {}),
+        ...(raw?.timings?.thinking_cut ? { reasoningCut: true } : {})
+      };
     };
 
     try {
@@ -714,15 +793,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const choice = chunk.choices?.[0];
         if (choice?.finish_reason) finish = choice.finish_reason;
+        const thought = choice?.delta?.reasoning_content;
+        if (thought) {
+          thinkStart ??= Date.now();
+          reasoningBuffer += thought;
+          scheduleFlush();
+        }
         const delta = choice?.delta?.content;
         if (delta) {
+          if (thinkStart !== null) thinkEnd ??= Date.now();
           tokenBuffer += delta;
-          if (rafId === null) {
-            rafId = requestAnimationFrame(() => {
-              rafId = null;
-              flush();
-            });
-          }
+          scheduleFlush();
           if (Date.now() - lastCheckpoint > CHECKPOINT_MS) {
             lastCheckpoint = Date.now();
             const snapshot = tokenBuffer;
@@ -758,7 +839,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         rafId = null;
       }
       flush();
-      patchAssistant({ finishReason: finish ?? "stop", raw, stats: statsFromRaw(raw) });
+      patchAssistant({
+        finishReason: finish ?? "stop",
+        raw,
+        stats: statsFromRaw(raw),
+        ...thinkingResult()
+      });
     } catch (err: unknown) {
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
@@ -768,6 +854,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         finish = "interrupted";
         patchAssistant({
           content: tokenBuffer,
+          ...thinkingResult(),
           interrupted: true,
           finishReason: "interrupted",
           raw,
@@ -778,6 +865,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const e = userFacingError(err);
         patchAssistant({
           content: tokenBuffer,
+          ...thinkingResult(),
           error: e.message,
           errorCode: e.code,
           finishReason: "error"
@@ -793,7 +881,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             content: final.content,
             finish_reason: final.finishReason ?? finish ?? "stop",
             error: final.error ?? null,
-            stats: (final.raw as Record<string, unknown> | undefined) ?? null
+            stats: withReasoning(final)
           })
         );
       }

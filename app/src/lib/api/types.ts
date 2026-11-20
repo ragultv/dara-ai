@@ -244,6 +244,8 @@ export interface ChatRequest {
   stop?: string | string[];
   flash?: boolean;
   cache_write?: boolean;
+  /** Thinking: none | low | medium | high | xhigh | max. The reply then carries the thinking separately (reasoning_content). */
+  reasoning_effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 export interface Usage {
@@ -251,6 +253,7 @@ export interface Usage {
   completion_tokens: number;
   total_tokens: number;
   prompt_tokens_details: { cached_tokens: number; image_tokens: number };
+  completion_tokens_details?: { reasoning_tokens: number };
 }
 
 export interface Timings {
@@ -261,6 +264,10 @@ export interface Timings {
   prefill_ms: number;
   prefill_tokens_per_second: number;
   ttft_ms: number;
+  /** first token to the end of the thought (0 when thinking is off) */
+  thinking_ms?: number;
+  /** the thinking cap was reached and the engine closed the thought */
+  thinking_cut?: boolean;
   decode_tokens: number;
   decode_ms: number;
   decode_tokens_per_second: number;
@@ -305,7 +312,7 @@ export interface ChatResponse extends ChatStats {
   choices: Array<{
     index: number;
     finish_reason: "stop" | "length" | string;
-    message: { role: "assistant"; content: string };
+    message: { role: "assistant"; content: string; reasoning_content?: string };
   }>;
 }
 
@@ -317,7 +324,7 @@ export interface ChatChunk extends Partial<ChatStats> {
   choices: Array<{
     index: number;
     finish_reason: string | null;
-    delta: { role?: "assistant"; content?: string };
+    delta: { role?: "assistant"; content?: string; reasoning_content?: string };
   }>;
 }
 
