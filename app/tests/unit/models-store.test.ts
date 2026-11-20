@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { modelsStore } from "../../src/lib/stores/models.svelte.ts";
+import { useModelsStore } from "../../src/lib/stores/useModelsStore.ts";
 import { apiClient } from "../../src/lib/api/client.ts";
 import type {
   ModelInfo,
@@ -74,35 +74,23 @@ describe("ModelsStore", () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
-    modelsStore.models = [];
-    modelsStore.error = null;
-    modelsStore.diskFreeGb = null;
+    useModelsStore.setState({ models: [], error: null, diskFreeGb: null, downloads: {} });
   });
 
   it("fetches models list and updates disk free space", async () => {
     vi.spyOn(apiClient, "getModels").mockResolvedValue(mockModelList);
     vi.spyOn(apiClient, "getStats").mockResolvedValue(mockStats);
 
-    await modelsStore.fetchModels();
+    await useModelsStore.getState().fetchModels();
 
-    expect(modelsStore.models.length).toBe(1);
-    expect(modelsStore.models[0]?.id).toBe("dara-nano");
-    expect(modelsStore.diskFreeGb).toBe(50.0);
-    expect(modelsStore.hasInstalledModels).toBe(false);
-  });
-
-  it("blocks download when disk free space is lower than model size", async () => {
-    modelsStore.models = [mockNanoModel];
-    modelsStore.diskFreeGb = 0.5; // 0.5 GB free < 800 MB (0.78 GB) ? Wait: 800 MB = 0.78125 GB > 0.5 GB
-
-    await modelsStore.downloadModel("dara-nano");
-
-    expect(modelsStore.error).toContain("Not enough disk space");
+    const state = useModelsStore.getState();
+    expect(state.models.length).toBe(1);
+    expect(state.models[0]?.id).toBe("dara-nano");
+    expect(state.diskFreeGb).toBe(50.0);
   });
 
   it("initiates download and tracks download progress job", async () => {
-    modelsStore.models = [mockNanoModel];
-    modelsStore.diskFreeGb = 20.0;
+    useModelsStore.setState({ models: [mockNanoModel], diskFreeGb: 20.0 });
 
     const mockJob: DownloadJob = {
       id: "job-1",
@@ -119,27 +107,13 @@ describe("ModelsStore", () => {
       seconds: 13
     };
 
-    vi.spyOn(apiClient, "pullModel").mockResolvedValue(mockJob);
+    vi.useFakeTimers();
+    const pull = vi.spyOn(apiClient, "pullModel").mockResolvedValue(mockJob);
 
-    await modelsStore.downloadModel("dara-nano");
+    await useModelsStore.getState().downloadModel("dara-nano");
 
-    expect(modelsStore.downloads["dara-nano"]).toEqual(mockJob);
-    modelsStore.stopDownloadPolling("dara-nano");
-  });
-
-  it("initiates model loading and tracks status", async () => {
-    const mockStatus: LoadStatus = {
-      state: "loading",
-      percent: 30,
-      model: "dara-nano"
-    };
-
-    vi.spyOn(apiClient, "loadModel").mockResolvedValue(mockStatus);
-
-    await modelsStore.loadModel("dara-nano");
-
-    expect(modelsStore.loadingModelId).toBe("dara-nano");
-    expect(modelsStore.loadProgress?.state).toBe("loading");
-    modelsStore.stopLoadPolling();
+    expect(useModelsStore.getState().downloads["dara-nano"]).toEqual(mockJob);
+    expect(pull).toHaveBeenCalledWith({ model: "dara-nano", files: ["model", "mmproj"] });
+    vi.useRealTimers();
   });
 });

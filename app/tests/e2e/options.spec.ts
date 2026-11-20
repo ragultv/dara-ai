@@ -35,63 +35,43 @@ test.afterAll(async () => {
 test.describe("M4: Model Options & Hardware Benchmarks", () => {
   test.setTimeout(60000);
 
-  test("navigates to options, verifies GPU specs, format cards, context ladder, and runs benchmark", async ({
+  test("opens options from a model card, shows the server's numbers, measures and applies", async ({
     page
   }) => {
-    // 1. Start on Models page
     await page.goto("http://127.0.0.1:1420/#/models");
 
-    // Wait for models to load and click Options on Dara Nano
-    const optionsBtn = page.getByRole("button", { name: "Options" }).first();
+    const optionsBtn = page.getByRole("button", { name: "Options", exact: true }).first();
     await expect(optionsBtn).toBeVisible({ timeout: 20000 });
     await optionsBtn.click();
 
-    // 2. Verify Options screen renders with GPU and format cards
-    await expect(page.getByRole("heading", { name: "Dara Nano Options" })).toBeVisible({
+    await expect(page.getByRole("heading", { name: "Dara Nano options" })).toBeVisible({
       timeout: 10000
     });
-    await expect(page.getByText("NVIDIA GeForce GTX 1650")).toBeVisible();
-    await expect(page.getByText("INT8 (default)", { exact: true })).toBeVisible();
-    await expect(page.getByText("INT8 keys + 4-bit values", { exact: true })).toBeVisible();
+    await expect(page.getByText(/NVIDIA GeForce GTX 1650/)).toBeVisible();
+    await expect(page.getByRole("radio", { name: /INT8 \(default\)/ })).toBeVisible();
+    await expect(page.getByRole("radio", { name: /INT8 keys \+ 4-bit values/ })).toBeVisible();
 
-    // 3. Verify Context Ladder table renders
-    await expect(page.getByText("Context Ladder")).toBeVisible();
-    await expect(page.getByText("100% on GPU").first()).toBeVisible();
+    await expect(page.getByText("Context ladder")).toBeVisible();
+    await expect(page.getByText("Fully on the GPU").first()).toBeVisible();
+    await expect(page.getByText("Not measured yet").first()).toBeVisible();
 
-    // 4. Test format selection switch
-    await page.getByText("INT8 keys + 4-bit values", { exact: true }).click();
+    await page.getByRole("radio", { name: /INT8 keys \+ 4-bit values/ }).click();
 
-    // 5. Open Benchmark dialog
-    const measureBtn = page.getByRole("button", { name: "Measure Benchmarks on this PC" });
-    await expect(measureBtn).toBeVisible();
-    await measureBtn.click();
+    await page.getByRole("button", { name: "Measure on this PC" }).click();
+    await expect(page.getByRole("dialog", { name: /Measure Dara Nano on this PC/ })).toBeVisible();
+    await page.getByRole("button", { name: "Start measuring" }).click();
+    await expect(page.getByText(/Measuring\.|Measurement finished/)).toBeVisible();
 
-    await expect(
-      page.getByRole("heading", { name: "Run Hardware Inference Benchmark" })
-    ).toBeVisible();
-    await expect(page.getByRole("button", { name: "Start Benchmark" })).toBeVisible();
+    await page.getByRole("button", { name: "Load with these settings" }).click();
+    await expect(page.getByText(/is loaded with your settings/)).toBeVisible({ timeout: 20000 });
+  });
 
-    // Start benchmark
-    await page.getByRole("button", { name: "Start Benchmark" }).click();
-    await expect(page.getByText(/Status: (RUNNING|DONE)/i)).toBeVisible();
-
-    // Close dialog via Cancel Benchmark or Close
-    const cancelBtn = page.getByRole("button", { name: "Cancel Benchmark" });
-    if (await cancelBtn.isVisible()) {
-      await cancelBtn.click();
-    } else {
-      await page.getByRole("button", { name: "Close" }).click();
-    }
-    await expect(
-      page.getByRole("heading", { name: "Run Hardware Inference Benchmark" })
-    ).not.toBeVisible();
-
-    // 6. Test "Load with these settings"
-    const loadSettingsBtn = page.getByRole("button", { name: "Load with these settings" });
-    await expect(loadSettingsBtn).toBeVisible();
-    await loadSettingsBtn.click();
-
-    // Verify toast confirmation and redirection to chat
-    await expect(page.getByText(/Loaded dara-nano with/i)).toBeVisible();
+  test("is reachable from the left rail", async ({ page }) => {
+    await page.goto("http://127.0.0.1:1420/#/models");
+    await page
+      .getByRole("navigation", { name: "Main" })
+      .getByRole("button", { name: "Options" })
+      .click();
+    await expect(page.getByRole("heading", { name: /options$/ })).toBeVisible({ timeout: 10000 });
   });
 });

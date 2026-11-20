@@ -135,9 +135,9 @@ def write_tokens(path):
             f"  --dara-black-ui: {BLACK_UI};       /* the dark theme's page background */", "  /* ink: purple-tinted neutrals between white and black */"]
     out += [f"  --dara-ink-{k}: {v};" for k, v in scale_ink.items()]
     out += ["", "  /* typography */",
-            "  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;",
-            "  --font-display: 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;",
-            "  --font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', monospace;",
+            "  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;",
+            "  --font-display: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;",
+            "  --font-mono: 'Cascadia Mono', 'SF Mono', Consolas, 'Liberation Mono', Menlo, Courier, monospace;",
             "  --text-xs: 0.75rem; --text-sm: 0.8125rem; --text-base: 0.9375rem; --text-lg: 1.0625rem; --text-xl: 1.25rem; --text-2xl: 1.5rem; --text-3xl: 1.875rem;",
             "  --leading-tight: 1.25; --leading-normal: 1.5; --leading-relaxed: 1.65;",
             "  /* space: 4px grid */",

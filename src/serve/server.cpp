@@ -180,7 +180,12 @@ void add_dara_fields(json& j, const GenResult& r) {
 
 std::string dump(const json& j) { return j.dump(-1, ' ', false, json::error_handler_t::replace); }
 
-json error_json(const std::string& msg, const char* type) { return {{"error", {{"message", msg}, {"type", type}}}}; }
+json error_json(const std::string& msg, const char* type) {
+    json e = {{"error", {{"message", msg}, {"type", type}}}};
+    // machine-readable reason the app can act on (it offers to install / load the image encoder)
+    if (msg.find("no image encoder") != std::string::npos) e["error"]["code"] = "vision_unavailable";
+    return e;
+}
 
 double mb(uint64_t b) { return r2(b / 1048576.0); }
 
@@ -911,6 +916,23 @@ int dara_serve_main(int argc, char** argv) {
         return "";
     };
     svr.set_pre_routing_handler([&](const httplib::Request& req, httplib::Response& res) {
+        // DNS rebinding defense: when bound to loopback or standard hosts, validate Host header
+        const std::string host_hdr = req.get_header_value("Host");
+        if (!host_hdr.empty()) {
+            std::string h = host_hdr;
+            const size_t colon = h.rfind(':');
+            if (colon != std::string::npos && (h.find(']') == std::string::npos || colon > h.find(']'))) {
+                h = h.substr(0, colon);
+            }
+            bool host_ok = false;
+            if (h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "[::1]") host_ok = true;
+            if (!host.empty() && (h == host || host == "0.0.0.0" || host == "::")) host_ok = true;
+            if (!host_ok) {
+                res.status = 403;
+                res.set_content(dump(error_json("access denied: invalid Host header (DNS rebinding defense)", "security_error")), "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
         const std::string o = allowed_origin(req);
         if (!o.empty()) {
             res.set_header("Access-Control-Allow-Origin", o);
@@ -1099,6 +1121,13 @@ int dara_serve_main(int argc, char** argv) {
         std::lock_guard<std::mutex> lk(reg.engine_mu);
         reg.unload();
         res.set_content(dump({{"status", "unloaded"}}), "application/json");
+    });
+    svr.Post("/dara/shutdown", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_content(dump({{"status", "shutting_down"}}), "application/json");
+        std::thread([&svr]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            svr.stop();
+        }).detach();
     });
 
     // ---- options, benchmark, version ----

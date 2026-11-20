@@ -381,3 +381,90 @@ export interface Stats {
   ram?: Record<string, number>;
   process?: Record<string, number>;
 }
+
+// ============================================================================
+// App database types (server-owned SQLite; docs/ui/08-database.md)
+// ============================================================================
+
+export interface DbStoreInfo {
+  path: string;
+  attachments_dir: string;
+  schema_version: number;
+  size_bytes: number;
+  conversations: number;
+  messages: number;
+  attachments: number;
+  settings: number;
+  note?: string;
+}
+
+export interface DbConversationSummary {
+  id: string;
+  title: string;
+  model: string | null;
+  system_prompt: string;
+  params: Record<string, unknown>;
+  pinned: boolean;
+  message_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface DbMessageAttachment {
+  id: string;
+  mime: string;
+  bytes: number;
+  url: string;
+  width: number | null;
+  height: number | null;
+}
+
+export interface DbMessage {
+  id: string;
+  conversation_id: string;
+  position: number;
+  role: "system" | "user" | "assistant";
+  content: string;
+  finish_reason: string | null;
+  error: string | null;
+  stats: Partial<ChatStats> | null;
+  model: string | null;
+  created_at: number;
+  attachments: DbMessageAttachment[];
+}
+
+export interface DbConversationDetail extends DbConversationSummary {
+  messages: DbMessage[];
+}
+
+export interface DbConversationsResponse {
+  object: "list";
+  data: DbConversationSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface DbSearchMatch {
+  message_id: string;
+  conversation_id: string;
+  position: number;
+  role: string;
+  snippet: string;
+  title: string;
+  updated_at: number;
+}
+
+export interface DbSearchResponse {
+  object: "list";
+  data: DbSearchMatch[];
+}
+
+export interface SavedModelConfig {
+  kv: KvChoice;
+  flash: "auto" | "on" | "off";
+  vision: boolean;
+  context: number | null;
+  last_loaded_at?: number | null;
+  updated_at?: number;
+}

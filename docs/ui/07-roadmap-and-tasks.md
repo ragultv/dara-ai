@@ -65,8 +65,8 @@ Conversation search and export, prompt library, multiple windows, update channel
 ## Backend items the UI team needs (owned by the backend, tracked in docs/BACKLOG.md)
 
 1. (done) The server reads the API key from `DARA_API_KEY`.
-2. Host-header validation (DNS rebinding defense).
+2. (done) Host-header validation (DNS rebinding defense).
 3. Public hosting for the Flash drafter downloads (currently from a private repository).
-4. A graceful `POST /dara/shutdown` so the app can stop the server cleanly.
+4. (done) A graceful `POST /dara/shutdown` so the app can stop the server cleanly.
 
 Raise any other missing endpoint as a backend request rather than working around it in the UI.
