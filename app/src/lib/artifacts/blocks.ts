@@ -96,6 +96,8 @@ export interface ApplyResult {
   deleted: number;
   /** operations that named a block that does not exist (or that were repeated) */
   skipped: number;
+  /** the block numbers that do not exist */
+  missing: number[];
 }
 
 /** Applies operations to the original blocks. Numbers always refer to the original numbering. */
@@ -104,6 +106,7 @@ export function applyOps(blocks: string[], ops: BlockOp[]): ApplyResult {
   const remove = new Set<number>();
   const after = new Map<number, string[]>();
   let skipped = 0;
+  const missing: number[] = [];
   for (const o of ops) {
     const exists = o.n >= 1 && o.n <= blocks.length;
     if (o.op === "insert") {
@@ -111,6 +114,7 @@ export function applyOps(blocks: string[], ops: BlockOp[]): ApplyResult {
       after.set(at, [...(after.get(at) ?? []), o.text]);
     } else if (!exists) {
       skipped++;
+      missing.push(o.n);
     } else if (o.op === "replace") {
       if (remove.has(o.n)) skipped++;
       else replace.set(o.n, o.text);
@@ -130,7 +134,8 @@ export function applyOps(blocks: string[], ops: BlockOp[]): ApplyResult {
     replaced: replace.size,
     inserted: [...after.values()].reduce((a, v) => a + v.length, 0),
     deleted: remove.size,
-    skipped
+    skipped,
+    missing
   };
 }
 
