@@ -5,6 +5,8 @@ import { useArtifactsStore } from "../lib/stores/useArtifactsStore.ts";
 import { useModelsStore } from "../lib/stores/useModelsStore.ts";
 import { useDocEditor } from "../lib/artifacts/useDocEditor.ts";
 import { DocToolbar } from "../lib/artifacts/DocToolbar.tsx";
+import { TableControls } from "../lib/artifacts/TableControls.tsx";
+import { SelectionMenu } from "../lib/artifacts/SelectionMenu.tsx";
 import { DocChat } from "../lib/artifacts/DocChat.tsx";
 import { useDocAssistant } from "../lib/artifacts/useDocAssistant.ts";
 import { displayTitle, exportFileName, relativeTime } from "../lib/artifacts/format.ts";
@@ -28,6 +30,7 @@ const DocView: React.FC = () => {
 
   const editor = useDocEditor({ initial: doc.content, onChange: setContent });
   const titleRef = useRef<HTMLInputElement>(null);
+  const [pageEl, setPageEl] = useState<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -167,9 +170,18 @@ const DocView: React.FC = () => {
               placeholder="Title"
               aria-label="Document title"
               maxLength={500}
-              className="mb-4 w-full border-0 bg-transparent p-0 font-[family-name:var(--font-reply)] text-4xl font-semibold leading-tight tracking-tight text-text outline-none placeholder:text-text-subtle"
+              className="doc-title mb-4 w-full border-0 bg-transparent p-0 font-[family-name:var(--font-reply)] text-4xl font-semibold leading-tight tracking-tight text-text outline-none placeholder:text-text-subtle"
             />
-            {editor ? <EditorContent editor={editor} /> : <Skeleton className="h-40 w-full" />}
+            {editor ? (
+              <div ref={setPageEl} className="relative">
+                <EditorContent editor={editor} />
+                {/* the selection menu is moved out of this wrapper by its tooltip: keep it before anything React adds or removes */}
+                <SelectionMenu editor={editor} />
+                <TableControls editor={editor} container={pageEl} disabled={busy} />
+              </div>
+            ) : (
+              <Skeleton className="h-40 w-full" />
+            )}
           </div>
         </div>
 

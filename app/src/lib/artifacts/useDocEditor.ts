@@ -36,7 +36,7 @@ export function useDocEditor({ initial, onChange }: Options): Editor | null {
       StarterKit.configure({ heading: { levels: [1, 2, 3] } }),
       Placeholder.configure({ placeholder: "Start typing, or ask Dara to write" }),
       Link.configure({ openOnClick: false, autolink: true }),
-      Table,
+      Table.configure({ resizable: true, cellMinWidth: 80, lastColumnResizable: true }),
       TableRow,
       TableHeader,
       TableCell,
