@@ -498,6 +498,73 @@ export interface DbArtifact extends Omit<DbArtifactSummary, "snippet"> {
   content: string;
 }
 
+/** A saved earlier state of an artifact (docs/ui/09-artifacts.md, "Version history"). */
+export interface DbArtifactVersionSummary {
+  rev: number;
+  title: string;
+  /** why it was kept ("Before Dara: make it shorter", "Before restore"); empty for an automatic save */
+  label: string;
+  /** when that text was last saved */
+  created_at: number;
+  chars: number;
+  snippet: string;
+}
+
+export interface DbArtifactVersion extends Omit<DbArtifactVersionSummary, "snippet"> {
+  content: string;
+}
+
+export interface DbArtifactVersionsResponse {
+  object: "list";
+  data: DbArtifactVersionSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** One saved message of the chat that belongs to an artifact. `data` is the app's own message object (what was asked, what Dara did). */
+export interface DbArtifactChatRow {
+  id: string;
+  seq: number;
+  data: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+export interface DbArtifactChatResponse {
+  object: "list";
+  data: DbArtifactChatRow[];
+  total: number;
+}
+
+/** A comment on a document. A thread is one root comment (it carries the `quote` it is anchored to) and its replies (`parent_id`). */
+export interface DbArtifactComment {
+  id: string;
+  parent_id: string | null;
+  author: "user" | "dara";
+  body: string;
+  /** the exact text the thread points at (empty = about the whole document) */
+  quote: string;
+  /** which occurrence of `quote` in the document (0 = the first) */
+  nth: number;
+  resolved: boolean;
+  created_at: number;
+  updated_at: number;
+}
+export interface DbArtifactCommentsResponse {
+  object: "list";
+  data: DbArtifactComment[];
+  total: number;
+}
+
+/** An image or video stored with a document. The Markdown refers to it as `dara-asset:<id>`. */
+export interface DbArtifactAsset {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  created_at: number;
+}
+
 export interface DbArtifactsResponse {
   object: "list";
   data: DbArtifactSummary[];

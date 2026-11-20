@@ -21,6 +21,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
       if (!editor || !text || abortRef.current) return;
       const chat = useDocChatStore.getState();
       const docs = useArtifactsStore.getState();
+      await docs.flush(); // the saved text is what a "Before Dara" version will keep
       const snapshot = getMarkdown(editor);
       const startTitle = docs.doc?.title ?? "";
       const msgId = newId();
@@ -45,6 +46,12 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
 
       editor.setEditable(false);
       let last = 0;
+      const startedAt = Date.now();
+      const began: Record<number, string> = {}; // when each step first became active, as m:ss into the task
+      const clock = () => {
+        const sec = Math.floor((Date.now() - startedAt) / 1000);
+        return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+      };
       try {
         const result = await runAssistant({
           markdown: snapshot,
@@ -61,14 +68,22 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
               }
             },
             setTitle: (t) => useArtifactsStore.getState().setTitle(t),
-            steps: (steps) => patch({ steps }),
+            steps: (steps) =>
+              patch({
+                steps: steps.map((st, i) => {
+                  if (st.state !== "todo" && began[i] === undefined) began[i] = clock();
+                  return { ...st, time: began[i] ?? "" };
+                })
+              }),
             reasoning: (reasoning, done, ms) =>
               patch({ reasoning, reasoningStreaming: !done, thinkingMs: ms })
           }
         });
         if (result.changed) {
           setMarkdown(editor, result.markdown);
-          useArtifactsStore.getState().setContent(result.markdown);
+          useArtifactsStore.getState().setContent(result.markdown, {
+            snapshot: `Before Dara: ${text.replace(/\s+/g, " ").slice(0, 70)}`
+          });
           if (result.title !== (useArtifactsStore.getState().doc?.title ?? ""))
             useArtifactsStore.getState().setTitle(result.title);
         } else {

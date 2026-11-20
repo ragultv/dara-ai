@@ -3,7 +3,7 @@ import { EditorContent } from "@tiptap/react";
 import { useRouter } from "../lib/router/useRouter.ts";
 import { useArtifactsStore } from "../lib/stores/useArtifactsStore.ts";
 import { useModelsStore } from "../lib/stores/useModelsStore.ts";
-import { useDocEditor } from "../lib/artifacts/useDocEditor.ts";
+import { setMarkdown, useDocEditor } from "../lib/artifacts/useDocEditor.ts";
 import { DocToolbar } from "../lib/artifacts/DocToolbar.tsx";
 import { TableControls } from "../lib/artifacts/TableControls.tsx";
 import { SelectionMenu } from "../lib/artifacts/SelectionMenu.tsx";
@@ -35,6 +35,7 @@ const DocView: React.FC = () => {
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [chatOpen, setChatOpen] = useState(true);
+  const [panelTab, setPanelTab] = useState<"chat" | "history">("chat");
   const { busy, send, stop, undo } = useDocAssistant(editor, doc.id);
 
   useEffect(() => {
@@ -148,7 +149,7 @@ const DocView: React.FC = () => {
                 className="flex h-8 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold text-text-muted transition-colors hover:bg-surface-raised hover:text-text"
               >
                 <Icon name="message-square" size={14} />
-                Show chat
+                Show panel
               </button>
             )}
           </div>
@@ -206,6 +207,10 @@ const DocView: React.FC = () => {
           onUndo={undo}
           onClose={() => setChatOpen(false)}
           onOpenModels={() => navigate("models")}
+          tab={panelTab}
+          onTab={setPanelTab}
+          updatedAt={doc.updated_at}
+          onRestored={(md) => editor && setMarkdown(editor, md)}
         />
       )}
 
