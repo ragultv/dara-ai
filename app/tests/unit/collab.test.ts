@@ -218,3 +218,123 @@ describe("widget guidance", () => {
     expect(String(buildPlanMessages("a unit converter")[0]!.content)).toContain("one section");
   });
 });
+
+describe("widgets from the model", () => {
+  it("turns an html block with a script into a widget, and leaves other code alone", async () => {
+    const { normalizeWidgetFences } = await import("../../src/lib/artifacts/widgetFences.ts");
+    const page = "```html\n<button id=a>Go</button>\n<script>a.onclick=()=>1</script>\n```";
+    expect(normalizeWidgetFences(page)).toBe(page.replace("```html", "```widget"));
+    const docs = "```html\n<p>just markup</p>\n```";
+    expect(normalizeWidgetFences(docs)).toBe(docs);
+    const js = "```js\nlet a = 1;\n```";
+    expect(normalizeWidgetFences(js)).toBe(js);
+    expect(normalizeWidgetFences("```widget\n<button>x</button>\n```")).toBe(
+      "```widget\n<button>x</button>\n```"
+    );
+  });
+  it("shows progress, not code, while a widget is still being written", async () => {
+    const { previewWithProgress } = await import("../../src/lib/artifacts/widgetFences.ts");
+    const half = "Intro.\n\n```widget\n<div>\n<button>Go</button>";
+    expect(previewWithProgress(half)).toBe("Intro.\n\n*Building the widget... 2 lines written*");
+    expect(previewWithProgress("```html\n")).toContain("Building the widget");
+    const done = "```widget\n<b>x</b>\n```";
+    expect(previewWithProgress(done)).toBe(done);
+    expect(previewWithProgress("```python\nprint(1)")).toBe("```python\nprint(1)");
+  });
+});
+
+describe("Word export", () => {
+  it("builds a .docx (a zip) from the page's structure", async () => {
+    const { buildDocx } = await import("../../src/lib/artifacts/export/docx.ts");
+    const blob = await buildDocx(
+      {
+        type: "doc",
+        content: [
+          { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "Title" }] },
+          {
+            type: "paragraph",
+            content: [
+              { type: "text", text: "bold", marks: [{ type: "bold" }] },
+              { type: "text", text: " and a " },
+              {
+                type: "text",
+                text: "link",
+                marks: [{ type: "link", attrs: { href: "https://x.io" } }]
+              }
+            ]
+          },
+          {
+            type: "table",
+            content: [
+              {
+                type: "tableRow",
+                content: [
+                  {
+                    type: "tableHeader",
+                    content: [{ type: "paragraph", content: [{ type: "text", text: "A" }] }]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            type: "codeBlock",
+            attrs: { language: "widget" },
+            content: [{ type: "text", text: "<b>x</b>" }]
+          },
+          { type: "image", attrs: { src: "https://evil.example/a.png", alt: "x" } }
+        ]
+      },
+      { title: "Doc", loadImage: async () => null }
+    );
+    const head = new Uint8Array(
+      await new Promise<ArrayBuffer>((resolve) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result as ArrayBuffer);
+        r.readAsArrayBuffer(blob.slice(0, 2));
+      })
+    );
+    expect(String.fromCharCode(head[0]!, head[1]!)).toBe("PK");
+    expect(blob.size).toBeGreaterThan(2000);
+  });
+});
+
+describe("a 401 from the engine", () => {
+  it("fetches the current key once and repeats the request with it", async () => {
+    const { DaraApiClient } = await import("../../src/lib/api/client.ts");
+    const seen: Array<string | null> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("Authorization");
+      seen.push(auth);
+      return auth === "Bearer new"
+        ? new Response(JSON.stringify({ ok: 1 }), { status: 200 })
+        : new Response(JSON.stringify({ error: { message: "invalid or missing API key" } }), {
+            status: 401
+          });
+    }) as typeof fetch;
+    try {
+      const client = new DaraApiClient({ baseUrl: "http://x", apiKey: "old" });
+      let asked = 0;
+      client.setAuthRefresher(async () => {
+        asked++;
+        client.setConnection("http://x", "new");
+        return true;
+      });
+      await expect(client.request("/a")).resolves.toEqual({ ok: 1 });
+      expect(seen).toEqual(["Bearer old", "Bearer new"]);
+      expect(asked).toBe(1);
+      // a refresher that has nothing new: the 401 is reported, not retried forever
+      const stuck = new DaraApiClient({ baseUrl: "http://x", apiKey: "old" });
+      stuck.setAuthRefresher(async () => false);
+      await expect(stuck.request("/a")).rejects.toMatchObject({ status: 401 });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+  it("is explained in words", async () => {
+    const { collabMessage } = await import("../../src/lib/artifacts/errors.ts");
+    const { ApiError } = await import("../../src/lib/api/errors.ts");
+    expect(collabMessage(new ApiError(401, "x"), "comments")).toMatch(/key/);
+  });
+});

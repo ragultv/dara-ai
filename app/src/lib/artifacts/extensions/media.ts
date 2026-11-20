@@ -104,10 +104,13 @@ export async function insertMedia(
   try {
     const asset = await storeApi.uploadArtifactAsset(docId, file, file.name || "file");
     const isVideo = asset.mime.startsWith("video/");
+    // after the block the cursor is in: an image cannot go inside a heading, a list item or a table cell
+    const { $to } = editor.state.selection;
+    const pos = $to.depth >= 1 ? $to.after(1) : $to.pos;
     editor
       .chain()
       .focus()
-      .insertContent({
+      .insertContentAt(pos, {
         type: "image",
         attrs: { src: `dara-asset:${asset.id}`, alt: asset.name, title: isVideo ? "video" : null }
       })

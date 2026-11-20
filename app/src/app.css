@@ -781,3 +781,87 @@ textarea:focus-visible {
 .doc-editor.oprel-markdown tr:last-child td {
   border-bottom: 1px solid var(--color-border);
 }
+
+/* ---- PDF export: the print copy of a document, in the page's own look on white ---- */
+#print-root {
+  display: none;
+}
+@media print {
+  @page {
+    size: A4;
+    margin: 18mm 16mm;
+  }
+  :root {
+    color-scheme: light !important;
+  }
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+    background: white !important;
+  }
+  body > *:not(#print-root) {
+    display: none !important;
+  }
+  #print-root {
+    display: block !important;
+    /* the page is always printed in the light palette, whatever the app theme is */
+    --color-text: black;
+    --color-text-muted: color-mix(in srgb, black 62%, white);
+    --color-text-subtle: color-mix(in srgb, black 48%, white);
+    --color-border: color-mix(in srgb, black 16%, white);
+    --color-border-strong: color-mix(in srgb, black 30%, white);
+    --color-surface: white;
+    --color-surface-raised: color-mix(in srgb, black 5%, white);
+    --color-bg: white;
+    --color-code-bg: color-mix(in srgb, black 4%, white);
+    --color-primary: color-mix(in srgb, blue 70%, black);
+    --color-warning-subtle: white;
+    color: black;
+    background: white;
+    font-family: var(--font-reply);
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  #print-root .print-title {
+    font-family: var(--font-reply);
+    font-size: 26pt;
+    font-weight: 700;
+    line-height: 1.15;
+    margin: 0 0 16pt;
+    letter-spacing: -0.01em;
+  }
+  #print-root .doc-editor {
+    min-height: 0;
+    font-size: 11pt;
+    line-height: 1.6;
+  }
+  #print-root h1,
+  #print-root h2,
+  #print-root h3 {
+    break-after: avoid;
+  }
+  #print-root tr,
+  #print-root pre,
+  #print-root img,
+  #print-root blockquote {
+    break-inside: avoid;
+  }
+  #print-root pre {
+    white-space: pre-wrap;
+  }
+  #print-root img {
+    max-width: 100%;
+  }
+  #print-root a {
+    color: var(--color-primary);
+    text-decoration: underline;
+  }
+  #print-root .print-note {
+    font-style: italic;
+    color: var(--color-text-muted);
+  }
+  #print-root .tableWrapper {
+    overflow: visible;
+  }
+}
