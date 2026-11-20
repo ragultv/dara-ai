@@ -53,6 +53,13 @@ public:
     nlohmann::json message_patch(const std::string& id, const nlohmann::json& body);
     int messages_truncate(const std::string& conversation_id, int from_position);   // deletes messages at positions >= from; returns how many
 
+    // artifacts: documents now (Markdown), slides and designs later. docs/ui/09-artifacts.md
+    nlohmann::json artifacts_list(const std::string& kind, int limit, int offset);   // newest first, pinned first; each with a short `snippet`, no full content
+    nlohmann::json artifact_get(const std::string& id);
+    nlohmann::json artifact_create(const nlohmann::json& body);
+    nlohmann::json artifact_patch(const std::string& id, const nlohmann::json& body);
+    bool artifact_delete(const std::string& id);
+
     // attachments (images)
     nlohmann::json attachment_add(const std::string& message_id, const std::string& mime_hint, const std::string& bytes);
     bool attachment_open(const std::string& id, std::string& mime, std::string& bytes);
