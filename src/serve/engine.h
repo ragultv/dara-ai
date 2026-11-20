@@ -38,6 +38,7 @@ struct SampleParams {
     std::vector<std::string> stop;   // stop strings (not included in the output)
     int flash = -1;                  // speculative decoding for this request: -1 auto (on when available), 0 off, 1 on (reported if unavailable)
     bool cache_write = true;         // false: read the prompt cache but keep the saved prefix (a side question does not displace the conversation)
+    int think_budget = 0;            // thinking: 0 off; N > 0 at most N reasoning tokens, then the thought is closed and the model answers; -1 no cap (up to the context)
 };
 
 struct Usage {
@@ -45,6 +46,7 @@ struct Usage {
     int cached_tokens = 0;           // of those, reused from the previous request (no prefill)
     int completion_tokens = 0;
     int image_tokens = 0;
+    int reasoning_tokens = 0;        // of completion_tokens, the ones spent thinking
     int total_tokens() const { return prompt_tokens + completion_tokens; }
 };
 
@@ -58,6 +60,7 @@ struct Timings {
     double prefill_ms = 0;           // prompt tokens through the model (excluding cached ones)
     double ttft_ms = 0;              // request start in the engine -> first generated token
     double decode_ms = 0;            // first token -> last token
+    double thinking_ms = 0;          // first token -> end of the thought
     double total_ms = 0;
     double prefill_tps() const { return prefill_ms > 0 ? (prefilled * 1000.0 / prefill_ms) : 0; }
     double decode_tps() const { return decode_ms > 0 && decoded > 1 ? ((decoded - 1) * 1000.0 / decode_ms) : 0; }
@@ -84,6 +87,8 @@ struct SpecInfo {                    // speculative decoding (greedy: output ide
 
 struct GenResult {
     std::string text;
+    std::string reasoning;           // the model's thinking (empty when thinking is off); text holds only the answer
+    bool think_cut = false;          // the thinking budget ran out and the thought was closed for the model
     std::string finish_reason;       // "stop" (end of turn / stop string), "length" (max_tokens or context full), "cancelled"
     Usage usage;
     Timings timings;
@@ -151,7 +156,8 @@ public:
 
     // on_text receives the generated text as it streams (complete UTF-8 characters, stop strings held back); returning false cancels.
     using TextFn = std::function<bool(const std::string&)>;
-    GenResult chat(const std::vector<Message>& messages, const SampleParams& sp, const TextFn& on_text);
+    // on_reasoning (optional) receives the thinking as it streams, separately from on_text (the answer).
+    GenResult chat(const std::vector<Message>& messages, const SampleParams& sp, const TextFn& on_text, const TextFn& on_reasoning = nullptr);
     GenResult complete(const std::string& prompt, const SampleParams& sp, const TextFn& on_text);   // raw prompt (no chat template)
     // Context maintenance on its own: the messages as they would be sent to the model for a reply of max_tokens.
     std::vector<Message> compact(const std::vector<Message>& messages, int max_tokens, ContextInfo* info, double* ms);
