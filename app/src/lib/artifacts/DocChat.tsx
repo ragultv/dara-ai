@@ -125,11 +125,20 @@ export const DocChat: React.FC<Props> = ({
   const [text, setText] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const el = listRef.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  // the box grows with what is typed, up to a limit, then scrolls
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  }, [text]);
 
   const submit = (value: string) => {
     const v = value.trim();
@@ -208,6 +217,7 @@ export const DocChat: React.FC<Props> = ({
         )}
         <div className="rounded-lg border border-border bg-bg focus-within:border-border-strong">
           <textarea
+            ref={inputRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
@@ -222,7 +232,7 @@ export const DocChat: React.FC<Props> = ({
               busy ? "Dara is working..." : docIsEmpty ? "Describe a document" : "Describe a change"
             }
             aria-label="Message to Dara"
-            className="block max-h-40 w-full resize-none border-0 bg-transparent px-3 pt-2.5 text-[13px] text-text outline-none placeholder:text-text-subtle"
+            className="custom-scrollbar block max-h-40 w-full resize-none border-0 bg-transparent px-3 pt-2.5 text-[13px] text-text outline-none placeholder:text-text-subtle"
           />
           <div className="flex items-center justify-between px-2 pb-2 pt-1">
             <ThinkingEffort />

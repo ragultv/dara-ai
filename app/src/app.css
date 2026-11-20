@@ -164,16 +164,45 @@ body {
   color: var(--color-text-muted);
   text-decoration: line-through;
 }
+.doc-editor:focus-visible,
+.doc-title:focus-visible {
+  outline: none !important;
+}
 .doc-editor .tableWrapper {
   overflow-x: auto;
+  padding: 0.25rem 0;
 }
 .doc-editor table {
   table-layout: fixed;
+  width: 100%;
+  border-collapse: collapse;
+}
+/* dragging the border between two columns changes their width (Tiptap column resizing) */
+.doc-editor .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 4px;
+  background: var(--color-primary);
+  pointer-events: none;
+}
+.doc-editor.resize-cursor,
+.doc-editor.resize-cursor * {
+  cursor: col-resize;
 }
 .doc-editor th,
 .doc-editor td {
   position: relative;
   min-width: 4rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border);
+  vertical-align: top;
+  text-align: left;
+}
+.doc-editor th {
+  background: var(--color-surface-raised);
+  font-weight: 600;
 }
 .doc-editor th > p,
 .doc-editor td > p {

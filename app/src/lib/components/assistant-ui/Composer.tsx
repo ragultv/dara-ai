@@ -243,7 +243,7 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
           aria-label="Message"
           placeholder="Send a message (Shift+Enter for a new line)..."
           rows={1}
-          className="w-full bg-transparent p-0 text-sm text-text placeholder:text-text-subtle resize-none border-0 outline-none ring-0 focus:outline-none focus:ring-0 leading-relaxed min-h-[44px] max-h-[160px]"
+          className="w-full bg-transparent p-0 text-sm text-text placeholder:text-text-subtle resize-none border-0 outline-none ring-0 focus:outline-none focus:ring-0 leading-relaxed min-h-[44px] max-h-[160px] custom-scrollbar"
           style={{ outline: "none", boxShadow: "none", border: "none" }}
         />
 
