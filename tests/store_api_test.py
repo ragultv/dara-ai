@@ -50,7 +50,7 @@ try:
     s, _ = call("GET", "/dara/settings", key="wrong"); check("settings with wrong key -> 401", s == 401, s)
 
     s, info = call("GET", "/dara/store")
-    check("store info", s == 200 and info["schema_version"] == 1 and info["conversations"] == 0, info)
+    check("store info", s == 200 and info["schema_version"] == 2 and info["conversations"] == 0 and info["artifacts"] == 0, info)
     check("database file exists", os.path.exists(os.path.join(data_dir, "dara.db")))
 
     # settings
@@ -126,6 +126,37 @@ try:
     s, r = call("GET", "/dara/search?q=purple"); check("search entries removed", r["data"] == [], r)
     s, _ = call("GET", f"/dara/conversations/{cid}"); check("deleted conversation -> 404", s == 404)
 
+    # artifacts (schema version 2): documents now, slides and designs later
+    s, a = call("POST", "/dara/artifacts", {"kind": "doc", "title": "Plan", "content": "# Plan\n\n- one\n- two\n" + "x" * 900})
+    check("create a document", s == 201 and a["kind"] == "doc" and a["title"] == "Plan" and a["content"].startswith("# Plan") and a["chars"] > 900, a)
+    aid = a["id"]
+    s, d2 = call("POST", "/dara/artifacts", {"kind": "doc", "title": "Second"}); check("a document may start empty (kind defaults to doc)", s == 201 and d2["content"] == "", d2)
+    s, sl = call("POST", "/dara/artifacts", {"kind": "slides", "title": "Deck", "content": "{}"}); check("slides use the same table", s == 201 and sl["kind"] == "slides", sl)
+    s, e = call("POST", "/dara/artifacts", {"kind": "spreadsheet"}); check("unknown kind -> 400", s == 400, e)
+    s, e = call("POST", "/dara/artifacts", {"id": aid, "kind": "doc"}); check("duplicate id -> 409", s == 409, e)
+    s, e = call("POST", "/dara/artifacts", {"id": "not-a-uuid", "kind": "doc"}); check("non-UUID id -> 400", s == 400, e)
+    s, e = call("POST", "/dara/artifacts", {"kind": "doc", "content": "z" * (2 * 1024 * 1024 + 1)}); check("content over 2 MB -> 400", s == 400, e)
+    s, lst = call("GET", "/dara/artifacts")
+    check("list all artifacts, newest first, with a snippet and no full content", s == 200 and lst["total"] == 3 and "content" not in lst["data"][0] and "snippet" in lst["data"][0], lst)
+    s, lst = call("GET", "/dara/artifacts?kind=doc")
+    check("list filtered by kind", s == 200 and lst["total"] == 2 and all(x["kind"] == "doc" for x in lst["data"]), lst)
+    plan = next(x for x in lst["data"] if x["id"] == aid)
+    check("snippet is the start of the content (600 chars at most)", plan["snippet"].startswith("# Plan") and len(plan["snippet"]) == 600, len(plan["snippet"]))
+    s, e = call("GET", "/dara/artifacts?kind=nope"); check("list with an unknown kind -> 400", s == 400, e)
+    s, g = call("GET", f"/dara/artifacts/{aid}"); check("get one with the full content", s == 200 and g["content"].endswith("x" * 900), g.get("chars"))
+    time.sleep(0.01)
+    s, u = call("PATCH", f"/dara/artifacts/{aid}", {"title": "Plan v2", "content": "# New\n\nbody", "pinned": True})
+    check("patch title, content and pinned", s == 200 and u["title"] == "Plan v2" and u["content"] == "# New\n\nbody" and u["pinned"] is True and u["updated_at"] >= g["updated_at"], u)
+    s, lst = call("GET", "/dara/artifacts?kind=doc"); check("pinned documents come first", lst["data"][0]["id"] == aid, [x["id"] for x in lst["data"]])
+    s, e = call("PATCH", "/dara/artifacts/00000000-0000-4000-8000-000000000000", {"title": "x"}); check("patch unknown -> 404", s == 404, e)
+    s, e = call("GET", "/dara/artifacts/00000000-0000-4000-8000-000000000000"); check("get unknown -> 404", s == 404, e)
+    s, st = call("GET", "/dara/store"); check("store info counts artifacts and reports schema 2", st.get("artifacts") == 3 and st.get("schema_version") == 2, st)
+    s, ex = call("GET", "/dara/data/export"); check("export includes artifacts", len(ex.get("artifacts", [])) == 3 and any(x["content"] == "# New\n\nbody" for x in ex["artifacts"]), ex.get("artifacts"))
+    s, _ = call("DELETE", f"/dara/artifacts/{sl['id']}"); check("delete an artifact", s == 200)
+    s, _ = call("DELETE", f"/dara/artifacts/{sl['id']}"); check("delete again -> 404", s == 404)
+    s, _ = call("PATCH", f"/dara/artifacts/{aid}", {"content": "<script>alert(1)</script> and **markdown**"})
+    s, g = call("GET", f"/dara/artifacts/{aid}"); check("content is stored as text exactly as sent", g["content"] == "<script>alert(1)</script> and **markdown**", g)
+
     # delete all needs the confirmation
     call("POST", "/dara/conversations", {"title": "x"})
     s, e = call("DELETE", "/dara/data", {}); check("delete-all without confirm -> 400", s == 400, e)
@@ -133,7 +164,30 @@ try:
     s2, lst = call("GET", "/dara/conversations")
     s3, allc = call("GET", "/dara/model-configs")
     check("delete all clears conversations and model configs", s == 200 and lst["total"] == 0 and allc == {}, (r, lst, allc))
+    s4, arts = call("GET", "/dara/artifacts"); check("delete all clears artifacts", s4 == 200 and arts["total"] == 0, arts)
     s, st = call("GET", "/dara/settings"); check("settings kept by delete all", st["theme"] == "dark", st)
+
+    # migration from schema version 1 (a database written by the previous build is upgraded in place, after a backup copy)
+    prev = os.path.join(os.path.dirname(EXE), "dara_prev.exe")
+    if os.path.exists(prev):
+        stop(p)   # the migration test uses the same port
+        mdir = tempfile.mkdtemp(prefix="dara_store_mig_")
+        old_exe, EXE = EXE, prev
+        pm = start(mdir)
+        s, c = call("POST", "/dara/conversations", {"title": "kept across the upgrade"})
+        s, info1 = call("GET", "/dara/store"); check("previous build writes schema 1", info1.get("schema_version") == 1 and "artifacts" not in info1, info1)
+        stop(pm)
+        EXE = old_exe
+        pm = start(mdir)
+        s, info2 = call("GET", "/dara/store")
+        check("new build upgrades the old database to schema 2", s == 200 and info2["schema_version"] == 2 and info2["artifacts"] == 0 and info2["conversations"] == 1, info2)
+        check("a backup of the version 1 file was kept", os.path.exists(os.path.join(mdir, "dara.db.bak-v1")), os.listdir(mdir))
+        s, nc = call("POST", "/dara/artifacts", {"kind": "doc", "title": "after upgrade"}); check("artifacts work on the upgraded database", s == 201, nc)
+        stop(pm)
+        shutil.rmtree(mdir, ignore_errors=True)
+        p = start(data_dir)
+    else:
+        print("skip  migration test (build\\cuda\\dara_prev.exe, a schema 1 build, not found)")
 
     # corrupt file recovery
     stop(p)

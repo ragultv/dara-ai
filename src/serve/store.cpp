@@ -23,13 +23,13 @@ using json = nlohmann::json;
 
 namespace {
 
-constexpr int kSchemaLatest = 1;
-// kMigrations[i] upgrades schema version i+1 to i+2 (forward only; an applied migration is never edited). Empty while the schema is at version 1.
-const std::vector<const char*> kMigrations = {};
+// kStoreMigrationSql[i] (store_schema.h, from docs/ui/db/000N_*.sql) upgrades schema version i+1 to i+2 (forward only; an applied migration is never edited).
+constexpr int kSchemaLatest = 1 + kStoreMigrationCount;
 
 constexpr size_t kMaxContent = size_t(2) << 20;       // 2 MB of text per message
 constexpr size_t kMaxAttachment = size_t(20) << 20;   // 20 MB per image
 constexpr size_t kMaxSetting = 64 << 10;
+constexpr int kSnippetChars = 600;   // how much of an artifact the gallery list carries (the card preview)
 
 std::string u8s(const fs::path& p) { const auto s = p.u8string(); return std::string(s.begin(), s.end()); }
 std::string dump(const json& j) { return j.dump(-1, ' ', false, json::error_handler_t::replace); }
@@ -202,6 +202,17 @@ struct Store::Impl {
         if (!q.row()) fail(404, "conversation not found", "not_found");
         return conversation_row(q);
     }
+    static json artifact_row(Stmt& q, bool full) {   // columns: id,kind,title,pinned,created_at,updated_at,length(content),content-or-snippet
+        json j = {{"id", q.str(0)}, {"kind", q.str(1)}, {"title", q.str(2)}, {"pinned", q.i64(3) != 0}, {"created_at", q.i64(4)}, {"updated_at", q.i64(5)}, {"chars", q.i64(6)}};
+        j[full ? "content" : "snippet"] = q.str(7);
+        return j;
+    }
+    json artifact_by_id(const std::string& id) {
+        Stmt q(db, "SELECT id,kind,title,pinned,created_at,updated_at,length(content),content FROM artifacts WHERE id=?1");
+        q.text(1, id);
+        if (!q.row()) fail(404, "artifact not found", "not_found");
+        return artifact_row(q, true);
+    }
     void touch(const std::string& cid) { Stmt q(db, "UPDATE conversations SET updated_at=?2 WHERE id=?1"); q.text(1, cid).num(2, now_ms()).run(); }
 };
 
@@ -248,7 +259,7 @@ Store::Store(const std::string& data_dir) : impl_(new Impl), dir_(data_dir) {
         std::error_code e2;
         fs::copy_file(impl_->file, fs::u8path(u8s(impl_->file) + ".bak-v" + std::to_string(ver)), fs::copy_options::overwrite_existing, e2);
         Tx tx(impl_->db);
-        exec(impl_->db, kMigrations.at(static_cast<size_t>(ver - 1)));
+        exec(impl_->db, kStoreMigrationSql[ver - 1]);
         ++ver;
         impl_->set_user_version(ver);
         tx.commit();
@@ -265,7 +276,8 @@ json Store::info() {
     std::error_code ec;
     const auto size = fs::file_size(impl_->file, ec);
     json j = {{"path", u8s(impl_->file)}, {"attachments_dir", u8s(impl_->attachments)}, {"schema_version", impl_->user_version()}, {"size_bytes", ec ? 0 : static_cast<int64_t>(size)},
-              {"conversations", count("conversations")}, {"messages", count("messages")}, {"attachments", count("attachments")}, {"settings", count("settings")}};
+              {"conversations", count("conversations")}, {"messages", count("messages")}, {"attachments", count("attachments")}, {"settings", count("settings")},
+              {"artifacts", count("artifacts")}};
     if (!impl_->note.empty()) j["note"] = impl_->note;
     return j;
 }
@@ -378,6 +390,74 @@ bool Store::conversation_delete(const std::string& id) {
     tx.commit();
     if (deleted) impl_->remove_files(files);
     return deleted;
+}
+
+// ---- artifacts ----
+namespace {
+bool valid_kind(const std::string& k) { return k == "doc" || k == "slides" || k == "design"; }
+}
+
+json Store::artifacts_list(const std::string& kind, int limit, int offset) {
+    limit = std::clamp(limit, 1, 500);
+    offset = std::max(offset, 0);
+    if (!kind.empty() && !valid_kind(kind)) fail(400, "'kind' must be doc, slides or design");
+    std::lock_guard<std::mutex> lk(mu_);
+    const std::string where = kind.empty() ? "" : " WHERE kind=?3";
+    Stmt q(impl_->db, ("SELECT id,kind,title,pinned,created_at,updated_at,length(content),substr(content,1," + std::to_string(kSnippetChars) + ") FROM artifacts" + where +
+                       " ORDER BY pinned DESC, updated_at DESC LIMIT ?1 OFFSET ?2").c_str());
+    q.num(1, limit).num(2, offset);
+    if (!kind.empty()) q.text(3, kind);
+    json arr = json::array();
+    while (q.row()) arr.push_back(Impl::artifact_row(q, false));
+    Stmt c(impl_->db, ("SELECT COUNT(*) FROM artifacts" + where).c_str());
+    if (!kind.empty()) c.text(3, kind);   // bound by the same index: ?3 only exists in the filtered statement
+    c.row();
+    return {{"object", "list"}, {"data", arr}, {"total", c.i64(0)}, {"limit", limit}, {"offset", offset}};
+}
+
+json Store::artifact_get(const std::string& id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    return impl_->artifact_by_id(id);
+}
+
+json Store::artifact_create(const json& b) {
+    if (!b.is_object()) fail(400, "send a JSON object");
+    std::string id = need_string(b, "id", 36);
+    if (id.empty()) id = new_uuid();
+    else if (!is_uuid(id)) fail(400, "'id' must be a UUID");
+    const std::string kind = b.contains("kind") ? need_string(b, "kind", 16, true) : std::string("doc");
+    if (!valid_kind(kind)) fail(400, "'kind' must be doc, slides or design");
+    const std::string title = need_string(b, "title", 500), content = need_string(b, "content", kMaxContent);
+    std::lock_guard<std::mutex> lk(mu_);
+    {
+        Stmt dup(impl_->db, "SELECT 1 FROM artifacts WHERE id=?1");
+        dup.text(1, id);
+        if (dup.row()) fail(409, "an artifact with this id exists", "conflict");
+    }
+    const int64_t t = b.contains("created_at") && b["created_at"].is_number_integer() ? b["created_at"].get<int64_t>() : now_ms();
+    Stmt q(impl_->db, "INSERT INTO artifacts(id,kind,title,content,pinned,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)");
+    q.text(1, id).text(2, kind).text(3, title).text(4, content).num(5, b.value("pinned", false) ? 1 : 0).num(6, t).run();
+    return impl_->artifact_by_id(id);
+}
+
+json Store::artifact_patch(const std::string& id, const json& b) {
+    if (!b.is_object()) fail(400, "send a JSON object");
+    std::lock_guard<std::mutex> lk(mu_);
+    impl_->artifact_by_id(id);   // 404 when absent
+    Tx tx(impl_->db);
+    if (b.contains("title")) { Stmt q(impl_->db, "UPDATE artifacts SET title=?2 WHERE id=?1"); q.text(1, id).text(2, need_string(b, "title", 500)).run(); }
+    if (b.contains("content")) { Stmt q(impl_->db, "UPDATE artifacts SET content=?2 WHERE id=?1"); q.text(1, id).text(2, need_string(b, "content", kMaxContent)).run(); }
+    if (b.contains("pinned")) { Stmt q(impl_->db, "UPDATE artifacts SET pinned=?2 WHERE id=?1"); q.text(1, id).num(2, b["pinned"].is_boolean() && b["pinned"].get<bool>() ? 1 : 0).run(); }
+    { Stmt q(impl_->db, "UPDATE artifacts SET updated_at=?2 WHERE id=?1"); q.text(1, id).num(2, now_ms()).run(); }
+    tx.commit();
+    return impl_->artifact_by_id(id);
+}
+
+bool Store::artifact_delete(const std::string& id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    Stmt q(impl_->db, "DELETE FROM artifacts WHERE id=?1");
+    q.text(1, id).run();
+    return sqlite3_changes(impl_->db) > 0;
 }
 
 // ---- messages ----
@@ -572,6 +652,13 @@ json Store::export_all() {
     }
     for (const auto& id : ids) { try { convs.push_back(conversation_get(id)); } catch (const StoreError&) {} }
     out["conversations"] = convs;
+    json arts = json::array();
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        Stmt q(impl_->db, "SELECT id,kind,title,pinned,created_at,updated_at,length(content),content FROM artifacts ORDER BY created_at");
+        while (q.row()) arts.push_back(Impl::artifact_row(q, true));
+    }
+    out["artifacts"] = arts;
     return out;
 }
 
@@ -582,6 +669,7 @@ void Store::delete_all() {
         exec(impl_->db, "DELETE FROM messages");   // attachments cascade, the search index follows by trigger
         exec(impl_->db, "DELETE FROM conversations");
         exec(impl_->db, "DELETE FROM model_configs");
+        exec(impl_->db, "DELETE FROM artifacts");
         tx.commit();
     }
     exec(impl_->db, "INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");
@@ -669,6 +757,16 @@ void register_store_routes(httplib::Server& svr, Store* store, const std::string
         reply(res, 200, {{"deleted", true}});
     }));
 
+    svr.Get("/dara/artifacts", guard([=](const httplib::Request& req, httplib::Response& res) {
+        reply(res, 200, store->artifacts_list(req.has_param("kind") ? req.get_param_value("kind") : std::string(), intp(req, "limit", 100), intp(req, "offset", 0)));
+    }));
+    svr.Post("/dara/artifacts", guard([=](const httplib::Request& req, httplib::Response& res) { reply(res, 201, store->artifact_create(body_of(req))); }));
+    svr.Get(R"(/dara/artifacts/([^/]+))", guard([=](const httplib::Request& req, httplib::Response& res) { reply(res, 200, store->artifact_get(req.matches[1])); }));
+    svr.Patch(R"(/dara/artifacts/([^/]+))", guard([=](const httplib::Request& req, httplib::Response& res) { reply(res, 200, store->artifact_patch(req.matches[1], body_of(req))); }));
+    svr.Delete(R"(/dara/artifacts/([^/]+))", guard([=](const httplib::Request& req, httplib::Response& res) {
+        if (!store->artifact_delete(req.matches[1])) { error(res, 404, "artifact not found", "not_found"); return; }
+        reply(res, 200, {{"deleted", true}});
+    }));
     svr.Get("/dara/search", guard([=](const httplib::Request& req, httplib::Response& res) { reply(res, 200, store->search(req.get_param_value("q"), intp(req, "limit", 20))); }));
 
     svr.Get("/dara/model-configs", guard([=](const httplib::Request&, httplib::Response& res) { reply(res, 200, store->model_configs_all()); }));
