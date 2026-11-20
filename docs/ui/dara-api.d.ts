@@ -137,7 +137,7 @@ export interface Stats {
 }
 
 // ---- app database (docs/ui/08-database.md) ----
-export interface StoreInfo { path: string; attachments_dir: string; schema_version: number; size_bytes: number; conversations: number; messages: number; attachments: number; settings: number; note?: string }
+export interface StoreInfo { path: string; attachments_dir: string; schema_version: number; size_bytes: number; conversations: number; messages: number; attachments: number; settings: number; artifacts: number; note?: string }
 export type Settings = Record<string, unknown>;
 export interface Attachment { id: string; mime: "image/png" | "image/jpeg" | "image/webp"; bytes: number; url: string; width: number | null; height: number | null }
 export interface StoredMessage {
@@ -161,3 +161,9 @@ export interface SearchResult { object: "list"; data: SearchHit[] }
 export interface SavedModelConfig { kv: KvChoice; flash: "auto" | "on" | "off"; vision: boolean; context: number | null; last_loaded_at?: number | null; updated_at?: number }
 export type SavedModelConfigs = Record<string, SavedModelConfig>;
 export interface SavedModelConfigPut { kv?: KvChoice; flash?: "auto" | "on" | "off" | boolean; vision?: boolean; context?: number | null }
+
+// ---- artifacts (09-artifacts.md) ----
+export type ArtifactKind = "doc" | "slides" | "design";
+export interface ArtifactSummary { id: string; kind: ArtifactKind; title: string; pinned: boolean; created_at: number; updated_at: number; chars: number; snippet: string }
+export interface Artifact { id: string; kind: ArtifactKind; title: string; pinned: boolean; created_at: number; updated_at: number; chars: number; content: string }
+export interface ArtifactsList { object: "list"; data: ArtifactSummary[]; total: number; limit: number; offset: number }

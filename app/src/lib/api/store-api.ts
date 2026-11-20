@@ -8,6 +8,9 @@ import type {
   DbMessage,
   DbMessageAttachment,
   DbSearchResponse,
+  DbArtifact,
+  DbArtifactsResponse,
+  ArtifactKind,
   SavedModelConfig,
   ChatStats
 } from "./types.ts";
@@ -53,7 +56,62 @@ export interface MessageAppendBody {
   created_at?: number;
 }
 
+export interface ArtifactCreateBody {
+  id?: string;
+  kind?: ArtifactKind;
+  title?: string;
+  content?: string;
+  pinned?: boolean;
+}
+
 export class StoreApi {
+  listArtifacts(
+    kind?: ArtifactKind,
+    limit = 200,
+    offset = 0,
+    signal?: AbortSignal
+  ): Promise<DbArtifactsResponse> {
+    const q = `limit=${limit}&offset=${offset}${kind ? `&kind=${kind}` : ""}`;
+    return apiClient.request<DbArtifactsResponse>(`/dara/artifacts?${q}`, {
+      method: "GET",
+      ...optSignal(signal)
+    });
+  }
+
+  getArtifact(id: string, signal?: AbortSignal): Promise<DbArtifact> {
+    return apiClient.request<DbArtifact>(`/dara/artifacts/${encodeURIComponent(id)}`, {
+      method: "GET",
+      ...optSignal(signal)
+    });
+  }
+
+  createArtifact(body: ArtifactCreateBody, signal?: AbortSignal): Promise<DbArtifact> {
+    return apiClient.request<DbArtifact>("/dara/artifacts", {
+      method: "POST",
+      body: JSON.stringify(body),
+      ...optSignal(signal)
+    });
+  }
+
+  patchArtifact(
+    id: string,
+    patch: { title?: string; content?: string; pinned?: boolean },
+    signal?: AbortSignal
+  ): Promise<DbArtifact> {
+    return apiClient.request<DbArtifact>(`/dara/artifacts/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+      ...optSignal(signal)
+    });
+  }
+
+  deleteArtifact(id: string, signal?: AbortSignal): Promise<{ deleted: boolean }> {
+    return apiClient.request<{ deleted: boolean }>(`/dara/artifacts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      ...optSignal(signal)
+    });
+  }
+
   getStoreInfo(signal?: AbortSignal): Promise<DbStoreInfo> {
     return apiClient.request<DbStoreInfo>("/dara/store", { method: "GET", ...optSignal(signal) });
   }

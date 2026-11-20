@@ -20,6 +20,8 @@ import { OptionsPage } from "./routes/OptionsPage.tsx";
 import { SettingsPage } from "./routes/SettingsPage.tsx";
 import { Onboarding } from "./routes/Onboarding.tsx";
 import { KitPage } from "./routes/KitPage.tsx";
+import { ArtifactsPage } from "./routes/ArtifactsPage.tsx";
+import { ArtifactEditorPage } from "./routes/ArtifactEditorPage.tsx";
 
 export const App: React.FC = () => {
   const [isRailCollapsed, setIsRailCollapsed] = useState(false);
@@ -76,6 +78,10 @@ export const App: React.FC = () => {
         return <SettingsPage />;
       case "kit":
         return scrollable(<KitPage />);
+      case "artifacts":
+        return scrollable(<ArtifactsPage />);
+      case "artifact":
+        return <ArtifactEditorPage />;
       case "chat":
       default:
         return <ChatPage />;

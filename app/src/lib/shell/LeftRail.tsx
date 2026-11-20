@@ -22,6 +22,11 @@ export const LeftRail: React.FC<LeftRailProps> = ({ isCollapsed = false }) => {
       icon: "message-square-plus"
     },
     {
+      route: "artifacts",
+      label: "Artifacts",
+      icon: "file-text"
+    },
+    {
       route: "models",
       label: "Models",
       icon: "box"
@@ -50,7 +55,9 @@ export const LeftRail: React.FC<LeftRailProps> = ({ isCollapsed = false }) => {
         {/* Nav buttons */}
         <nav className="flex flex-col space-y-1" aria-label="Main">
           {navItems.map((item) => {
-            const isActive = currentRoute === item.route;
+            const isActive =
+              currentRoute === item.route ||
+              (item.route === "artifacts" && currentRoute === "artifact");
             return (
               <button
                 key={item.route}

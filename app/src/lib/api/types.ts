@@ -402,6 +402,7 @@ export interface DbStoreInfo {
   messages: number;
   attachments: number;
   settings: number;
+  artifacts: number;
   note?: string;
 }
 
@@ -474,4 +475,33 @@ export interface SavedModelConfig {
   context: number | null;
   last_loaded_at?: number | null;
   updated_at?: number;
+}
+
+// ---- artifacts (docs/ui/09-artifacts.md) ----
+export type ArtifactKind = "doc" | "slides" | "design";
+
+/** One artifact in the gallery list: a short `snippet` of the start of its content, never the whole body. */
+export interface DbArtifactSummary {
+  id: string;
+  kind: ArtifactKind;
+  title: string;
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
+  /** length of the content in characters */
+  chars: number;
+  snippet: string;
+}
+
+export interface DbArtifact extends Omit<DbArtifactSummary, "snippet"> {
+  /** doc: Markdown as written (never HTML) */
+  content: string;
+}
+
+export interface DbArtifactsResponse {
+  object: "list";
+  data: DbArtifactSummary[];
+  total: number;
+  limit: number;
+  offset: number;
 }
