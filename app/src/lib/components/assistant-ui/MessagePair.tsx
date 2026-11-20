@@ -45,7 +45,7 @@ export const MessagePair: React.FC<MessagePairProps> = ({
     return (
       <div className="flex flex-col items-end group">
         {isEditing ? (
-          <div className="w-full max-w-2xl rounded-2xl bg-surface-raised border border-border focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-primary/20 shadow-md p-3.5 space-y-3">
+          <div className="w-full max-w-2xl rounded-2xl bg-surface-raised border border-border focus-within:border-border-strong shadow-md p-3.5 space-y-3">
             <textarea
               value={editText}
               onChange={(e) => setEditText(e.target.value)}
@@ -158,7 +158,7 @@ export const MessagePair: React.FC<MessagePairProps> = ({
       <div className="flex-1 min-w-0 space-y-1">
         {isStreaming && !hasText && (
           <div className="flex items-center gap-2 h-7 text-text-subtle">
-            <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+            <span className="w-1.5 h-1.5 rounded-full bg-text-muted animate-pulse" />
             <span className="text-xs text-text-muted font-medium">Generating response...</span>
           </div>
         )}

@@ -32,7 +32,7 @@ export const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
             id={selectId}
             disabled={disabled}
             className={`w-full h-10 pl-3 pr-8 py-2 text-sm rounded-lg bg-surface border transition-colors text-text appearance-none disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-offset-2 ${
-              error ? "border-danger" : "border-border focus-visible:border-primary"
+              error ? "border-danger" : "border-border focus-visible:border-border-strong"
             } ${className}`}
             {...rest}
           >

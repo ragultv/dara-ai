@@ -31,7 +31,7 @@ export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
           className={`w-full p-3 text-sm rounded-lg bg-surface border transition-colors text-text placeholder:text-text-subtle disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-offset-2 leading-relaxed resize-y ${
             error
               ? "border-danger focus-visible:outline-danger"
-              : "border-border focus-visible:border-primary"
+              : "border-border focus-visible:border-border-strong"
           } ${className}`}
           {...rest}
         />

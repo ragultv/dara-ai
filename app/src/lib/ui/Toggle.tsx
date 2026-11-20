@@ -40,7 +40,7 @@ export const Toggle: React.FC<ToggleProps> = ({
         disabled={disabled}
         onClick={() => !disabled && handler?.(!checked)}
         className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-          checked ? "bg-primary" : "bg-surface-sunken border border-border"
+          checked ? "bg-text" : "bg-surface-sunken border border-border"
         }`}
       >
         <span

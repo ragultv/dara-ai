@@ -205,7 +205,7 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
           role="status"
           className="mb-2 px-3 py-2 rounded-xl border border-border bg-surface-raised text-xs text-text-muted flex items-center gap-2"
         >
-          <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+          <span className="w-1.5 h-1.5 rounded-full bg-text-muted animate-pulse" />
           <span>
             The context window is nearly full. Summarizing earlier messages to start a new window
             (nothing is deleted).
@@ -222,8 +222,8 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
         onDrop={handleDrop}
         className={`relative rounded-2xl bg-surface border transition-all shadow-sm p-3 space-y-2 ${
           isDragging
-            ? "border-primary ring-2 ring-primary/30"
-            : "border-border focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/20"
+            ? "border-border-strong "
+            : "border-border focus-within:border-border-strong"
         }`}
       >
         <ComposerAttachments

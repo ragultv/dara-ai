@@ -171,6 +171,12 @@ context, from free VRAM), `/dara/stats` the largest image (`model.image_scratch_
 GPU so short of memory that the scratch cannot be found, the request fails with a message saying so (shorten the conversation, lower
 `--image-max-tokens`, or load a smaller context).
 
+**Images across turns (Nano).** The prompt cache covers image turns: when the conversation grows, the K/V of earlier images is reused (an image counts as
+the same only if its pixels and position match, otherwise the cache is cut just before it) and only images past the reused prefix are encoded. Encoded
+images are also kept in a small cache (8, by content hash), so re-sending a picture skips the encode. Measured on a GTX 1650 with Nano: a follow-up turn
+after an image went from 1.8-5.4 s to 0.14-0.25 s time to first token, and a new image costs ~1.9 s however long the conversation is (before, each turn
+re-encoded every earlier image and re-prefilled the whole history: 14-20 s at 7-9k tokens in the app). Core / Pro still re-prefill image conversations.
+
 Embeddings are bit-identical to the resident encoder (tests/vision_stream_test.cu; the previous build's logits on image prompts match byte for byte).
 
 ## Flash and speculative decoding

@@ -98,9 +98,9 @@ export const EngineSection: React.FC<EngineSectionProps> = ({ facts }) => {
         {isAvailable && info?.restart_needed && (
           <div
             role="status"
-            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary-subtle p-3"
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border-strong bg-surface-raised p-3"
           >
-            <p className="text-xs font-medium text-on-primary-subtle">
+            <p className="text-xs font-medium text-text">
               Restart the engine to apply your saved engine settings.
             </p>
             <Button

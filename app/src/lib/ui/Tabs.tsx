@@ -29,7 +29,7 @@ export const Tabs: React.FC<TabsProps> = ({ tabs, activeId, onchange, className 
             onClick={() => onchange(tab.id)}
             className={`flex items-center gap-2 px-3.5 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors cursor-pointer ${
               isActive
-                ? "border-primary text-primary"
+                ? "border-border-strong text-text"
                 : "border-transparent text-text-muted hover:text-text hover:border-border"
             } ${tab.disabled ? "opacity-40 cursor-not-allowed" : ""}`}
           >

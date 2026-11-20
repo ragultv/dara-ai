@@ -334,6 +334,7 @@ struct Engine::Impl {
         else { gm->rewind(0); gm->clear_soft_tokens(); }
         kv_tokens.clear();
         kv_images = false;
+        held_imgs.clear();
         flash_valid = 0;
     }
     void invalidate() {   // after a failed request: nothing held is trusted
@@ -450,7 +451,13 @@ struct Engine::Impl {
 
     // ---- one generation over a token prompt ---------------------------------------------------------------------------------------------
     // images: per image, the encoded rows and its merged grid (Qwen) / token count (Gemma)
-    struct Img { std::vector<float> rows; int gh = 0, gw = 0, n = 0; };
+    // Nano: the encode is deferred (`pending` holds the preprocessed patches) until the prompt cache says which images' positions must be fed at all.
+    struct Img { std::vector<float> rows; int gh = 0, gw = 0, n = 0; uint64_t hash = 0; std::shared_ptr<dara::model::VisionInput> pending; };
+    struct HeldImg { size_t p0; int n; uint64_t hash; };
+    std::vector<HeldImg> held_imgs;          // Nano: the images whose soft tokens the held K/V state was computed from
+    double image_ms_acc = 0;                 // encode time spent inside generate() (deferred encodes), added to timings.image_ms
+    std::vector<std::pair<uint64_t, std::vector<float>>> img_cache;   // recently encoded images (hash -> soft-token rows), newest last
+    static constexpr size_t kImgCacheMax = 8;
 
     void generate(Prompt& pr, std::vector<Img>& imgs, const SampleParams& sp, const TextFn& on_text, GenResult& r, Clock::time_point t_start,
                   bool count_stats, bool allow_cache) {
@@ -464,15 +471,29 @@ struct Engine::Impl {
 
         // ---- prompt cache: how much of the held state can be kept ----
         size_t reuse = 0;
-        if (allow_cache && !has_img && !kv_images) {
-            if (qwen) {
-                if (qckpt.valid && !qckpt_tokens.empty() && qckpt_tokens.size() <= ids.size() && std::equal(qckpt_tokens.begin(), qckpt_tokens.end(), ids.begin()))
-                    reuse = qckpt_tokens.size() - 1;   // the checkpoint holds all but the last of these tokens
-            } else {
-                size_t l = 0;
-                while (l < kv_tokens.size() && l < ids.size() && kv_tokens[l] == ids[l]) ++l;
-                reuse = l > 0 ? l - 1 : 0;              // re-feed one token: the drafter and the next-token logits need it
+        if (!qwen) {   // Nano: image placeholders hold the pad id in the sequence (the per-layer table reads it), so compare in that form
+            for (const auto& [p0, k] : pr.images) for (int j = 0; j < imgs[static_cast<size_t>(k)].n; ++j) pr.ids[p0 + static_cast<size_t>(j)] = 0;
+        }
+        if (allow_cache && qwen && !has_img && !kv_images) {
+            if (qckpt.valid && !qckpt_tokens.empty() && qckpt_tokens.size() <= ids.size() && std::equal(qckpt_tokens.begin(), qckpt_tokens.end(), ids.begin()))
+                reuse = qckpt_tokens.size() - 1;   // the checkpoint holds all but the last of these tokens
+        } else if (allow_cache && !qwen) {
+            size_t l = 0;
+            while (l < kv_tokens.size() && l < ids.size() && kv_tokens[l] == ids[l]) ++l;
+            // An image's K/V is only valid if the same image (same pixels) was held at the same position: cut the match before the first image
+            // that differs or is only partly matched. The soft tokens are plain input embeddings (causal attention), so everything before such an
+            // image stays exact.
+            for (const auto& [p0, k] : pr.images) {
+                const Img& im = imgs[static_cast<size_t>(k)];
+                if (p0 >= l) break;
+                bool same = p0 + static_cast<size_t>(im.n) <= l;
+                if (same) {
+                    same = false;
+                    for (const HeldImg& h : held_imgs) if (h.p0 == p0 && h.n == im.n && h.hash == im.hash) { same = true; break; }
+                }
+                if (!same) { l = p0; break; }
             }
+            reuse = l > 0 ? l - 1 : 0;              // re-feed one token: the drafter and the next-token logits need it
         }
         // speculative decoding (prompt lookup + the Flash drafter), for greedy and sampled requests alike; "flash": false turns it off
         if (reuse == 0) { flash_paused = false; spec_paused = false; }   // a new conversation: speculation gets a fresh chance
@@ -500,16 +521,20 @@ struct Engine::Impl {
         if (use_flash) flash->rewind(reuse);
         flash_valid = std::min(flash_valid, reuse);
 
-        // images: soft tokens at their placeholder positions
+        // images: soft tokens at their placeholder positions. Nano feeds (and so encodes) only the images that reach past the reused prefix.
         for (const auto& [p0, k] : pr.images) {
             Img& im = imgs[static_cast<size_t>(k)];
             if (qwen) qm->add_image(p0, im.gh, im.gw, std::move(im.rows));
-            else {
-                for (int j = 0; j < im.n; ++j) pr.ids[p0 + static_cast<size_t>(j)] = 0;   // <pad>: the per-layer table reads it
+            else if (p0 + static_cast<size_t>(im.n) > reuse) {
+                ensure_rows(im);
                 gm->add_soft_tokens(p0, im.n, std::move(im.rows));
             }
         }
         kv_images = has_img;
+        if (!qwen) {
+            held_imgs.clear();
+            for (const auto& [p0, k] : pr.images) held_imgs.push_back({p0, imgs[static_cast<size_t>(k)].n, imgs[static_cast<size_t>(k)].hash});
+        }
 
         // ---- prefill ----
         const auto tp = Clock::now();
@@ -584,9 +609,12 @@ struct Engine::Impl {
             // declined to draft (low confidence) -- those still pay for keeping it in step
             int fl_win_passes = 0, fl_win_tokens = 0;
             bool ngram_off = false;
-            constexpr int kFlashWindowPasses = 48;
-            constexpr float kFlashMinTokensPerPass = 1.25f;
-            constexpr float kFlashMinAccept = 0.7f;   // below this, a verify step of 1 + k tokens costs more than it saves (measured on a GTX 1650)
+            // Core 4B / 9B: measured on a GTX 1650. Nano: its verify pass is cheap and the drafter only drafts when confident (--flash-min-p), so
+            // even ~0.8 accepted drafts per step wins (prose +12%, code +35% in the unthrottled driver); the Core thresholds stood it down in the
+            // slow first words of an answer and left plain decoding for the whole conversation.
+            const int kFlashWindowPasses = qwen ? 48 : 96;
+            const float kFlashMinTokensPerPass = qwen ? 1.25f : 1.15f;
+            const float kFlashMinAccept = qwen ? 0.7f : 0.5f;   // below this, a verify step of 1 + k tokens costs more than it saves
             const int ngram_max = 4, ngram_min = 3;
             auto lookup = [&](int limit) {
                 draft.clear();
@@ -777,6 +805,24 @@ struct Engine::Impl {
     }
     size_t last_image_need = 0, last_image_borrowed = 0, last_image_from_free = 0;
 
+    // Nano: the soft-token rows of `im` (from the cache, else encoded now).
+    void ensure_rows(Img& im) {
+        if (!im.rows.empty() || !im.pending) return;
+        for (auto it = img_cache.begin(); it != img_cache.end(); ++it) {
+            if (it->first != im.hash) continue;
+            im.rows = it->second;
+            auto e = std::move(*it); img_cache.erase(it); img_cache.push_back(std::move(e));
+            im.pending.reset();
+            return;
+        }
+        const auto t0 = Clock::now();
+        im.rows = with_scratch(gvis->scratch_bytes(im.pending->n), [&] { return gvis->encode(*im.pending); });
+        image_ms_acc += ms_since(t0);
+        im.pending.reset();
+        img_cache.emplace_back(im.hash, im.rows);
+        if (img_cache.size() > kImgCacheMax) img_cache.erase(img_cache.begin());
+    }
+
     std::vector<Img> encode_images(const std::vector<Message>& msgs, double* ms) {
         std::vector<Img> v;
         const auto t0 = Clock::now();
@@ -792,14 +838,16 @@ struct Engine::Impl {
                     im.gh = in.merged_h(); im.gw = in.merged_w(); im.n = im.gh * im.gw;
                     im.rows = with_scratch(qvis->scratch_bytes(in.n), [&] { return qvis->encode(in); });
                 } else {
-                    const auto in = gvis->preprocess(img);
-                    im.n = in.soft_tokens();
-                    im.rows = with_scratch(gvis->scratch_bytes(in.n), [&] { return gvis->encode(in); });
+                    im.pending = std::make_shared<dara::model::VisionInput>(gvis->preprocess(img));
+                    im.n = im.pending->soft_tokens();
+                    im.hash = fnv(1469598103934665603ull, c.image);   // the encode runs later, in generate(), only if the prompt cache cannot cover this image
                 }
                 v.push_back(std::move(im));
             }
         }
         *ms = v.empty() ? 0 : ms_since(t0);
+        image_ms_acc = 0;
+        last_image_need = 0;
         return v;
     }
 
@@ -1195,8 +1243,9 @@ GenResult Engine::chat(const std::vector<Message>& messages, const SampleParams&
         r.context.truncated_last = ci.truncated_last;
         r.context.summary_cached = ci.summary_cached;
         r.timings.compact_ms = cms;
+        ims += m.image_ms_acc;   // Nano: encodes that ran inside generate()
         r.timings.image_ms = ims;
-        if (ims > 0) {
+        if (ims > 0 && m.last_image_need > 0) {
             r.timings.image_scratch_mb = m.last_image_need / 1048576.0;
             r.timings.image_borrowed_mb = m.last_image_borrowed / 1048576.0;
             r.timings.image_free_vram_mb = m.last_image_from_free / 1048576.0;

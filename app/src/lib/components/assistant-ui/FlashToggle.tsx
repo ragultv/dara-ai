@@ -86,14 +86,14 @@ export const FlashToggle: React.FC<{ className?: string }> = ({ className = "" }
         }}
         className={`${pillBase} cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
           isOn
-            ? "bg-primary/15 border-primary/40 text-primary shadow-xs hover:bg-primary/25"
+            ? "bg-text/15 border-border-strong text-text shadow-xs hover:bg-text/25"
             : "bg-surface-sunken border-border text-text-subtle hover:text-text hover:bg-surface-raised"
         } ${className}`}
         title={title}
         aria-label="Flash speculative decoding"
         aria-pressed={isOn}
       >
-        <Icon name="zap" size={11} className={isOn ? "text-primary" : "text-text-subtle"} />
+        <Icon name="zap" size={11} className={isOn ? "text-text" : "text-text-subtle"} />
         <span className="text-[11px] font-semibold">Flash</span>
         <span className="text-[9px] uppercase tracking-wider font-bold opacity-80">{label}</span>
       </button>
