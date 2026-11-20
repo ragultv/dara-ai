@@ -4,8 +4,16 @@ import { ApiError } from "../api/errors.ts";
  * A message for a failed call about comments, chat, images or history. An engine older than the app answers 404 for these routes,
  * which is not "the document is missing" but "restart Dara so the engine is updated".
  */
+export function unauthorizedMessage(): string {
+  const inDesktopApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  return inDesktopApp
+    ? "The engine did not accept this window's key. Close and reopen Dara."
+    : "This page has no key for the engine. Open Dara from its desktop window: a browser tab cannot connect to it.";
+}
+
 export function collabMessage(e: unknown, what: string): string {
   if (e instanceof ApiError) {
+    if (e.status === 401) return unauthorizedMessage();
     if (e.status === 404 || e.status === 405)
       return `This engine is older than the app and cannot keep ${what} yet. Close and reopen Dara to update it.`;
     if (e.status === 0)

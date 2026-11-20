@@ -4,12 +4,14 @@ import {
   applyOps,
   describeChange,
   joinBlocks,
+  type BlockOp,
   parseOps,
   plainQuote,
   quoteOccurrence,
   splitBlocks
 } from "./blocks.ts";
 import { complete } from "./completion.ts";
+import { normalizeWidgetFences, previewWithProgress } from "./widgetFences.ts";
 import {
   buildFinishMessages,
   buildOpsMessages,
@@ -20,6 +22,7 @@ import {
   factsFromOps,
   parsePlan,
   renderPlan,
+  wantsWidget,
   type Plan
 } from "./plan.ts";
 
@@ -68,6 +71,14 @@ export interface AssistantResult {
   /** questions Dara wants to put to the user as comments, each anchored to words in the document */
   questions: Array<{ quote: string; nth: number; body: string }>;
 }
+
+/** True when the user asked for something interactive; then a code block that is a runnable page is turned into a widget. */
+const widgetFix = (run: AssistantRun) => (text: string) =>
+  wantsWidget(run.instruction) ? normalizeWidgetFences(text) : text;
+const opsFix = (run: AssistantRun, ops: BlockOp[]): BlockOp[] =>
+  wantsWidget(run.instruction)
+    ? ops.map((o) => (o.op === "delete" ? o : { ...o, text: normalizeWidgetFences(o.text) }))
+    : ops;
 
 const unchanged = (run: AssistantRun, summary: string, stopped: boolean): AssistantResult => ({
   markdown: run.markdown,
@@ -143,8 +154,9 @@ async function editBlocks(run: AssistantRun): Promise<AssistantResult> {
       signal: run.signal,
       onReasoning: run.hooks.reasoning,
       onContent: (raw) => {
-        const ops = parseOps(raw);
-        if (ops.length) run.hooks.setDoc(joinBlocks(applyOps(blocks, ops).blocks));
+        const ops = opsFix(run, parseOps(raw));
+        if (ops.length)
+          run.hooks.setDoc(previewWithProgress(joinBlocks(applyOps(blocks, ops).blocks)));
       }
     });
   let res = await ask(first);
@@ -158,7 +170,7 @@ async function editBlocks(run: AssistantRun): Promise<AssistantResult> {
     steps[steps.length - 1] = { label: "Fix block numbers", state: "done" };
   }
 
-  const ops = parseOps(res.content);
+  const ops = opsFix(run, parseOps(res.content));
   if (ops.length === 0) {
     run.hooks.setDoc(run.markdown);
     if (res.aborted) return unchanged(run, "Stopped. Nothing was changed.", true);
@@ -267,6 +279,7 @@ async function writeNew(run: AssistantRun): Promise<AssistantResult> {
   if (title !== run.title) run.hooks.setTitle(title);
 
   // 2. the sections, one request each
+  const fix = widgetFix(run);
   const bodies: string[] = plan.sections.map(() => "");
   const stepsNow = (active: number): Step[] => [
     { label: "Plan the document", state: "done" },
@@ -291,11 +304,12 @@ async function writeNew(run: AssistantRun): Promise<AssistantResult> {
       maxTokens: 1200,
       signal: run.signal,
       onContent: (raw) => {
-        bodies[i] = cleanSectionBody(raw, sec.heading);
-        run.hooks.setDoc(renderPlan(plan, bodies));
+        bodies[i] = fix(cleanSectionBody(raw, sec.heading));
+        // a widget that is still being written shows progress, not a wall of code
+        run.hooks.setDoc(renderPlan(plan, bodies.map(previewWithProgress)));
       }
     });
-    bodies[i] = cleanSectionBody(res.content, sec.heading);
+    bodies[i] = fix(cleanSectionBody(res.content, sec.heading));
     if (res.aborted) {
       stopped = true;
       break;

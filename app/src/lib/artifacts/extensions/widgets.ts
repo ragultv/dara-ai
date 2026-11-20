@@ -1,6 +1,6 @@
 import { Extension } from "@tiptap/react";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
-import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 // Widgets: a fenced code block whose language is `widget` is a small interactive piece (a calculator, a chart, a checklist...) written as
 // one self-contained HTML page with its own CSS and JavaScript. It is shown live under its code, in a sandboxed frame: scripts run, but
@@ -100,14 +100,23 @@ function buildWidget(code: string, index: number, toggle: () => void): HTMLEleme
 export const Widgets = Extension.create({
   name: "widgets",
   addProseMirrorPlugins() {
+    let viewRef: EditorView | null = null;
     return [
       new Plugin<WidgetState>({
         key: widgetsKey,
+        view: (v) => {
+          viewRef = v;
+          return {
+            destroy() {
+              viewRef = null;
+            }
+          };
+        },
         state: {
           init: () => ({ shown: new Set<number>() }),
           apply(tr, value) {
-            const t = tr.getMeta(widgetsKey) as { toggle: number } | undefined;
-            if (!t) return value;
+            const t = tr.getMeta(widgetsKey) as { toggle?: number } | undefined;
+            if (t?.toggle === undefined) return value;
             const next = new Set(value.shown);
             if (next.has(t.toggle)) next.delete(t.toggle);
             else next.add(t.toggle);
@@ -115,6 +124,17 @@ export const Widgets = Extension.create({
           }
         },
         props: {
+          // focus moving in or out of a widget's code opens or closes it, so redraw then
+          handleDOMEvents: {
+            focus: (view) => {
+              view.dispatch(view.state.tr.setMeta(widgetsKey, { refresh: true }));
+              return false;
+            },
+            blur: (view) => {
+              view.dispatch(view.state.tr.setMeta(widgetsKey, { refresh: true }));
+              return false;
+            }
+          },
           decorations(state) {
             const { shown } = widgetsKey.getState(state)!;
             const decos: Decoration[] = [];
@@ -126,7 +146,10 @@ export const Widgets = Extension.create({
               const code = node.textContent;
               // the code is open when asked for, and always while the cursor is inside it (an empty widget has to be typed into)
               const sel = state.selection;
-              const inside = sel.from > offset && sel.to < offset + node.nodeSize;
+              const inside =
+                (viewRef?.hasFocus() ?? false) &&
+                sel.from > offset &&
+                sel.to < offset + node.nodeSize;
               const open = shown.has(i) || inside;
               decos.push(
                 Decoration.node(offset, offset + node.nodeSize, {

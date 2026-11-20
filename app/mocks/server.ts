@@ -70,7 +70,7 @@ export function createMockServer(options: MockServerOptions = {}): {
     // Enable CORS for testing & local webview dev
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Dara-Name");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);

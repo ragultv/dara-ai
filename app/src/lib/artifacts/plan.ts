@@ -18,7 +18,7 @@ export const MAX_SECTIONS = 8;
 
 /** The user asks for something interactive (a widget, calculator, chart, converter, quiz, timer...). */
 export function wantsWidget(instruction: string): boolean {
-  return /\b(widget|interactive|calculator|converter|simulator|quiz|timer|slider|demo|playground|visuali[sz]er)\b/i.test(
+  return /\b(widgets?|interactive|calculators?|converters?|simulators?|quiz(?:zes)?|timers?|sliders?|demos?|playgrounds?|visuali[sz]ers?|charts?|graphs?)\b/i.test(
     instruction
   );
 }

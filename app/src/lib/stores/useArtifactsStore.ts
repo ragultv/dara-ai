@@ -1,12 +1,14 @@
 import { create } from "zustand";
 import { newId, storeApi } from "../api/store-api.ts";
 import { ApiError } from "../api/errors.ts";
+import { unauthorizedMessage } from "../artifacts/errors.ts";
 import type { ArtifactKind, DbArtifact, DbArtifactSummary } from "../api/types.ts";
 
 // Artifacts (docs/ui/09-artifacts.md): the gallery list and the one open document. The database is the source of truth; the open
 // document is edited in memory and written back a moment after the last keystroke (debounced PATCH), and always when it is left.
 
 function userFacingError(err: unknown): { message: string } {
+  if (err instanceof ApiError && err.status === 401) return { message: unauthorizedMessage() };
   return { message: err instanceof Error && err.message ? err.message : "Something went wrong" };
 }
 

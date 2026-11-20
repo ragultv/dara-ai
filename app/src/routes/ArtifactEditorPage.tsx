@@ -30,6 +30,11 @@ import { Button } from "../lib/ui/Button.tsx";
 import { Dialog } from "../lib/ui/Dialog.tsx";
 import { Skeleton } from "../lib/ui/Skeleton.tsx";
 import { toast } from "../lib/ui/Toast.tsx";
+import { storeApi } from "../lib/api/store-api.ts";
+import { buildDocx, readExportImage, type PMNode } from "../lib/artifacts/export/docx.ts";
+import { downloadBlob } from "../lib/artifacts/export/download.ts";
+import { printDocument } from "../lib/artifacts/export/print.ts";
+import type { DbArtifactComment } from "../lib/api/types.ts";
 
 const SAVE_TEXT = { idle: "", saving: "Saving...", saved: "Saved", error: "Not saved" } as const;
 
@@ -129,21 +134,60 @@ const DocView: React.FC = () => {
       }
     });
 
+  /** A comment that could not be saved, so Dara can still be asked about it (her answer then goes to the chat only). */
+  const unsaved = (
+    body: string,
+    extra: { quote?: string; nth?: number; parent_id?: string | null }
+  ): DbArtifactComment => ({
+    id: "unsaved",
+    parent_id: extra.parent_id ?? null,
+    author: "user",
+    body,
+    quote: extra.quote ?? "",
+    nth: extra.nth ?? 0,
+    resolved: false,
+    created_at: Date.now(),
+    updated_at: Date.now()
+  });
+  const saveProblem = () => {
+    const why = useCommentsStore.getState().error ?? "The comment could not be saved.";
+    toast.show(`${why} Dara can still answer; the comment will not be kept.`, "error");
+  };
+
   const submitDraft = async (body: string, askDara: boolean) => {
     if (!draft) return;
     const c = await useCommentsStore.getState().add({ body, quote: draft.quote, nth: draft.nth });
     setDraft(null);
-    if (!c) return;
+    if (!c) {
+      saveProblem();
+      if (askDara)
+        void send(commentInstruction({ root: unsaved(body, draft), replies: [] }), {
+          display: `Comment: ${body.slice(0, 100)}`
+        });
+      return;
+    }
     useCommentsStore.getState().setActive(c.id);
     if (askDara) askAboutThread(c.id, { root: c, replies: [] }, `Comment: ${body.slice(0, 100)}`);
   };
 
   const replyToThread = async (thread: Thread, body: string) => {
     const c = await useCommentsStore.getState().add({ body, parent_id: thread.root.id });
-    if (!c) return;
     const daraTookPart =
       thread.root.author === "dara" || thread.replies.some((r) => r.author === "dara");
-    if (daraTookPart || mentionsDara(body))
+    const asks = daraTookPart || mentionsDara(body);
+    if (!c) {
+      saveProblem();
+      if (asks)
+        void send(
+          commentInstruction({
+            root: thread.root,
+            replies: [...thread.replies, unsaved(body, { parent_id: thread.root.id })]
+          }),
+          { display: `Reply: ${body.slice(0, 100)}` }
+        );
+      return;
+    }
+    if (asks)
       askAboutThread(
         thread.root.id,
         { root: thread.root, replies: [...thread.replies, c] },
@@ -190,12 +234,34 @@ const DocView: React.FC = () => {
 
   const exportMarkdown = () => {
     const body = `${doc.title ? `# ${doc.title}\n\n` : ""}${doc.content}`;
-    const url = URL.createObjectURL(new Blob([body], { type: "text/markdown" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = exportFileName(doc.title);
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadBlob(new Blob([body], { type: "text/markdown" }), exportFileName(doc.title));
+  };
+
+  /** Word: a real .docx with the page's structure and look; images are included when Word can show them (PNG, JPEG, GIF). */
+  const exportWord = async () => {
+    if (!editor) return;
+    try {
+      const blob = await buildDocx(editor.getJSON() as PMNode, {
+        title: doc.title,
+        loadImage: async (assetId) => {
+          try {
+            return await readExportImage(await storeApi.getArtifactAsset(doc.id, assetId));
+          } catch {
+            return null;
+          }
+        }
+      });
+      downloadBlob(blob, exportFileName(doc.title, "docx"));
+    } catch {
+      toast.show("The Word file could not be created.", "error");
+    }
+  };
+
+  /** PDF: the page is printed in its own look; choose "Save as PDF" in the print window. */
+  const exportPdf = () => {
+    if (!editor) return;
+    toast.show('In the print window, choose "Save as PDF".', "info");
+    void printDocument(editor, doc.title);
   };
 
   return (
@@ -242,6 +308,8 @@ const DocView: React.FC = () => {
                         if (id) navigate("artifact", id);
                       }
                     },
+                    { label: "Export as PDF", icon: "file-text", run: exportPdf },
+                    { label: "Export as Word", icon: "file", run: exportWord },
                     { label: "Export as Markdown", icon: "download", run: exportMarkdown }
                   ].map((item) => (
                     <button

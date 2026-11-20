@@ -26,6 +26,7 @@ export class DaraApiClient {
   private baseUrl: string;
   private apiKey?: string | undefined;
   private defaultTimeoutMs: number;
+  private authRefresher?: (() => Promise<boolean>) | undefined;
 
   constructor(config: ClientConfig = { baseUrl: "http://127.0.0.1:11435" }) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -38,13 +39,21 @@ export class DaraApiClient {
     this.apiKey = apiKey;
   }
 
+  /**
+   * A function that fetches the engine's current key (the desktop app generates a new one each time it restarts the engine).
+   * When a request is answered 401 it is called once; if it returns true the request is repeated with the new key.
+   */
+  setAuthRefresher(fn: (() => Promise<boolean>) | undefined): void {
+    this.authRefresher = fn;
+  }
+
   getBaseUrl(): string {
     return this.baseUrl;
   }
 
   async request<T>(
     endpoint: string,
-    options: RequestInit & { timeoutMs?: number | undefined } = {}
+    options: RequestInit & { timeoutMs?: number | undefined; retriedAuth?: boolean } = {}
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
     const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
@@ -82,6 +91,11 @@ export class DaraApiClient {
 
     try {
       const response = await fetch(url, fetchOptions);
+
+      if (response.status === 401 && this.authRefresher && !options.retriedAuth) {
+        const refreshed = await this.authRefresher().catch(() => false);
+        if (refreshed) return await this.request<T>(endpoint, { ...options, retriedAuth: true });
+      }
 
       if (!response.ok) {
         // read the body once (json() would use it up and leave nothing for text())
