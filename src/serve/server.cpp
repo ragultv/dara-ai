@@ -951,7 +951,7 @@ int dara_serve_main(int argc, char** argv) {
         if (!o.empty()) {
             res.set_header("Access-Control-Allow-Origin", o);
             res.set_header("Vary", "Origin");
-            res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+            res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Dara-Name");
             res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
         }
         if (req.method == "OPTIONS") { res.status = 204; return httplib::Server::HandlerResponse::Handled; }
