@@ -176,3 +176,13 @@ export type DbArtifactVersionSummary = ArtifactVersionSummary;
 export type DbArtifactVersion = ArtifactVersion;
 export type DbArtifactVersionsResponse = ArtifactVersionsList;
 export type ArtifactRestore = { rev: number };
+// chat, comments, images and video that belong to an artifact (10-artifact-collab.md)
+export interface ArtifactChatRow { id: string; seq: number; /** the app's own message object */ data: Record<string, unknown>; created_at: number; updated_at: number }
+export interface ArtifactChatList { object: "list"; data: ArtifactChatRow[]; total: number }
+export interface ArtifactComment { id: string; parent_id: string | null; author: "user" | "dara"; body: string; /** the exact text the thread points at ("" = the whole document) */ quote: string; /** which occurrence of the quote (0 = the first) */ nth: number; resolved: boolean; created_at: number; updated_at: number }
+export interface ArtifactCommentsList { object: "list"; data: ArtifactComment[]; total: number }
+export type ArtifactCommentCreate = { id?: string; parent_id?: string; author?: "user" | "dara"; body: string; quote?: string; nth?: number };
+export type ArtifactCommentPatch = { body?: string; resolved?: boolean; quote?: string; nth?: number };
+export interface ArtifactAsset { id: string; name: string; mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "video/mp4" | "video/webm"; size: number; created_at: number }
+export interface ArtifactAssetsList { object: "list"; data: ArtifactAsset[]; total: number }
+export type ArtifactDuplicate = { id?: string; title?: string };
