@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "../ui/Icon.tsx";
 import { Button } from "../ui/Button.tsx";
+import { Markdown } from "../ui/Markdown.tsx";
 import { Reasoning } from "../components/assistant-ui/Reasoning.tsx";
 import { DocHistory } from "./DocHistory.tsx";
 import { Timeline } from "../components/assistant-ui/elements/timeline.tsx";
@@ -76,7 +77,7 @@ const Assistant: React.FC<{ msg: AssistantMsg; onUndo: (id: string) => void }> =
         />
       )}
       {/* the task as a timeline; Dara's answer is written only when the task is finished */}
-      {msg.steps.length > 0 && (
+      {msg.steps.length > 0 && !msg.reasoningStreaming && (
         <Timeline
           aria-label="Progress"
           className="mb-3"
@@ -91,7 +92,13 @@ const Assistant: React.FC<{ msg: AssistantMsg; onUndo: (id: string) => void }> =
         />
       )}
       {msg.text ? (
-        <p className={msg.status === "error" ? "text-danger" : "text-text"}>{msg.text}</p>
+        msg.status === "error" ? (
+          <p className="text-danger">{msg.text}</p>
+        ) : (
+          <div className="doc-reply text-[13px] leading-relaxed text-text">
+            <Markdown content={msg.text} />
+          </div>
+        )
       ) : (
         running &&
         msg.steps.length === 0 &&
@@ -143,6 +150,7 @@ export const DocChat: React.FC<Props> = ({
 }) => {
   const messages = useDocChatStore(selectMessages(docId));
   const clearChat = useDocChatStore((s) => s.clear);
+  const saveProblem = useDocChatStore((s) => s.saveProblem[docId]);
 
   // the chat belongs to the document: read what was saved with it
   useEffect(() => {

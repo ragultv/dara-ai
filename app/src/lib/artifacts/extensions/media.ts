@@ -1,6 +1,7 @@
 import Image from "@tiptap/extension-image";
 import type { Editor } from "@tiptap/react";
 import { storeApi } from "../../api/store-api.ts";
+import { collabMessage } from "../errors.ts";
 
 // Images and video in a document. The file is stored with the document on this computer and the Markdown only says where it is:
 //   ![name](dara-asset:<id>)            an image
@@ -113,6 +114,6 @@ export async function insertMedia(
       .run();
     return null;
   } catch (e) {
-    return e instanceof Error && e.message ? e.message : "Could not add that file.";
+    return collabMessage(e, "images and video");
   }
 }

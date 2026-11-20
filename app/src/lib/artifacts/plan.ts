@@ -1,6 +1,6 @@
 import type { ChatMessage } from "../api/types.ts";
 import { cleanEditResult } from "./askDara.ts";
-import { numberBlocks } from "./blocks.ts";
+import { numberBlocks, type BlockOp } from "./blocks.ts";
 
 // Dara writes a document the way Claude does: first a plan (a title and the sections), then one section at a time into the page.
 // A document that already has content is edited with block operations instead (blocks.ts).
@@ -16,6 +16,28 @@ export interface Plan {
 
 export const MAX_SECTIONS = 8;
 
+/** The user asks for something interactive (a widget, calculator, chart, converter, quiz, timer...). */
+export function wantsWidget(instruction: string): boolean {
+  return /\b(widget|interactive|calculator|converter|simulator|quiz|timer|slider|demo|playground|visuali[sz]er)\b/i.test(
+    instruction
+  );
+}
+
+/**
+ * How to write a widget: a fenced code block whose language is "widget" holding one small self-contained HTML page. The app shows it live
+ * in a sandboxed frame with no network, so it must not need anything else.
+ */
+export const WIDGET_GUIDE = [
+  "For something interactive, write a widget: a fenced code block whose language is widget, like this:",
+  "```widget",
+  '<div id="app"><input id="a" type="number" value="10"> <button id="go">Calculate</button> <p id="out"></p></div>',
+  "<style>#app{display:grid;gap:8px;max-width:320px}</style>",
+  "<script>document.getElementById('go').onclick=()=>{document.getElementById('out').textContent=Number(document.getElementById('a').value)*2}</script>",
+  "```",
+  "Rules for a widget: one block, under 60 lines, plain HTML, CSS in a <style> element and JavaScript in a <script> element, no external files, no frameworks, no network, no alert() or prompt().",
+  "It must work on its own: connect every button and input with ids and event handlers in the script, and show results in the page."
+].join("\n");
+
 export const PLAN_SYSTEM_PROMPT = [
   "You are Dara, the writing assistant inside a document editor.",
   "Plan a document for the user's request. Reply with the plan only, in exactly this shape:",
@@ -25,8 +47,11 @@ export const PLAN_SYSTEM_PROMPT = [
 ].join("\n");
 
 export function buildPlanMessages(instruction: string): ChatMessage[] {
+  const widget = wantsWidget(instruction)
+    ? '\nThe user wants something interactive: make exactly one section whose heading names it (for example "Calculator widget").'
+    : "";
   return [
-    { role: "system", content: PLAN_SYSTEM_PROMPT },
+    { role: "system", content: PLAN_SYSTEM_PROMPT + widget },
     { role: "user", content: `Request: ${instruction.trim()}` }
   ];
 }
@@ -84,8 +109,14 @@ export function buildSectionMessages(
     .filter(Boolean)
     .join("\n\n")
     .slice(-1800);
+  const isWidgetSection =
+    wantsWidget(request) &&
+    /widget|calculator|converter|interactive|demo|quiz|timer|simulator/i.test(sec.heading);
+  const system = isWidgetSection
+    ? `${SECTION_SYSTEM_PROMPT}\n\nThis section is the interactive widget: write one short sentence introducing it, then the widget.\n${WIDGET_GUIDE}`
+    : SECTION_SYSTEM_PROMPT;
   return [
-    { role: "system", content: SECTION_SYSTEM_PROMPT },
+    { role: "system", content: system },
     {
       role: "user",
       content: [
@@ -132,8 +163,11 @@ export const OPS_SYSTEM_PROMPT = [
 ].join("\n");
 
 export function buildOpsMessages(blocks: string[], instruction: string): ChatMessage[] {
+  const widget = wantsWidget(instruction)
+    ? `\n\nThe user wants something interactive, so add it with @insert (a widget is ONE block).\n${WIDGET_GUIDE}`
+    : "";
   return [
-    { role: "system", content: OPS_SYSTEM_PROMPT },
+    { role: "system", content: OPS_SYSTEM_PROMPT + widget },
     {
       role: "user",
       content: `Document:\n${numberBlocks(blocks)}\n\nInstruction: ${instruction.trim()}`
@@ -160,4 +194,40 @@ export function buildRetryMessages(
       content: `That was refused and nothing was applied: block ${list} ${missing.length === 1 ? "does" : "do"} not exist. The document has ${blockCount} ${blockCount === 1 ? "block" : "blocks"}, numbered 1 to ${blockCount}. Resend all the operations, corrected, in the same format.`
     }
   ];
+}
+
+export const FINISH_SYSTEM_PROMPT = [
+  "You are Dara, the writing assistant in a document editor. You have just finished the user's task.",
+  "Write the closing message to the user in plain, friendly language: first one or two sentences saying what is now in the document, naming it;",
+  "then a short bullet list (at most five lines, each starting with '- ') of what it contains or what changed;",
+  "then one short sentence offering a next step.",
+  "Use only the facts you are given. No headings, no tables, no code, and never mention tools, blocks or operations."
+].join(" ");
+
+export function buildFinishMessages(
+  instruction: string,
+  title: string,
+  facts: string
+): ChatMessage[] {
+  return [
+    { role: "system", content: FINISH_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: `Task: ${instruction.trim().slice(0, 500)}\nDocument: ${title || "(untitled)"}\nWhat was done:\n${facts.slice(0, 2500)}`
+    }
+  ];
+}
+
+/** What an edit did, as plain facts for the closing message (the words, not the block numbers). */
+export function factsFromOps(blocks: readonly string[], ops: readonly BlockOp[]): string {
+  const short = (t: string) => t.replace(/\s+/g, " ").trim().slice(0, 160);
+  const lines: string[] = [];
+  for (const o of ops.slice(0, 8)) {
+    if (o.op === "replace")
+      lines.push(`- Changed "${short(blocks[o.n - 1] ?? "")}" to: ${short(o.text)}`);
+    else if (o.op === "insert") lines.push(`- Added: ${short(o.text)}`);
+    else if (o.op === "delete") lines.push(`- Removed: ${short(blocks[o.n - 1] ?? "")}`);
+    else lines.push(`- Asked the user in a comment: ${short(o.text)}`);
+  }
+  return lines.join("\n");
 }

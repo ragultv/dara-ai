@@ -10,6 +10,7 @@ import { TableControls } from "../lib/artifacts/TableControls.tsx";
 import { SelectionMenu } from "../lib/artifacts/SelectionMenu.tsx";
 import { DocChat, type PanelTab } from "../lib/artifacts/DocChat.tsx";
 import { DocComments } from "../lib/artifacts/DocComments.tsx";
+import { CommentComposer, ThreadPopover } from "../lib/artifacts/CommentPopovers.tsx";
 import {
   findQuote,
   quoteForSelection,
@@ -46,6 +47,8 @@ const DocView: React.FC = () => {
   const [chatOpen, setChatOpen] = useState(true);
   const [panelTab, setPanelTab] = useState<PanelTab>("chat");
   const [draft, setDraft] = useState<{ quote: string; nth: number } | null>(null);
+  const draftRef = useRef<{ quote: string; nth: number } | null>(null);
+  const [threadOpen, setThreadOpen] = useState(false);
   const [prefill, setPrefill] = useState<{ text: string; nonce: number } | null>(null);
   const showPanel = (tab: PanelTab) => {
     setChatOpen(true);
@@ -57,15 +60,20 @@ const DocView: React.FC = () => {
     onChange: (md) => setContent(md),
     docId: doc.id,
     comments: {
-      getAnchors: () =>
-        useCommentsStore
+      getAnchors: () => [
+        ...useCommentsStore
           .getState()
           .items.filter((c) => c.parent_id === null && !c.resolved && c.quote)
           .map((c) => ({ id: c.id, quote: c.quote, nth: c.nth })),
+        ...(draftRef.current
+          ? [{ id: "draft", quote: draftRef.current.quote, nth: draftRef.current.nth }]
+          : [])
+      ],
       getActive: () => useCommentsStore.getState().activeId,
       onSelect: (id) => {
+        if (id === "draft") return;
         useCommentsStore.getState().setActive(id);
-        showPanel("comments");
+        setThreadOpen(true);
       }
     },
     onMediaProblem: (m) => toast.show(m, "error")
@@ -85,11 +93,17 @@ const DocView: React.FC = () => {
     return () => useCommentsStore.getState().reset();
   }, [doc.id]);
   useEffect(() => {
+    draftRef.current = draft;
     if (editor) refreshCommentMarks(editor);
-  }, [editor, comments, activeThread]);
+  }, [editor, comments, activeThread, draft]);
   const openThreads = useMemo(
     () => buildThreads(comments).filter((t) => !t.root.resolved).length,
     [comments]
+  );
+
+  const openThread = useMemo(
+    () => buildThreads(comments).find((t) => t.root.id === activeThread) ?? null,
+    [comments, activeThread]
   );
 
   const startComment = () => {
@@ -99,8 +113,8 @@ const DocView: React.FC = () => {
       toast.show("Select some words, or put the cursor in a paragraph, to comment on it.", "info");
       return;
     }
+    setThreadOpen(false);
     setDraft({ quote: q.quote, nth: q.nth });
-    showPanel("comments");
   };
 
   /** Wakes Dara for a thread: she reads it, changes the document if it calls for that, and answers in the thread. */
@@ -146,6 +160,7 @@ const DocView: React.FC = () => {
     }
     editor.chain().focus().setTextSelection(hit).scrollIntoView().run();
     useCommentsStore.getState().setActive(root.id);
+    setThreadOpen(true);
   };
 
   const askDara = () => {
@@ -305,6 +320,30 @@ const DocView: React.FC = () => {
                 {/* the selection menu is moved out of this wrapper by its tooltip: keep it before anything React adds or removes */}
                 <SelectionMenu editor={editor} onComment={startComment} />
                 <TableControls editor={editor} container={pageEl} disabled={busy} />
+                {draft && (
+                  <CommentComposer
+                    editor={editor}
+                    container={pageEl}
+                    draft={draft}
+                    modelLoaded={modelLoaded}
+                    busy={busy}
+                    onSubmit={(b, ask) => void submitDraft(b, ask)}
+                    onCancel={() => setDraft(null)}
+                  />
+                )}
+                {!draft && threadOpen && openThread && (
+                  <ThreadPopover
+                    editor={editor}
+                    container={pageEl}
+                    thread={openThread}
+                    busy={busy}
+                    onReply={(b) => void replyToThread(openThread, b)}
+                    onClose={() => {
+                      setThreadOpen(false);
+                      useCommentsStore.getState().setActive(null);
+                    }}
+                  />
+                )}
               </div>
             ) : (
               <Skeleton className="h-40 w-full" />
@@ -345,11 +384,7 @@ const DocView: React.FC = () => {
           prefill={prefill}
           commentsSlot={
             <DocComments
-              draft={draft}
               busy={busy}
-              modelLoaded={modelLoaded}
-              onDraftSubmit={(b, ask) => void submitDraft(b, ask)}
-              onDraftCancel={() => setDraft(null)}
               onReply={(t, b) => void replyToThread(t, b)}
               onFocusThread={focusThread}
             />

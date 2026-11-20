@@ -7,6 +7,7 @@ import { Button } from "../ui/Button.tsx";
 import { Skeleton } from "../ui/Skeleton.tsx";
 import { toast } from "../ui/Toast.tsx";
 import { relativeTime } from "./format.ts";
+import { collabMessage } from "./errors.ts";
 
 interface Props {
   docId: string;
@@ -23,6 +24,7 @@ export const DocHistory: React.FC<Props> = ({ docId, updatedAt, onRestored }) =>
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<number | null>(null);
   const [preview, setPreview] = useState<DbArtifactVersion | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -31,7 +33,7 @@ export const DocHistory: React.FC<Props> = ({ docId, updatedAt, onRestored }) =>
       setItems(res.data);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error && e.message ? e.message : "Could not load the history");
+      setError(collabMessage(e, "version history"));
     }
   }, [docId]);
 
@@ -40,15 +42,17 @@ export const DocHistory: React.FC<Props> = ({ docId, updatedAt, onRestored }) =>
   }, [load, updatedAt]);
 
   useEffect(() => {
+    setPreviewError(null);
     if (picked === null) {
       setPreview(null);
       return;
     }
     let cancelled = false;
+    setPreview(null);
     storeApi
       .getArtifactVersion(docId, picked)
       .then((v) => !cancelled && setPreview(v))
-      .catch(() => !cancelled && setPreview(null));
+      .catch((e) => !cancelled && setPreviewError(collabMessage(e, "version history")));
     return () => {
       cancelled = true;
     };
@@ -100,10 +104,19 @@ export const DocHistory: React.FC<Props> = ({ docId, updatedAt, onRestored }) =>
         }`}
       >
         <li>
-          <div className="rounded-lg border border-border bg-surface-raised px-3 py-2">
+          <button
+            type="button"
+            aria-pressed={picked === null}
+            onClick={() => setPicked(null)}
+            className={`w-full cursor-pointer rounded-lg border px-3 py-2 text-left transition-colors ${
+              picked === null
+                ? "border-border-strong bg-primary-subtle"
+                : "border-transparent hover:bg-surface-raised"
+            }`}
+          >
             <p className="text-xs font-semibold text-text">Current version</p>
             <p className="text-[11px] text-text-muted">Saved {relativeTime(updatedAt)}</p>
-          </div>
+          </button>
         </li>
         {items.length === 0 && (
           <li className="px-1 pt-3 text-xs leading-relaxed text-text-muted">
@@ -136,15 +149,26 @@ export const DocHistory: React.FC<Props> = ({ docId, updatedAt, onRestored }) =>
 
       {picked !== null && (
         <div className="flex min-h-0 flex-1 flex-col border-t border-border">
+          <p className="shrink-0 border-b border-border bg-surface-raised px-4 py-2 text-[11px] text-text-muted">
+            Previewing an earlier version. Your document has not changed.
+          </p>
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-[13px] custom-scrollbar">
-            {preview ? (
+            {previewError ? (
+              <p role="alert" className="text-xs text-danger">
+                {previewError}
+              </p>
+            ) : preview ? (
               <>
                 {preview.title && (
                   <p className="mb-2 font-[family-name:var(--font-reply)] text-base font-semibold text-text">
                     {preview.title}
                   </p>
                 )}
-                <Markdown content={preview.content} />
+                {preview.content.trim() ? (
+                  <Markdown content={preview.content} />
+                ) : (
+                  <p className="text-xs text-text-muted">This version is empty.</p>
+                )}
               </>
             ) : (
               <Skeleton className="h-24 w-full" />
@@ -152,7 +176,7 @@ export const DocHistory: React.FC<Props> = ({ docId, updatedAt, onRestored }) =>
           </div>
           <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border p-3">
             <Button variant="ghost" size="sm" onClick={() => setPicked(null)}>
-              Close preview
+              Back to current
             </Button>
             <Button
               variant="primary"

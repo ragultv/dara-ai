@@ -11,11 +11,13 @@ import {
 } from "./blocks.ts";
 import { complete } from "./completion.ts";
 import {
+  buildFinishMessages,
   buildOpsMessages,
   buildRetryMessages,
   buildPlanMessages,
   buildSectionMessages,
   cleanSectionBody,
+  factsFromOps,
   parsePlan,
   renderPlan,
   type Plan
@@ -40,6 +42,8 @@ export interface AssistantHooks {
   setTitle: (title: string) => void;
   steps: (steps: Step[]) => void;
   reasoning: (text: string, streaming: boolean, ms: number) => void;
+  /** the closing message as it is being written (shown in the chat only once the task is finished) */
+  say?: (text: string) => void;
 }
 
 export interface AssistantRun {
@@ -55,8 +59,10 @@ export interface AssistantResult {
   /** the final document body */
   markdown: string;
   title: string;
-  /** what Dara tells the user in the chat */
+  /** a one-line outcome ("Changed 2 blocks."); this is what a comment thread gets */
   summary: string;
+  /** the closing message for the chat, written by the model once the task is done (Markdown); the chat falls back to `summary` */
+  reply?: string;
   changed: boolean;
   stopped: boolean;
   /** questions Dara wants to put to the user as comments, each anchored to words in the document */
@@ -71,6 +77,46 @@ const unchanged = (run: AssistantRun, summary: string, stopped: boolean): Assist
   stopped,
   questions: []
 });
+
+/**
+ * The closing message, like Claude's: once the task is finished Dara says what is now in the document and offers a next step. It is a
+ * short extra request, without thinking; if it fails or is stopped the one-line summary is used instead.
+ */
+async function finishReply(
+  run: AssistantRun,
+  steps: Step[],
+  title: string,
+  facts: string
+): Promise<string | undefined> {
+  const last = steps.length;
+  run.hooks.steps([...steps, { label: "Write the summary", state: "active" }]);
+  let text: string | undefined;
+  try {
+    const res = await complete({
+      messages: buildFinishMessages(run.instruction, title, facts),
+      temperature: 0.5,
+      maxTokens: 320,
+      signal: run.signal,
+      onContent: (raw) => run.hooks.say?.(cleanReply(raw))
+    });
+    const cleaned = cleanReply(res.content);
+    if (cleaned && !res.aborted) text = cleaned;
+  } catch {
+    // the one-line summary will do
+  }
+  const done = [...steps, { label: "Write the summary", state: "done" as const }];
+  run.hooks.steps(done);
+  void last;
+  return text;
+}
+
+/** No fence around the message and no leading blank lines. */
+function cleanReply(raw: string): string {
+  return raw
+    .replace(/^\s*```(?:markdown|md)?[ \t]*\n/i, "")
+    .replace(/\n?```\s*$/, "")
+    .trim();
+}
 
 export async function runAssistant(run: AssistantRun): Promise<AssistantResult> {
   return splitBlocks(run.markdown).length === 0 ? writeNew(run) : editBlocks(run);
@@ -117,12 +163,13 @@ async function editBlocks(run: AssistantRun): Promise<AssistantResult> {
     run.hooks.setDoc(run.markdown);
     if (res.aborted) return unchanged(run, "Stopped. Nothing was changed.", true);
     // The model answered in words instead of operations (a question about the document, or it misunderstood): show that as the reply.
-    const said = res.content.trim().slice(0, 600);
-    return unchanged(
+    const said = res.content.trim().slice(0, 1200);
+    const out = unchanged(
       run,
       said ? said : "I did not find anything to change. Try describing the change differently.",
       false
     );
+    return said ? { ...out, reply: said } : out;
   }
   const applied = applyOps(blocks, ops);
   const markdown = joinBlocks(applied.blocks);
@@ -139,7 +186,19 @@ async function editBlocks(run: AssistantRun): Promise<AssistantResult> {
     summary += ` Skipped ${applied.skipped} ${applied.skipped === 1 ? "edit" : "edits"} that named a block that does not exist.`;
   if (res.aborted)
     summary = `Stopped. ${changed ? "Kept what was done so far. " : ""}${summary}`.trim();
-  return { markdown, title: run.title, summary, changed, stopped: res.aborted, questions };
+  const out: AssistantResult = {
+    markdown,
+    title: run.title,
+    summary,
+    changed,
+    stopped: res.aborted,
+    questions
+  };
+  if (!res.aborted && (changed || questions.length)) {
+    const reply = await finishReply(run, steps, run.title, factsFromOps(blocks, ops));
+    if (reply) out.reply = reply;
+  }
+  return out;
 }
 
 async function writeNew(run: AssistantRun): Promise<AssistantResult> {
@@ -260,7 +319,7 @@ async function writeNew(run: AssistantRun): Promise<AssistantResult> {
       ? `Stopped after ${n} of ${plan.sections.length} sections. Kept what was written.`
       : "Stopped before any section was written."
     : `Wrote ${title ? `"${title}"` : "the document"} in ${n} ${n === 1 ? "section" : "sections"}.`;
-  return {
+  const out: AssistantResult = {
     markdown,
     title: n > 0 ? title : run.title,
     summary,
@@ -268,4 +327,12 @@ async function writeNew(run: AssistantRun): Promise<AssistantResult> {
     stopped,
     questions: []
   };
+  if (!stopped && n > 0) {
+    const facts = kept
+      .map((x) => `- ${x.s.heading}: ${x.body.replace(/\s+/g, " ").slice(0, 140)}`)
+      .join("\n");
+    const reply = await finishReply(run, stepsNow(plan.sections.length), title, facts);
+    if (reply) out.reply = reply;
+  }
+  return out;
 }
