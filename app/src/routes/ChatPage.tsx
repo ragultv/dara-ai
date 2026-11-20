@@ -266,7 +266,7 @@ const ConversationItem: React.FC<{
       onClick={onSelect}
       className={`group flex items-center justify-between px-2.5 py-2 rounded-lg text-xs cursor-pointer transition-colors border ${
         isActive
-          ? "bg-surface-raised text-text font-bold border-border shadow-xs"
+          ? "bg-surface-raised text-text font-semibold border-transparent"
           : "border-transparent text-text-muted hover:text-text hover:bg-surface-raised/60"
       }`}
     >
@@ -274,7 +274,7 @@ const ConversationItem: React.FC<{
         <Icon
           name="message-square"
           size={13}
-          className={isActive ? "text-primary" : "text-text-subtle"}
+          className={isActive ? "text-text" : "text-text-subtle"}
         />
         <span className="truncate">{conv.title || "New Chat"}</span>
       </div>

@@ -471,6 +471,7 @@ void GemmaModel::release_raw() {
     // Idempotent: runs from the destructor AND from a constructor that throws part-way (its destructor never runs).
     for (void*& e : prof_events_) if (e) { cudaEventDestroy(static_cast<cudaEvent_t>(e)); e = nullptr; }
     if (h_pos_) { if (cudaFreeHost(h_pos_) != cudaSuccess) cudaGetLastError(); h_pos_ = nullptr; }
+    if (h_logits_) { if (cudaFreeHost(h_logits_) != cudaSuccess) cudaGetLastError(); h_logits_ = nullptr; }
     for (int k = 0; k < 2; ++k) {
         if (copy_done_[k]) { cudaEventDestroy(static_cast<cudaEvent_t>(copy_done_[k])); copy_done_[k] = nullptr; }
         if (compute_done_[k]) { cudaEventDestroy(static_cast<cudaEvent_t>(compute_done_[k])); compute_done_[k] = nullptr; }
@@ -742,7 +743,14 @@ std::vector<float> GemmaModel::embed_row_raw(int32_t token) const {
 int GemmaModel::forward_greedy(int32_t token, RunStats* stats, std::vector<float>* logits) {
     int next = 0;
     std::vector<float> lg = forward_impl(&token, 1, 0, nullptr, stats, logits != nullptr, &next);
-    if (logits) *logits = std::move(lg);
+    if (logits) {
+        if (lg.empty() && h_logits_) {   // staged through the pinned row: the caller's vector keeps its allocation between tokens
+            logits->resize(static_cast<size_t>(cfg_.vocab));
+            std::memcpy(logits->data(), h_logits_, static_cast<size_t>(cfg_.vocab) * sizeof(float));
+        } else {
+            *logits = std::move(lg);
+        }
+    }
     return next;
 }
 
@@ -968,7 +976,14 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
         cuda_check(cudaMemcpy(feats_out->data(), xf, TH * 4, cudaMemcpyDeviceToHost), "features copy");
     }
     const int n_out = T - logits_from;
-    std::vector<float> logits(copy_logits ? static_cast<size_t>(n_out) * cfg_.vocab : 0);
+    // single-token sampled decode: stage the row in pinned memory (allocated once) instead of a fresh 1 MB vector + pageable copy per token
+    if (copy_logits && next_token && n_out == 1 && !h_logits_) {
+        void* hp = nullptr;
+        if (cudaHostAlloc(&hp, static_cast<size_t>(cfg_.vocab) * sizeof(float), cudaHostAllocDefault) == cudaSuccess) h_logits_ = static_cast<float*>(hp);
+        else cudaGetLastError();
+    }
+    const bool pinned_row = copy_logits && next_token && n_out == 1 && h_logits_ != nullptr;
+    std::vector<float> logits(copy_logits && !pinned_row ? static_cast<size_t>(n_out) * cfg_.vocab : 0);
     if (n_out > 0) {
         float* xn = pool_.get<float>(46, static_cast<size_t>(n_out) * H);
         float* dy = pool_.get<float>(47, static_cast<size_t>(n_out) * cfg_.vocab);
@@ -990,7 +1005,8 @@ std::vector<float> GemmaModel::forward_impl(const int32_t* tokens, int T, int lo
             ids_out->assign(static_cast<size_t>(n_out), 0);
             cuda_check(cudaMemcpy(ids_out->data(), d_ids, static_cast<size_t>(n_out) * sizeof(int), cudaMemcpyDeviceToHost), "ids copy");
         }
-        if (copy_logits) cuda_check(cudaMemcpy(logits.data(), dy, logits.size() * 4, cudaMemcpyDeviceToHost), "logits copy");
+        if (pinned_row) cuda_check(cudaMemcpy(h_logits_, dy, static_cast<size_t>(cfg_.vocab) * 4, cudaMemcpyDeviceToHost), "logits copy");
+        else if (copy_logits) cuda_check(cudaMemcpy(logits.data(), dy, logits.size() * 4, cudaMemcpyDeviceToHost), "logits copy");
     }
     rs.head_seconds = since(t0);
     sample_free();

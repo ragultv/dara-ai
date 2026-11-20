@@ -6,6 +6,7 @@ import { Badge } from "../lib/ui/Badge.tsx";
 import { Button } from "../lib/ui/Button.tsx";
 import { Skeleton } from "../lib/ui/Skeleton.tsx";
 import { ProgressBar } from "../lib/ui/ProgressBar.tsx";
+import { StorageChooser } from "../lib/features/models/StorageChooser.tsx";
 import { DownloadProgress } from "../lib/features/models/DownloadProgress.tsx";
 import {
   diskCheck,
@@ -48,7 +49,7 @@ export const Onboarding: React.FC = () => {
     <div className="flex-1 overflow-y-auto">
       <div className="flex flex-col items-center p-8 max-w-5xl mx-auto space-y-8 text-left select-text">
         <header className="text-center space-y-3 max-w-xl">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-primary-subtle border border-border mx-auto">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-surface-raised border border-border mx-auto">
             <img src="/dara.png" alt="Dara" className="w-8 h-8 object-contain" />
           </div>
           <h1 className="text-3xl font-bold tracking-tight text-text">Welcome to Dara</h1>
@@ -57,6 +58,8 @@ export const Onboarding: React.FC = () => {
             this computer. The recommended one fits your GPU.
           </p>
         </header>
+
+        {!isSettingUp && <StorageChooser />}
 
         {(setupError || error) && (
           <div
@@ -101,7 +104,7 @@ export const Onboarding: React.FC = () => {
                 key={model.id}
                 aria-labelledby={`onb-${model.id}`}
                 className={`flex flex-col justify-between gap-4 bg-surface border rounded-2xl p-5 ${
-                  isRecommended ? "border-primary ring-1 ring-primary" : "border-border"
+                  isRecommended ? "border-border-strong " : "border-border"
                 }`}
               >
                 <div className="space-y-3">
@@ -135,9 +138,14 @@ export const Onboarding: React.FC = () => {
                       <span className="font-mono">
                         {formatMb(needMb > 0 ? needMb : d.download_size_mb)}
                       </span>{" "}
-                      (model and image support). Up to{" "}
-                      <span className="font-mono">{formatContext(d.context)}</span> tokens of
-                      context.
+                      (model and image support).
+                      {typeof d.context === "number" && (
+                        <>
+                          {" "}
+                          Up to <span className="font-mono">{formatContext(d.context)}</span>{" "}
+                          tokens of context.
+                        </>
+                      )}
                     </p>
                   </div>
                 </div>

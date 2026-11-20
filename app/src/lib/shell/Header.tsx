@@ -60,7 +60,7 @@ export const Header: React.FC = () => {
             aria-expanded={dropdownOpen}
             aria-haspopup="true"
           >
-            <Icon name="cpu" size={13} className="text-primary" />
+            <Icon name="cpu" size={13} className="text-text" />
             <span className="max-w-[140px] truncate">
               {activeModel?.dara.name ?? (activeModel?.id ? activeModel.id : "Switch Model")}
             </span>
@@ -99,7 +99,7 @@ export const Header: React.FC = () => {
                           disabled={!isInstalled}
                           className={`w-full text-left px-2.5 py-2 rounded-lg text-xs transition-colors flex items-center justify-between gap-2 ${
                             isLoaded
-                              ? "bg-primary/10 text-primary font-bold"
+                              ? "bg-text/10 text-text font-bold"
                               : isInstalled
                                 ? "text-text hover:bg-surface cursor-pointer"
                                 : "text-text-muted opacity-50 cursor-not-allowed"
@@ -114,7 +114,7 @@ export const Header: React.FC = () => {
                             </div>
                           </div>
                           {isLoaded ? (
-                            <span className="px-1.5 py-0.5 text-[9px] rounded-md font-bold bg-primary text-white">
+                            <span className="px-1.5 py-0.5 text-[9px] rounded-md font-bold bg-text text-bg">
                               Active
                             </span>
                           ) : isInstalled ? (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, type ReactNode } from "react";
 import { useRouter } from "./lib/router/useRouter.ts";
 import { useThemeStore } from "./lib/stores/useThemeStore.ts";
 import { useServerStore } from "./lib/stores/useServerStore.ts";
@@ -9,6 +9,7 @@ import { useChatStore } from "./lib/stores/useChatStore.ts";
 import { LeftRail } from "./lib/shell/LeftRail.tsx";
 import { Header } from "./lib/shell/Header.tsx";
 import { StatusPill } from "./lib/shell/StatusPill.tsx";
+import { TitleBar, isTauriWindow } from "./lib/shell/TitleBar.tsx";
 import { ToastContainer } from "./lib/ui/Toast.tsx";
 
 import { ChatPage } from "./routes/ChatPage.tsx";
@@ -44,6 +45,11 @@ export const App: React.FC = () => {
     });
   }, [initTheme, initServer, fetchModels, initSettings, loadConversations]);
 
+  // Pages without their own scroll container scroll inside the viewport instead of overflowing it.
+  const scrollable = (page: ReactNode) => (
+    <div className="h-full w-full overflow-y-auto custom-scrollbar">{page}</div>
+  );
+
   const renderRoute = () => {
     // If no models are installed and not on kit or settings, show onboarding
     if (
@@ -58,15 +64,15 @@ export const App: React.FC = () => {
 
     switch (currentRoute) {
       case "models":
-        return <ModelsPage />;
+        return scrollable(<ModelsPage />);
       case "monitor":
         return <MonitorPage />;
       case "options":
-        return <OptionsPage />;
+        return scrollable(<OptionsPage />);
       case "settings":
         return <SettingsPage />;
       case "kit":
-        return <KitPage />;
+        return scrollable(<KitPage />);
       case "chat":
       default:
         return <ChatPage />;
@@ -74,23 +80,27 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-bg text-text select-text antialiased">
-      {/* Left Sidebar Navigation */}
-      <LeftRail
-        isCollapsed={isRailCollapsed}
-        onToggle={() => setIsRailCollapsed(!isRailCollapsed)}
-      />
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-bg text-text select-text antialiased">
+      {/* VS Code-style title bar (inside the desktop window only) */}
+      {isTauriWindow() && <TitleBar />}
+      <div className="flex min-h-0 flex-1">
+        {/* Left Sidebar Navigation */}
+        <LeftRail
+          isCollapsed={isRailCollapsed}
+          onToggle={() => setIsRailCollapsed(!isRailCollapsed)}
+        />
 
-      {/* Main App Container */}
-      <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative">
-        {/* Top Header */}
-        <Header />
+        {/* Main App Container */}
+        <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative">
+          {/* Top Header */}
+          <Header />
 
-        {/* Dynamic Route Viewport */}
-        <div className="flex-1 overflow-hidden relative bg-bg">{renderRoute()}</div>
+          {/* Dynamic Route Viewport */}
+          <div className="flex-1 overflow-hidden relative bg-bg">{renderRoute()}</div>
 
-        {/* Bottom Status Pill Footer */}
-        <StatusPill />
+          {/* Bottom Status Pill Footer */}
+          <StatusPill />
+        </div>
       </div>
 
       {/* Global Toast Notifications */}

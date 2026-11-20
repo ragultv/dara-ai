@@ -31,7 +31,7 @@ export const ContextBreakdown: React.FC<ContextBreakdownProps> = ({
     >
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs font-bold text-text uppercase tracking-wider">Context window</span>
-        <span className="text-xs font-mono font-bold text-primary tabular-nums">
+        <span className="text-xs font-mono font-bold text-text tabular-nums">
           {estimated ? "~" : ""}
           <NumberTicker value={used} /> / {capacity ? capacity.toLocaleString() : "-"}
         </span>
@@ -46,7 +46,7 @@ export const ContextBreakdown: React.FC<ContextBreakdownProps> = ({
         aria-label="Context window usage"
       >
         <div
-          className="h-full bg-primary transition-all duration-300 rounded-full"
+          className="h-full bg-text-muted transition-all duration-300 rounded-full"
           style={{ width: `${percent}%` }}
         />
       </div>

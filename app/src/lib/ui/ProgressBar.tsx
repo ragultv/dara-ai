@@ -26,7 +26,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
         ? "bg-warning"
         : variant === "danger"
           ? "bg-danger"
-          : "bg-primary";
+          : "bg-text";
 
   return (
     <div className={`w-full space-y-1.5 ${className}`}>

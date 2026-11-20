@@ -56,32 +56,44 @@ export const LeftRail: React.FC<LeftRailProps> = ({ isCollapsed = false, onToggl
     >
       {/* Top brand and navigation links */}
       <div className="flex flex-col p-3 space-y-4">
-        {/* Header with Dara logo & collapse toggle */}
-        <div className="flex items-center justify-between px-1.5 py-1">
-          <div className="flex items-center space-x-2.5 overflow-hidden">
-            <img src="/dara.png" alt="Dara logo" className="w-7 h-7 shrink-0 object-contain" />
-
-            {!isCollapsed && (
+        {/* Expanded: logo + name + collapse button. Collapsed: the open button takes the top spot and the logo sits below it. */}
+        {isCollapsed ? (
+          <div className="flex flex-col items-center gap-3 py-1">
+            <button
+              type="button"
+              aria-label="Expand navigation rail"
+              title="Expand sidebar"
+              onClick={onToggle}
+              className="p-2 rounded-lg text-text-muted hover:text-text hover:bg-surface-raised cursor-pointer focus-visible:outline-2 focus-visible:outline-focus"
+            >
+              <Icon name="panel-left-open" size={18} />
+            </button>
+            <img src="/dara.png" alt="Dara" className="w-7 h-7 shrink-0 object-contain" />
+          </div>
+        ) : (
+          <div className="flex items-center justify-between px-1.5 py-1">
+            <div className="flex items-center space-x-2.5 overflow-hidden">
+              <img src="/dara.png" alt="Dara logo" className="w-7 h-7 shrink-0 object-contain" />
               <div className="flex flex-col text-left">
-                <span className="text-sm font-bold tracking-tight text-text leading-tight">
+                <span className="text-text text-sm font-bold tracking-tight leading-tight">
                   DARA STUDIO
                 </span>
                 <span className="text-[10px] text-text-subtle font-medium">
                   Local GPU Inference
                 </span>
               </div>
-            )}
+            </div>
+            <button
+              type="button"
+              aria-label="Collapse navigation rail"
+              title="Collapse sidebar"
+              onClick={onToggle}
+              className="p-1.5 rounded-md text-text-subtle hover:text-text hover:bg-surface-raised cursor-pointer focus-visible:outline-2 focus-visible:outline-focus"
+            >
+              <Icon name="panel-left-close" size={16} />
+            </button>
           </div>
-
-          <button
-            type="button"
-            aria-label={isCollapsed ? "Expand navigation rail" : "Collapse navigation rail"}
-            onClick={onToggle}
-            className="p-1 rounded-md text-text-subtle hover:text-text hover:bg-surface-raised cursor-pointer focus-visible:outline-2 focus-visible:outline-focus"
-          >
-            <Icon name={isCollapsed ? "chevron-right" : "chevron-left"} size={14} />
-          </button>
-        </div>
+        )}
 
         {/* Nav buttons */}
         <nav className="flex flex-col space-y-1" aria-label="Main">
@@ -98,16 +110,16 @@ export const LeftRail: React.FC<LeftRailProps> = ({ isCollapsed = false, onToggl
                 }
                 aria-current={isActive ? "page" : undefined}
                 title={isCollapsed ? item.label : undefined}
-                className={`flex items-center space-x-3 px-3 py-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer border ${
+                className={`flex items-center ${isCollapsed ? "justify-center" : "space-x-3 px-3"} py-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer border ${
                   isActive
-                    ? "bg-surface-raised text-primary border-primary/30 shadow-xs font-bold"
+                    ? "bg-surface-raised text-text border-transparent font-bold"
                     : "border-transparent text-text-muted hover:text-text hover:bg-surface-raised/70"
                 }`}
               >
                 <Icon
                   name={item.icon}
                   size={16}
-                  className={isActive ? "text-primary" : "text-text-muted"}
+                  className={isActive ? "text-text" : "text-text-muted"}
                 />
                 {!isCollapsed && <span className="truncate">{item.label}</span>}
               </button>

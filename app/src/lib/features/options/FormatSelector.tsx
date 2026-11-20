@@ -71,13 +71,13 @@ export const FormatSelector: React.FC<Props> = ({
               onKeyDown={(e) => onKeyDown(e, i)}
               className={`text-left rounded-xl border p-3 space-y-1.5 cursor-pointer disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus ${
                 selected
-                  ? "border-primary bg-primary-subtle ring-1 ring-primary"
+                  ? "border-border-strong bg-surface-raised "
                   : "border-border bg-surface hover:bg-surface-raised"
               }`}
             >
               <span className="flex items-center justify-between gap-2">
                 <span className="text-sm font-semibold text-text">{f.name}</span>
-                {selected && <Icon name="check" size={14} className="text-primary shrink-0" />}
+                {selected && <Icon name="check" size={14} className="text-text shrink-0" />}
               </span>
               <span className="flex flex-wrap items-center gap-1.5">
                 <Badge variant={q.variant} size="sm">

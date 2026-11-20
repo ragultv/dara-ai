@@ -49,7 +49,7 @@ export const SettingsNav: React.FC<SettingsNavProps> = ({ items }) => {
               aria-current={active === item.id ? "true" : undefined}
               className={`w-full cursor-pointer rounded-lg px-3 py-2 text-left text-xs font-semibold transition-colors ${
                 active === item.id
-                  ? "bg-primary-subtle text-on-primary-subtle"
+                  ? "bg-surface-raised text-text"
                   : "text-text-muted hover:bg-surface-raised hover:text-text"
               }`}
             >

@@ -73,7 +73,7 @@ export interface ModelInfo {
     fits_gpu: "full" | "partial" | "no" | string;
     min_vram_mb: number;
     full_vram_mb: number;
-    context: number;
+    context?: number; // only present when the model is loaded
     download_size_mb: number;
     download: DownloadJob | null;
     files: ModelFile[];

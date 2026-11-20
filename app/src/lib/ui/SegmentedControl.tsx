@@ -59,7 +59,7 @@ export const SegmentedControl: React.FC<SegmentedControlProps> = ({
               onClick={() => handleSelect(opt.value)}
               className={`flex-1 py-1.5 px-3 text-center text-xs font-semibold rounded-lg transition-all cursor-pointer truncate ${
                 isSelected
-                  ? "bg-surface text-primary shadow-xs font-bold border border-primary/20"
+                  ? "bg-surface text-text shadow-xs font-bold border border-border-strong"
                   : "text-text-muted hover:text-text hover:bg-surface/50 border border-transparent"
               } ${disabled || opt.disabled ? "opacity-40 cursor-not-allowed" : ""}`}
             >

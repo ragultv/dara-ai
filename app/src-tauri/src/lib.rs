@@ -65,8 +65,76 @@ async fn restart_engine(
     manager.restart(regenerate_key.unwrap_or(false))
 }
 
+#[derive(Serialize)]
+pub struct DriveInfo {
+    /// "C:\\"
+    pub root: String,
+    pub free_gb: f64,
+    pub total_gb: f64,
+}
+
+#[cfg(windows)]
+mod drives {
+    use super::DriveInfo;
+    extern "system" {
+        fn GetLogicalDrives() -> u32;
+        fn GetDriveTypeW(root: *const u16) -> u32;
+        fn GetDiskFreeSpaceExW(dir: *const u16, avail: *mut u64, total: *mut u64, free: *mut u64) -> i32;
+    }
+    const DRIVE_FIXED: u32 = 3;
+
+    pub fn list() -> Vec<DriveInfo> {
+        let mut out = Vec::new();
+        let mask = unsafe { GetLogicalDrives() };
+        for i in 0..26u32 {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            let root = format!("{}:\\", (b'A' + i as u8) as char);
+            let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+            if unsafe { GetDriveTypeW(wide.as_ptr()) } != DRIVE_FIXED {
+                continue;
+            }
+            let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+            if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut avail, &mut total, &mut free) } != 0 {
+                let gb = 1024.0 * 1024.0 * 1024.0;
+                out.push(DriveInfo { root, free_gb: avail as f64 / gb, total_gb: total as f64 / gb });
+            }
+        }
+        out
+    }
+}
+
+#[cfg(not(windows))]
+mod drives {
+    use super::DriveInfo;
+    pub fn list() -> Vec<DriveInfo> {
+        Vec::new()
+    }
+}
+
+/// Fixed drives with their free space, so onboarding can suggest the one with room for the models.
+#[tauri::command]
+fn list_drives() -> Vec<DriveInfo> {
+    drives::list()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The 4 GB card belongs to the model and its K/V cache. Render the UI in software (CPU + system RAM) so the
+    // WebView's GPU process never takes VRAM or decode time from the engine. Must be set before the webview starts.
+    #[cfg(windows)]
+    {
+        const KEY: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+        let flags = "--disable-gpu --disable-gpu-compositing --disable-features=CalculateNativeWinOcclusion";
+        let merged = match std::env::var(KEY) {
+            Ok(v) if !v.contains("--disable-gpu") => format!("{v} {flags}"),
+            Ok(v) => v,
+            Err(_) => flags.to_string(),
+        };
+        std::env::set_var(KEY, merged);
+    }
+
     let server_manager = ServerManager::new();
     let manager_for_setup = Arc::clone(&server_manager);
     let manager_for_exit = Arc::clone(&server_manager);
@@ -78,7 +146,8 @@ pub fn run() {
             get_server_connection,
             get_engine_settings,
             set_engine_settings,
-            restart_engine
+            restart_engine,
+            list_drives
         ])
         .setup(move |_app| {
             manager_for_setup.start();

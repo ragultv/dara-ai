@@ -41,7 +41,7 @@ export const Slider: React.FC<SliderProps> = ({
         step={step}
         value={value}
         onChange={(e) => handler?.(Number(e.target.value))}
-        className="w-full accent-primary h-1.5 bg-surface-sunken rounded-lg cursor-pointer"
+        className="w-full accent-text h-1.5 bg-surface-sunken rounded-lg cursor-pointer"
       />
     </div>
   );

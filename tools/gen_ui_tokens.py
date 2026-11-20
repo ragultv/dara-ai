@@ -64,9 +64,11 @@ PURPLE = {50: (0.975, 0.012), 100: (0.948, 0.030), 200: (0.905, 0.060), 300: (0.
           700: (0.470, 0.215), 800: (0.390, 0.175), 900: (0.310, 0.125), 950: (0.225, 0.085)}
 INK = {50: (0.975, 0.004), 100: (0.950, 0.006), 200: (0.912, 0.009), 300: (0.860, 0.012), 400: (0.720, 0.016), 500: (0.585, 0.020), 600: (0.480, 0.022),
        700: (0.385, 0.024), 800: (0.300, 0.024), 900: (0.225, 0.022), 950: (0.165, 0.018)}
-scale_purple = {k: oklch_hex(L, C, HUE) for k, (L, C) in PURPLE.items()}
+# Royal violet (primary #7C3AED family). Explicit hexes: the brand palette, not a generated ramp.
+scale_purple = {50: "#F5F0FF", 100: "#EBDDFF", 200: "#D6BBFF", 300: "#B994FF", 400: "#9A6BFA", 500: "#7C3AED", 600: "#6D28D9", 700: "#5B21B6", 800: "#4C1D95",
+                900: "#2E1065", 950: "#1E0A4A"}
 scale_ink = {k: oklch_hex(L, C, HUE) for k, (L, C) in INK.items()}
-WHITE, BLACK, BLACK_UI = "#FFFFFF", "#000000", "#0B0A10"   # BLACK: logo / print; BLACK_UI: the dark theme's page background (pure black glares on LCDs)
+WHITE, BLACK, BLACK_UI = "#FFFFFF", "#000000", "#0F0F0F"   # BLACK: logo / print; BLACK_UI: the dark theme's page background (pure black glares on LCDs; this one is a purple-tinted near-black)
 
 STATUS = {   # functional colors: not brand, harmonised in lightness with the purple scale
     "success": {"light": "#15803D", "dark": "#4ADE80", "tint_light": "#ECFDF3", "tint_dark": "#0E2A1A"},
@@ -74,29 +76,30 @@ STATUS = {   # functional colors: not brand, harmonised in lightness with the pu
     "danger": {"light": "#C81E1E", "dark": "#FF8A8A", "tint_light": "#FEF0F0", "tint_dark": "#3A1212"},
 }
 
+# Purple is reserved for BUTTONS (--color-primary*): everything else (surfaces, text, borders, focus, links, selected states) is neutral grey.
 LIGHT = {
-    "bg": WHITE, "bg-subtle": scale_purple[50], "surface": WHITE, "surface-raised": WHITE, "surface-sunken": scale_ink[50],
-    "border": scale_ink[200], "border-strong": scale_ink[500],
-    "text": scale_ink[950], "text-muted": scale_ink[600], "text-subtle": scale_ink[500],
-    "primary": scale_purple[600], "primary-hover": scale_purple[700], "primary-active": scale_purple[800], "on-primary": WHITE,
-    "primary-subtle": scale_purple[50], "primary-subtle-hover": scale_purple[100], "on-primary-subtle": scale_purple[800],
-    "link": scale_purple[700], "focus": scale_purple[500],
+    "bg": "#FAFAFA", "bg-subtle": "#F4F4F5", "surface": WHITE, "surface-raised": "#EBEBEF", "surface-sunken": "#F4F4F5",
+    "border": "#E4E4E7", "border-strong": "#85858F",
+    "text": "#18181B", "text-muted": "#52525B", "text-subtle": "#71717A",
+    "primary": scale_purple[700], "primary-hover": scale_purple[800], "primary-active": scale_purple[900], "on-primary": WHITE,
+    "primary-subtle": "#EBEBEF", "primary-subtle-hover": "#E4E4E7", "on-primary-subtle": "#18181B",
+    "link": "#18181B", "focus": "#18181B",
     "success": STATUS["success"]["light"], "success-subtle": STATUS["success"]["tint_light"],
     "warning": STATUS["warning"]["light"], "warning-subtle": STATUS["warning"]["tint_light"],
     "danger": STATUS["danger"]["light"], "danger-subtle": STATUS["danger"]["tint_light"],
-    "code-bg": scale_ink[50], "overlay": "rgb(11 10 16 / 0.45)",
+    "code-bg": "#F4F4F5", "overlay": "rgb(9 9 11 / 0.45)",
 }
-DARK = {
-    "bg": BLACK_UI, "bg-subtle": scale_ink[950], "surface": scale_ink[950], "surface-raised": scale_ink[900], "surface-sunken": BLACK_UI,
-    "border": scale_ink[800], "border-strong": scale_ink[500],
-    "text": scale_ink[50], "text-muted": scale_ink[400], "text-subtle": scale_ink[500],
-    "primary": scale_purple[400], "primary-hover": scale_purple[300], "primary-active": scale_purple[200], "on-primary": BLACK_UI,
-    "primary-subtle": scale_purple[950], "primary-subtle-hover": scale_purple[900], "on-primary-subtle": scale_purple[200],
-    "link": scale_purple[300], "focus": scale_purple[400],
+DARK = {   # neutral dark greys with visible layers: page < sidebar < card < raised
+    "bg": "#0F0F0F", "bg-subtle": "#171717", "surface": "#1E1E1E", "surface-raised": "#242424", "surface-sunken": "#141414",
+    "border": "#2E2E2E", "border-strong": "#7A7A7A",
+    "text": "#E5E5E5", "text-muted": "#A3A3A3", "text-subtle": "#8A8A8A",
+    "primary": scale_purple[600], "primary-hover": scale_purple[500], "primary-active": scale_purple[700], "on-primary": WHITE,
+    "primary-subtle": "#2A2A2A", "primary-subtle-hover": "#333333", "on-primary-subtle": "#E5E5E5",
+    "link": "#E5E5E5", "focus": "#E5E5E5",
     "success": STATUS["success"]["dark"], "success-subtle": STATUS["success"]["tint_dark"],
     "warning": STATUS["warning"]["dark"], "warning-subtle": STATUS["warning"]["tint_dark"],
     "danger": STATUS["danger"]["dark"], "danger-subtle": STATUS["danger"]["tint_dark"],
-    "code-bg": scale_ink[900], "overlay": "rgb(0 0 0 / 0.6)",
+    "code-bg": "#161616", "overlay": "rgb(0 0 0 / 0.6)",
 }
 
 # (foreground token, background token, minimum ratio, what it is)
@@ -105,7 +108,6 @@ CHECKS = [
     ("text-muted", "bg", 4.5, "secondary text on the page"), ("text-muted", "surface", 4.5, "secondary text on cards"), ("text-muted", "surface-raised", 4.5, "secondary text on raised surfaces"),
     ("text-subtle", "bg", 3.0, "placeholder / disabled-adjacent text (large or decorative only)"),
     ("on-primary", "primary", 4.5, "text on a primary button"), ("on-primary", "primary-hover", 4.5, "text on a hovered primary button"), ("on-primary", "primary-active", 4.5, "text on a pressed primary button"),
-    ("primary", "bg", 3.0, "primary as an icon / border / focus ring / chart color on the page"), ("primary", "surface", 3.0, "primary as an icon / border on cards"),
     ("link", "bg", 4.5, "link text on the page"), ("link", "surface", 4.5, "link text on cards"),
     ("on-primary-subtle", "primary-subtle", 4.5, "text on a subtle purple chip / selected row"),
     ("focus", "bg", 3.0, "focus ring on the page"), ("focus", "surface", 3.0, "focus ring on cards"),
@@ -152,8 +154,8 @@ def write_tokens(path):
         lines += [f"  --color-{k}: {v};" for k, v in tokens.items()]
         lines += [f"  --shadow-sm: {shadow[0]};", f"  --shadow-md: {shadow[1]};", f"  --shadow-lg: {shadow[2]};", "}", ""]
         return lines
-    light_shadow = ("0 1px 2px rgb(11 10 16 / 0.06)", "0 4px 12px rgb(11 10 16 / 0.08)", "0 12px 32px rgb(11 10 16 / 0.14)")
-    dark_shadow = ("0 1px 2px rgb(0 0 0 / 0.5)", "0 4px 12px rgb(0 0 0 / 0.55)", "0 12px 32px rgb(0 0 0 / 0.65)")
+    light_shadow = ("0 1px 2px rgb(9 9 11 / 0.06)", "0 8px 24px rgb(9 9 11 / 0.10)", "0 12px 32px rgb(9 9 11 / 0.16)")
+    dark_shadow = ("0 1px 2px rgb(8 3 18 / 0.5)", "0 4px 12px rgb(8 3 18 / 0.55)", "0 12px 32px rgb(8 3 18 / 0.65)")
     out += ["/* light (default) */"] + block(":root,\n:root[data-theme='light']", LIGHT, light_shadow)
     out += ["/* dark: explicit choice, or the system setting when the user has not chosen */"] + block(":root[data-theme='dark']", DARK, dark_shadow)
     out += ["@media (prefers-color-scheme: dark) {"]

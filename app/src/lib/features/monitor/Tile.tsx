@@ -14,7 +14,7 @@ interface TileProps {
 export const Tile: React.FC<TileProps> = ({ label, value, sub, icon, title }) => (
   <div className="min-w-0 rounded-2xl border border-border bg-surface p-4 text-left" title={title}>
     <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-      {icon && <Icon name={icon} size={12} className="text-primary" />}
+      {icon && <Icon name={icon} size={12} className="text-text" />}
       <span className="truncate">{label}</span>
     </div>
     <div className="mt-1.5 truncate text-lg font-bold tabular-nums text-text">{value}</div>

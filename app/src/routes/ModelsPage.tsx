@@ -74,7 +74,7 @@ export const ModelsPage: React.FC = () => {
         </div>
         {diskFreeGb !== null && (
           <div className="flex items-center gap-2 text-xs text-text-muted bg-surface-raised px-3 py-1.5 rounded-lg border border-border">
-            <Icon name="hard-drive" size={13} className="text-primary" />
+            <Icon name="hard-drive" size={13} className="text-text" />
             <span>
               Disk free: <strong className="text-text font-bold">{formatGb(diskFreeGb)}</strong>
             </span>
