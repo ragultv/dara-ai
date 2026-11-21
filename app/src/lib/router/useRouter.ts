@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 export type AppRoute =
-  "chat" | "models" | "monitor" | "settings" | "kit" | "options" | "artifacts" | "artifact";
+  "chat" | "models" | "monitor" | "settings" | "kit" | "options" | "artifacts" | "artifact" | "connectors";
 
 interface RouterState {
   current: AppRoute;
@@ -55,6 +55,9 @@ function parseHash(): { route: AppRoute; modelId: string; artifactId: string | n
       break;
     case "artifacts":
       route = "artifacts";
+      break;
+    case "connectors":
+      route = "connectors";
       break;
     case "chat":
     default:
