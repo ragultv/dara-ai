@@ -101,7 +101,8 @@ export function createDemoBackend(): ConnectorsBackend {
     toolCount: 0,
     toolsChanged: false,
     resourceMetadata: null,
-    signedIn: false
+    signedIn: false,
+    neededScope: null
   });
   const permOf = (id: string, tool: string) => perms.get(`${id}/${tool}`) ?? "ask";
   const need = (id: string) => {
@@ -166,7 +167,8 @@ export function createDemoBackend(): ConnectorsBackend {
         toolCount: DEMO_TOOLS.length,
         toolsChanged: false,
         resourceMetadata: null,
-        signedIn: signedIn.has(id)
+        signedIn: signedIn.has(id),
+        neededScope: null
       };
       // a server on a host that starts with "auth." asks for sign-in first, so the demo can show that state too
       if (c.kind === "http" && /^https?:\/\/auth\./.test(c.url ?? "") && !signedIn.has(id)) {
