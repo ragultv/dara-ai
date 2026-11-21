@@ -21,6 +21,7 @@ import { SettingsPage } from "./routes/SettingsPage.tsx";
 import { Onboarding } from "./routes/Onboarding.tsx";
 import { KitPage } from "./routes/KitPage.tsx";
 import { ArtifactsPage } from "./routes/ArtifactsPage.tsx";
+import { ConnectorsPage } from "./routes/ConnectorsPage.tsx";
 import { ArtifactEditorPage } from "./routes/ArtifactEditorPage.tsx";
 
 export const App: React.FC = () => {
@@ -82,6 +83,8 @@ export const App: React.FC = () => {
         return scrollable(<ArtifactsPage />);
       case "artifact":
         return <ArtifactEditorPage />;
+      case "connectors":
+        return scrollable(<ConnectorsPage />);
       case "chat":
       default:
         return <ChatPage />;
