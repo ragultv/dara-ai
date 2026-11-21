@@ -278,7 +278,7 @@ export const useModelsStore = create<ModelsState>((set, get) => {
         let diskFree: number | null = null;
         try {
           const stats = await apiClient.getStats();
-          diskFree = stats.disk.volume_free_gb;
+          diskFree = stats.disk?.volume_free_gb ?? null;
         } catch {
           // Disk space is a convenience; the list is still useful without it.
         }

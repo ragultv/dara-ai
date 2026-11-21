@@ -366,15 +366,17 @@ export interface Stats {
     completion_tokens_total: number;
     cached_tokens_total: number;
   } | null;
-  model?: Record<string, unknown> & {
-    id: string;
-    kv_format: KvFormat;
-    layers: number;
-    layers_on_gpu: number;
-    output_head: "gpu" | "cpu";
-    load_seconds: number;
-    vision: boolean;
-  } | null;
+  model?:
+    | (Record<string, unknown> & {
+        id: string;
+        kv_format: KvFormat;
+        layers: number;
+        layers_on_gpu: number;
+        output_head: "gpu" | "cpu";
+        load_seconds: number;
+        vision: boolean;
+      })
+    | null;
   disk: {
     models_dir: string;
     volume_free_gb: number;
@@ -383,7 +385,7 @@ export interface Stats {
     model_file_mb: number;
     mmproj_file_mb: number;
     flash_file_mb: number;
-  };
+  } | null;
   downloads: DownloadJob[];
   last_request: (ChatStats & Record<string, unknown>) | null;
   ram?: Record<string, number>;
