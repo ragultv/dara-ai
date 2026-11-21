@@ -24,11 +24,13 @@ export interface ConnectorConfig {
 export interface ConnectorStatus {
   state: ConnectionState;
   /** why it is in the error state */
-  message: string | null;
-  serverName: string | null;
-  serverVersion: string | null;
-  protocol: string | null;
+  error: string | null;
+  server: { name: string; version: string; protocol: string } | null;
   toolCount: number;
+  /** some tool's definition changed since the user last chose its permission */
+  toolsChanged: boolean;
+  /** for needs_auth: where the server describes its sign-in */
+  resourceMetadata: string | null;
 }
 
 export interface ConnectorEntry {

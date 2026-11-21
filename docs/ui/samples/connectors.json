@@ -1,0 +1,208 @@
+{
+  "audit": [
+    {
+      "argsJson": "{\"text\":\"hi\"}",
+      "connectorId": "9eb84ca9-590b-4eb9-9e63-cf402eb507ca",
+      "createdAt": 1795222458574,
+      "durationMs": 0,
+      "id": 2,
+      "outcome": "ok",
+      "resultChars": 2,
+      "tool": "echo"
+    },
+    {
+      "argsJson": "{\"text\":\"hi\"}",
+      "connectorId": "9eb84ca9-590b-4eb9-9e63-cf402eb507ca",
+      "createdAt": 1795222458572,
+      "durationMs": 0,
+      "id": 1,
+      "outcome": "needs_approval",
+      "resultChars": 0,
+      "tool": "echo"
+    }
+  ],
+  "callNeedsApproval": {
+    "content": [],
+    "isError": false,
+    "outcome": "needs_approval",
+    "structuredContent": null,
+    "truncated": false
+  },
+  "callOk": {
+    "content": [
+      {
+        "text": "hi",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "outcome": "ok",
+    "structuredContent": null,
+    "truncated": false
+  },
+  "connectors": [
+    {
+      "config": {
+        "args": [],
+        "command": "mock-mcp",
+        "createdAt": 1795222458519,
+        "enabled": true,
+        "envNames": [],
+        "id": "9eb84ca9-590b-4eb9-9e63-cf402eb507ca",
+        "kind": "stdio",
+        "name": "Mock",
+        "url": null
+      },
+      "status": {
+        "error": null,
+        "resourceMetadata": null,
+        "server": {
+          "name": "mock-mcp",
+          "protocol": "2025-06-18",
+          "version": "0.0.1"
+        },
+        "state": "ready",
+        "toolCount": 8,
+        "toolsChanged": false
+      }
+    }
+  ],
+  "tools": [
+    {
+      "available": true,
+      "changed": false,
+      "description": "A huge result",
+      "inputSchema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "big",
+      "permission": "ask",
+      "readOnlyHint": null,
+      "title": null
+    },
+    {
+      "available": true,
+      "changed": false,
+      "description": "Exits the process",
+      "inputSchema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "crash",
+      "permission": "ask",
+      "readOnlyHint": null,
+      "title": null
+    },
+    {
+      "available": true,
+      "changed": false,
+      "description": "Echo the text",
+      "inputSchema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "echo",
+      "permission": "ask",
+      "readOnlyHint": true,
+      "title": null
+    },
+    {
+      "available": true,
+      "changed": false,
+      "description": "Reads an environment variable",
+      "inputSchema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "env",
+      "permission": "ask",
+      "readOnlyHint": null,
+      "title": null
+    },
+    {
+      "available": true,
+      "changed": false,
+      "description": "Always fails",
+      "inputSchema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "fail",
+      "permission": "ask",
+      "readOnlyHint": null,
+      "title": null
+    },
+    {
+      "available": true,
+      "changed": false,
+      "description": "Changes the tool list",
+      "inputSchema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "mutate",
+      "permission": "ask",
+      "readOnlyHint": true,
+      "title": null
+    },
+    {
+      "available": true,
+      "changed": false,
+      "description": "Asks the client for sampling",
+      "inputSchema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "probe",
+      "permission": "ask",
+      "readOnlyHint": null,
+      "title": null
+    },
+    {
+      "available": true,
+      "changed": false,
+      "description": "Sleeps",
+      "inputSchema": {
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "slow",
+      "permission": "ask",
+      "readOnlyHint": null,
+      "title": null
+    }
+  ]
+}

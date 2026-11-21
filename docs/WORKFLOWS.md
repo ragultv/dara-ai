@@ -107,4 +107,19 @@ References between steps use a small expression syntax (`steps.events.output[0].
 
 ## Status
 
-Step 1 is on the branch `mcp-connector`. See the pull request for what was built and tested.
+**Step 1, the connector core, is built** on the branch `mcp-connector`.
+
+- **`dara-mcp` crate** (`app/src-tauri/crates/dara-mcp`): MCP client (spec 2025-06-18, negotiating down to 2025-03-26 and 2024-11-05) over stdio and Streamable HTTP; connector manager; per-tool permissions with fingerprint pinning; audit; secrets in the Windows Credential Manager. 40 offline tests against mock servers, including a contract test that records the payloads in `docs/ui/samples/connectors.json`.
+- **Tauri commands** (`app/src-tauri/src/connectors.rs`): `connectors_list`, `connector_add`, `connector_update`, `connector_remove`, `connector_connect`, `connector_disconnect`, `connector_tools`, `connector_set_permission`, `connector_call`, `connector_audit`, `connector_stderr`. Payloads are camelCase; errors are plain strings.
+- **Connectors page** (`app/src/routes/ConnectorsPage.tsx`): add, connect, per-tool Ask/Allow/Block, try a tool, call history. In a browser tab it runs on a demo backend whose output is tested against the recorded sample, so it cannot drift from the real one.
+- **Not done:** OAuth (a `TokenProvider` hook and the `needs_auth` state are in place), and everything from step 3 on.
+
+Things found while building that the first plan did not say:
+
+- On Windows `npx` is `npx.cmd`; a program started without a shell is not found without the extension, so the command is looked up on PATH with `.exe`, `.cmd`, `.bat` and `.com` (still no shell).
+- A child process must not inherit the app's environment (API keys, tokens). It gets PATH, SystemRoot, TEMP, TMP, USERPROFILE, APPDATA, LOCALAPPDATA and HOME, plus the variables the user gave it.
+- Streamable HTTP: a POST may be answered with JSON or with an SSE stream, with notifications and requests mixed in; a 404 on a known session means start a new session once. The older HTTP+SSE transport is deprecated and not supported.
+- A Windows credential holds about 2.5 KB, so a variable value over 2000 characters is refused.
+- If the tool list changed and a tool's definition changed with it, a call that was approved is **not** made: what the user approved is no longer what is there.
+
+Run the tests: `cd app/src-tauri && cargo test -p dara-mcp` (use `CARGO_TARGET_DIR` outside the repo while `tauri dev` is running) and `cd app && npm run test`.

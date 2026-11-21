@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   checkServerUrl,
@@ -159,5 +161,56 @@ describe("connectors store (demo backend)", () => {
     await useConnectorsStore.getState().remove(id);
     expect(useConnectorsStore.getState().entries).toHaveLength(0);
     expect(useConnectorsStore.getState().tools[id]).toBeUndefined();
+  });
+});
+
+// The desktop layer's real output is recorded in docs/ui/samples/connectors.json by the Rust contract test. The demo backend (what a browser
+// tab and these tests run on) must have the same fields, so the page cannot work in the demo and break in the app.
+function shape(v: unknown): unknown {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return v.length ? [shape(v[0])] : [];
+  if (typeof v === "object")
+    return Object.fromEntries(Object.entries(v as object).map(([k, x]) => [k, shape(x)]));
+  return typeof v;
+}
+// free-form by nature: a tool's JSON Schema and the content blocks a server returns
+const FREE_FORM = [".inputSchema", ".content", ".structuredContent"];
+function differences(a: unknown, b: unknown, path = "$"): string[] {
+  if (a === "null" || b === "null") return [];
+  if (FREE_FORM.some((f) => path.endsWith(f))) return [];
+  if (Array.isArray(a) && Array.isArray(b))
+    return a.length && b.length ? differences(a[0], b[0], `${path}[]`) : [];
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    return [...keys].flatMap((k) => {
+      const x = (a as Record<string, unknown>)[k];
+      const y = (b as Record<string, unknown>)[k];
+      return x === undefined || y === undefined
+        ? [`${path}.${k} is on one side only`]
+        : differences(x, y, `${path}.${k}`);
+    });
+  }
+  return a === b ? [] : [`${path}: ${String(a)} vs ${String(b)}`];
+}
+
+describe("the demo backend has the same shapes as the desktop layer", () => {
+  it("matches docs/ui/samples/connectors.json", async () => {
+    const recorded = JSON.parse(
+      readFileSync(resolve(process.cwd(), "../docs/ui/samples/connectors.json"), "utf-8")
+    ) as Record<string, unknown>;
+    const b = createDemoBackend();
+    const cfg = await b.add({ name: "Mock", kind: "stdio", command: "mock" });
+    await b.connect(cfg.id);
+    const tools = await b.tools(cfg.id);
+    const ask = await b.call(cfg.id, "list_events", { range: "today" }, false);
+    const ok = await b.call(cfg.id, "list_events", { range: "today" }, true);
+    const actual = {
+      connectors: await b.list(),
+      tools,
+      callNeedsApproval: ask,
+      callOk: ok,
+      audit: await b.audit(cfg.id, 20)
+    };
+    expect(differences(shape(actual), shape(recorded))).toEqual([]);
   });
 });

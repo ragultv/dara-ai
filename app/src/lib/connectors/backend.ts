@@ -92,11 +92,11 @@ export function createDemoBackend(): ConnectorsBackend {
 
   const disconnected = (): ConnectorStatus => ({
     state: "disconnected",
-    message: null,
-    serverName: null,
-    serverVersion: null,
-    protocol: null,
-    toolCount: 0
+    error: null,
+    server: null,
+    toolCount: 0,
+    toolsChanged: false,
+    resourceMetadata: null
   });
   const permOf = (id: string, tool: string) => perms.get(`${id}/${tool}`) ?? "ask";
   const need = (id: string) => {
@@ -151,11 +151,11 @@ export function createDemoBackend(): ConnectorsBackend {
       if (!c.enabled) throw new Error("This connector is turned off.");
       const s: ConnectorStatus = {
         state: "ready",
-        message: null,
-        serverName: "Demo calendar",
-        serverVersion: "1.0.0",
-        protocol: "2025-06-18",
-        toolCount: DEMO_TOOLS.length
+        error: null,
+        server: { name: "Demo calendar", version: "1.0.0", protocol: "2025-06-18" },
+        toolCount: DEMO_TOOLS.length,
+        toolsChanged: false,
+        resourceMetadata: null
       };
       status.set(id, s);
       return s;

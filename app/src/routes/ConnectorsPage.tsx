@@ -171,8 +171,8 @@ const ConnectorCard: React.FC<{ entry: ConnectorEntry }> = ({ entry }) => {
                 {status.state === "ready" &&
                   ` · ${status.toolCount} ${status.toolCount === 1 ? "tool" : "tools"}`}
               </span>
-              {status.serverName && (
-                <span className="truncate text-text-subtle">{status.serverName}</span>
+              {status.server && (
+                <span className="truncate text-text-subtle">{status.server.name}</span>
               )}
             </span>
           </span>
@@ -252,12 +252,12 @@ const ConnectorCard: React.FC<{ entry: ConnectorEntry }> = ({ entry }) => {
           <p className="mt-3 truncate font-mono text-[11px] text-text-subtle" title={where}>
             {where}
           </p>
-          {status.state === "error" && status.message && (
+          {status.state === "error" && status.error && (
             <p
               role="alert"
               className="mt-2 rounded-lg border border-danger/40 bg-danger-subtle px-3 py-2 text-xs text-danger"
             >
-              {status.message}
+              {status.error}
             </p>
           )}
           {status.state === "needs_auth" && (

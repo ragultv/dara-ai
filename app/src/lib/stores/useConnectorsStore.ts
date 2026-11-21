@@ -112,14 +112,14 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => {
         setStatus(id, {
           ...(get().entries.find((e) => e.config.id === id)?.status ?? emptyStatus),
           state: "connecting",
-          message: null
+          error: null
         });
         try {
           const status = await getBackend().connect(id);
           setStatus(id, status);
           if (status.state === "ready") await get().loadTools(id);
         } catch (e) {
-          setStatus(id, { ...emptyStatus, state: "error", message: message(e) });
+          setStatus(id, { ...emptyStatus, state: "error", error: message(e) });
         }
       }),
 
@@ -184,9 +184,9 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => {
 
 const emptyStatus: ConnectorStatus = {
   state: "disconnected",
-  message: null,
-  serverName: null,
-  serverVersion: null,
-  protocol: null,
-  toolCount: 0
+  error: null,
+  server: null,
+  toolCount: 0,
+  toolsChanged: false,
+  resourceMetadata: null
 };
