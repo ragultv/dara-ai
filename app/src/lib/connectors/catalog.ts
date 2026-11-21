@@ -111,30 +111,6 @@ export const CATALOG: CatalogEntry[] = [
     status: "available"
   },
   {
-    id: "notion",
-    name: "Notion",
-    publisher: "Notion",
-    tagline: "Search, read and update your Notion workspace",
-    about:
-      "Searches and reads pages and databases and can change them. The server registers Dara itself when you sign in.",
-    url: "https://mcp.notion.com/mcp",
-    categories: ["Files & documents"],
-    registers: "automatic",
-    status: "available"
-  },
-  {
-    id: "linear",
-    name: "Linear",
-    publisher: "Linear",
-    tagline: "Manage issues, projects and team workflows in Linear",
-    about:
-      "Finds and updates issues, projects and cycles. The server registers Dara itself when you sign in.",
-    url: "https://mcp.linear.app/mcp",
-    categories: ["Project management"],
-    registers: "automatic",
-    status: "available"
-  },
-  {
     id: "outlook",
     name: "Outlook mail and calendar",
     publisher: "Dara (built in)",
@@ -147,6 +123,28 @@ export const CATALOG: CatalogEntry[] = [
     status: "soon"
   }
 ];
+
+/**
+ * Dara's own Google sign-in client, if this build has one. Google gives each APP a client ID, not each user: the developer creates one
+ * (Desktop app type) and every user signs in with their own Google account through it, so nobody has to create a client of their own.
+ * A desktop app cannot keep a secret, and Google's rules for installed apps say the secret there is not confidential (PKCE protects the
+ * sign-in), so it is read from the build (VITE_DARA_GOOGLE_CLIENT_ID and VITE_DARA_GOOGLE_CLIENT_SECRET) and never committed.
+ */
+export function builtinClient(entry: Pick<CatalogEntry, "registers" | "url">): {
+  clientId: string;
+  clientSecret?: string;
+} | null {
+  if (
+    entry.registers !== "own-client" ||
+    !/^https:\/\/[a-z]+mcp\.googleapis\.com\//.test(entry.url)
+  )
+    return null;
+  const env = import.meta.env as Record<string, string | undefined>;
+  const clientId = env["VITE_DARA_GOOGLE_CLIENT_ID"]?.trim();
+  if (!clientId) return null;
+  const clientSecret = env["VITE_DARA_GOOGLE_CLIENT_SECRET"]?.trim();
+  return { clientId, ...(clientSecret ? { clientSecret } : {}) };
+}
 
 export function normalizeUrl(u: string | null | undefined): string {
   return (u ?? "").trim().replace(/\/+$/, "").toLowerCase();

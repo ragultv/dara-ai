@@ -80,8 +80,6 @@ Settings > Connectors shows suggested connectors as cards (`app/src/lib/connecto
 | Google Calendar | `https://calendarmcp.googleapis.com/mcp/v1` | OAuth (Google) | No: your own client ID (Desktop app type) |
 | Gmail | `https://gmailmcp.googleapis.com/mcp/v1` | OAuth (Google) | No: your own client ID |
 | Canva | `https://mcp.canva.com/mcp` | OAuth | Yes (dynamic registration) |
-| Notion | `https://mcp.notion.com/mcp` | OAuth | Yes |
-| Linear | `https://mcp.linear.app/mcp` | OAuth | Yes |
 | Outlook mail and calendar | (built in, not available yet) | | |
 
 Facts worth knowing:
@@ -89,8 +87,22 @@ Facts worth knowing:
 - Google's servers are **stateless**: `initialize` and `tools/list` answer without a token, and only `tools/call` needs one (a 401 whose `WWW-Authenticate` points at the protected-resource metadata, with the tool name in the path). So a Google connector can say "Connected" and still be "not signed in"; the page shows Sign in whenever there are no tokens. Google offers no dynamic registration, so Sign in stays disabled until a client ID is saved.
 - Each Google connector asks for an **access level**: Read only (the default; `gmail.readonly`, `calendar.readonly` and `calendar.calendarlist.readonly`) or Read and write / organize (`calendar`; `gmail.modify` and `gmail.compose`, which cannot send). Changing it takes a new sign-in.
 - Gmail's tools can search threads and read messages and drafts (`search_threads`, `get_thread`, `get_message`); Calendar's can list events in a date range (`list_events` with start and end time). That fits the daily summary.
+- Notion (`mcp.notion.com/mcp`) and Linear (`mcp.linear.app/mcp`) both answer and register Dara themselves, but were taken out of the catalog on request; a connector can still be added by hand with its address.
 - Seen but **not** in the catalog yet, because sign-in was not verified for them: Asana (`mcp.asana.com/v2/mcp`, no registration), Slack (`mcp.slack.com/mcp`, no registration), Stripe (`mcp.stripe.com`), Atlassian (`mcp.atlassian.com/v1/mcp`, no resource metadata), Sentry, Supabase, HubSpot. GitHub's server (`api.githubcopilot.com/mcp/`) advertises no PKCE (S256), so it is not usable. A Shopify address I tried answered 404.
 - The cards show a letter badge, not brand logos, and no "Verified" mark: Dara does not know who runs a server, only its address ("Can send data to ...").
+
+### Google: one client for the app, not one per user
+
+Google gives an **app** a client ID, not each user. The developer creates one OAuth client (type **Desktop app**) in a Google Cloud project, and every user signs in to it with their own Google account. Dara has no server, so each user's tokens stay on their own computer; the project only identifies the app. A desktop app cannot keep a secret, and Google's rules for installed apps say the client secret is not confidential there (PKCE protects the sign-in), so shipping it in the build is acceptable.
+
+- **In the build, not in the repository.** Set `VITE_DARA_GOOGLE_CLIENT_ID` and `VITE_DARA_GOOGLE_CLIENT_SECRET` (for example in `app/.env.local`, which is git-ignored) when building. With them set, Google connectors are added with that client, the page shows "Dara's Google sign-in" and users see no form; "Use my own" still lets a user bring a different client. Without them, the page asks for a client ID, as before.
+- **What stands between this and every user** (from my knowledge of Google's rules; check them in the Cloud console, they change):
+  - While the consent screen is in *testing* mode only the test users you list (up to 100) can sign in, and refresh tokens last about 7 days.
+  - Before verification, other users get an "unverified app" warning and a lifetime cap of about 100 users.
+  - Calendar scopes (`calendar`, `calendar.readonly`) are *sensitive*: verification needs a published privacy policy, a homepage on a domain you control, and a justification for each scope.
+  - Gmail scopes (`gmail.readonly`, `gmail.modify`, `gmail.compose`) are *restricted*: verification is stricter and Google may require an independent security assessment; whether an app that keeps all data on the user's device is exempt from the assessment is something to confirm with Google. Start early.
+  - The Google API Services "limited use" rules apply: mail may be used only to give the user the feature they asked for. Dara keeps it on the device and does not send it to Dara's own servers.
+- API quotas are counted per Cloud project, shared by every user of the app; the per-user limits are separate.
 
 ## Safety rules for user-built workflows
 
