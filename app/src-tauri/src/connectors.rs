@@ -150,3 +150,36 @@ pub async fn connector_audit(
 pub async fn connector_stderr(state: tauri::State<'_, ConnectorsState>, id: String) -> Result<String, String> {
     Ok(state.get()?.stderr(&id).await)
 }
+
+/// Signs in to an http connector: opens the server's sign-in page in the system browser and waits (up to five minutes) for the answer
+/// on a loopback address. Returns the status after connecting; a failed or cancelled sign-in is an error message.
+#[tauri::command]
+pub async fn connector_sign_in(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ConnectorsState>,
+    id: String,
+) -> Result<ConnStatus, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let m = state.get()?;
+    let open = move |url: &str| {
+        // only web addresses ever go to the browser
+        if url.starts_with("https://") || url.starts_with("http://") {
+            if let Err(e) = app.opener().open_url(url, None::<&str>) {
+                eprintln!("could not open the browser: {e}");
+            }
+        }
+    };
+    m.sign_in(&id, &open).await.map_err(err)
+}
+
+/// Ends a sign-in that is waiting for the browser. `true` when there was one.
+#[tauri::command]
+pub async fn connector_cancel_sign_in(state: tauri::State<'_, ConnectorsState>, id: String) -> Result<bool, String> {
+    Ok(state.get()?.cancel_sign_in(&id))
+}
+
+/// Revokes at the server when it can, forgets the tokens and disconnects.
+#[tauri::command]
+pub async fn connector_sign_out(state: tauri::State<'_, ConnectorsState>, id: String) -> Result<ConnStatus, String> {
+    state.get()?.sign_out(&id).await.map_err(err)
+}

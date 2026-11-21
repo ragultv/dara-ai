@@ -32,6 +32,11 @@ interface ConnectorsState {
   setEnabled: (id: string, enabled: boolean) => Promise<void>;
   connect: (id: string) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
+  /** connectors waiting for the user to finish signing in, in the browser */
+  signingIn: Record<string, boolean | undefined>;
+  signIn: (id: string) => Promise<void>;
+  cancelSignIn: (id: string) => Promise<void>;
+  signOut: (id: string) => Promise<void>;
   loadTools: (id: string) => Promise<void>;
   setPermission: (id: string, tool: string, permission: ToolPermission) => Promise<void>;
   call: (
@@ -62,6 +67,7 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => {
     tools: {},
     audit: {},
     busy: {},
+    signingIn: {},
 
     load: async () => {
       set({ loading: true, error: null });
@@ -134,6 +140,38 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => {
         }
       }),
 
+    signIn: async (id) => {
+      set((s) => ({ signingIn: { ...s.signingIn, [id]: true } }));
+      try {
+        const status = await getBackend().signIn(id);
+        setStatus(id, status);
+        if (status.state === "ready") await get().loadTools(id);
+      } catch (e) {
+        // the browser step was cancelled, timed out or failed: say so on the card
+        const prior = get().entries.find((x) => x.config.id === id)?.status ?? emptyStatus;
+        setStatus(id, { ...prior, state: "needs_auth", error: message(e) });
+      } finally {
+        set((s) => ({ signingIn: { ...s.signingIn, [id]: false } }));
+      }
+    },
+
+    cancelSignIn: async (id) => {
+      try {
+        await getBackend().cancelSignIn(id);
+      } catch (e) {
+        set({ error: message(e) });
+      }
+    },
+
+    signOut: async (id) => {
+      try {
+        setStatus(id, await getBackend().signOut(id));
+        set((s) => ({ tools: { ...s.tools, [id]: undefined } }));
+      } catch (e) {
+        set({ error: message(e) });
+      }
+    },
+
     loadTools: async (id) => {
       try {
         const tools = await getBackend().tools(id);
@@ -188,5 +226,7 @@ const emptyStatus: ConnectorStatus = {
   server: null,
   toolCount: 0,
   toolsChanged: false,
-  resourceMetadata: null
+  resourceMetadata: null,
+  signedIn: false,
+  neededScope: null
 };

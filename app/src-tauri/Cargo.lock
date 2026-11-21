@@ -728,6 +728,7 @@ dependencies = [
  "futures-util",
  "hex",
  "keyring",
+ "rand 0.8.8",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

@@ -14,10 +14,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use url::Url;
 
-/// A bearer token for an HTTP server. Nothing implements OAuth yet; this is the hook it will use.
+/// A bearer token for an HTTP server (the OAuth code is the implementation: `oauth::OAuthTokens`).
 #[async_trait]
 pub trait TokenProvider: Send + Sync {
     async fn bearer(&self) -> Option<String>;
+    /// The server refused the token (401). Gets a new one if that is possible; `true` when the next `bearer()` differs, so one retry
+    /// is worth making. Concurrent callers share one refresh.
+    async fn refresh(&self) -> bool {
+        false
+    }
 }
 
 /// What the server told us on the side (shared by the transport and the client).
@@ -72,7 +77,7 @@ pub(crate) fn react(value: &Value, shared: &Shared) -> Reaction {
     }
 }
 
-fn is_loopback_host(url: &Url) -> bool {
+pub(crate) fn is_loopback_host(url: &Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),

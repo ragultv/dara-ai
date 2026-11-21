@@ -28,6 +28,7 @@ fn stdio(name: &str, vars: &[(&str, &str)]) -> NewConnector {
         args: vec![],
         env: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         url: None,
+        oauth: None,
     }
 }
 
@@ -56,6 +57,7 @@ async fn adding_checks_its_input() {
         args: vec![],
         env: BTreeMap::new(),
         url: Some(u.into()),
+        oauth: None,
     };
     assert!(bad(http("http://example.com/mcp")).unwrap().contains("https"));
     assert!(bad(http("https://u:p@example.com/mcp")).is_some());
@@ -280,6 +282,7 @@ async fn a_failed_connection_is_a_state_with_a_reason() {
             args: vec![],
             env: BTreeMap::new(),
             url: Some("http://127.0.0.1:1/mcp".into()),
+            oauth: None,
         })
         .unwrap();
     assert!(e.m.connect(&http.id).await.is_err());
@@ -292,7 +295,7 @@ async fn the_database_is_versioned_and_reopens() {
     let path = dir.path().join("c.db");
     let id = {
         let m = Manager::new(&path, Arc::new(MemorySecrets::new()), dir.path()).unwrap();
-        assert_eq!(m.store().schema_version().unwrap(), 1);
+        assert_eq!(m.store().schema_version().unwrap(), 2);
         m.add(stdio("kept", &[])).unwrap().id
     };
     let m = Manager::new(&path, Arc::new(MemorySecrets::new()), dir.path()).unwrap();
@@ -329,6 +332,7 @@ async fn a_changed_tool_goes_back_to_ask_for_an_http_connector_too() {
             args: vec![],
             env: BTreeMap::new(),
             url: Some("https://example.com/mcp".into()),
+            oauth: None,
         })
         .unwrap();
     let tool = |description: &str, title: Option<&str>| RemoteTool {
