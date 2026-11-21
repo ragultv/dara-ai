@@ -36,6 +36,25 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "Dara",
+    "shortDescription": "Dara: AI that runs on your own graphics card",
+    "longDescription": "Dara runs language models on your own NVIDIA graphics card, so your chats stay on this computer.",
+    "category": "Productivity",
+    "resources": {
+      "resources/engine/": "engine/"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "compression": "lzma"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    }
   }
 }
