@@ -1,4 +1,5 @@
 import type { ChatStats, ContextInfo, SpeculativeInfo } from "../api/types.ts";
+import type { ToolCallRecord } from "./tools/records.ts";
 
 /** What the UI shows about one finished reply. Every number comes from the server's final chunk. */
 export interface MessageStats {
@@ -38,6 +39,8 @@ export interface UiMessage {
   stats?: MessageStats | undefined;
   /** The server's numbers exactly as received; stored in the database. */
   raw?: Partial<ChatStats> | undefined;
+  /** What happened to the tool calls this reply made (stored in the message's stats as `tool_calls`). */
+  toolCalls?: ToolCallRecord[] | undefined;
   createdAt?: number | undefined;
 }
 

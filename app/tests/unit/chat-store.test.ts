@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const h = vi.hoisted(() => ({ calls: [] as Array<{ name: string; args: unknown[] }> }));
 
@@ -33,6 +33,10 @@ import { useChatStore } from "../../src/lib/stores/useChatStore.ts";
 import { useModelsStore } from "../../src/lib/stores/useModelsStore.ts";
 import type { ChatChunk, ChatRequest, ModelInfo } from "../../src/lib/api/types.ts";
 import type { Conversation, UiMessage } from "../../src/lib/chat/types.ts";
+import { storeApi } from "../../src/lib/api/store-api.ts";
+import { allowKey, useChatToolsStore } from "../../src/lib/stores/useChatToolsStore.ts";
+import { useConnectorsStore } from "../../src/lib/stores/useConnectorsStore.ts";
+import { createDemoBackend, setBackend } from "../../src/lib/connectors/backend.ts";
 
 const model = (over: { flashActive?: boolean; context?: number } = {}): ModelInfo =>
   ({
@@ -356,5 +360,211 @@ describe("context windows", () => {
     return vi.waitFor(() =>
       expect(h.calls.find((c) => c.name === "deleteMessagesFrom")?.args).toEqual([id, 4])
     );
+  });
+});
+
+describe("connectors stored with the chat", () => {
+  const SEED = "11111111-1111-4111-8111-111111111111";
+  const lastParams = () =>
+    (
+      h.calls.filter((c) => c.name === "patchConversation").pop()?.args[1] as {
+        params?: Record<string, unknown>;
+      }
+    )?.params;
+
+  beforeEach(() => {
+    useChatToolsStore.setState({
+      calls: {},
+      approvals: [],
+      alwaysAllowed: {},
+      status: {},
+      enabled: {}
+    });
+  });
+  afterEach(() => setBackend(null));
+
+  it("writes the connector choice and allowed tools into params, and other settings keep them", async () => {
+    seedConversation([m("u1", "user", "hi"), m("a1", "assistant", "hello")]);
+    useChatToolsStore.getState().toggle(SEED, "conn-1");
+    await vi.waitFor(() => expect(lastParams()?.["connectors"]).toEqual(["conn-1"]));
+    useChatToolsStore.setState({ alwaysAllowed: { [SEED]: [allowKey("conn-1", "create_event")] } });
+    await vi.waitFor(() =>
+      expect(lastParams()?.["allowed_tools"]).toEqual([["conn-1", "create_event"]])
+    );
+    useChatStore.getState().setConversationSettings(SEED, { temperature: 0.2 });
+    await vi.waitFor(() => expect(lastParams()?.["temperature"]).toBe(0.2));
+    expect(lastParams()?.["connectors"]).toEqual(["conn-1"]);
+    expect(lastParams()?.["allowed_tools"]).toEqual([["conn-1", "create_event"]]);
+  });
+
+  it("loads them back from the stored conversations without writing them again", async () => {
+    vi.mocked(storeApi.listConversations).mockResolvedValueOnce({
+      object: "list",
+      data: [
+        {
+          id: SEED,
+          title: "T",
+          model: null,
+          system_prompt: "",
+          params: { temperature: 0.7, connectors: ["conn-2"], allowed_tools: [["conn-2", "send"]] },
+          pinned: false,
+          message_count: 0,
+          created_at: 1,
+          updated_at: 1
+        }
+      ],
+      total: 1,
+      limit: 200,
+      offset: 0
+    });
+    vi.mocked(storeApi.getConversation).mockResolvedValueOnce({
+      id: SEED,
+      title: "T",
+      model: null,
+      system_prompt: "",
+      params: { temperature: 0.7, connectors: ["conn-2"], allowed_tools: [["conn-2", "send"]] },
+      pinned: false,
+      message_count: 1,
+      created_at: 1,
+      updated_at: 1,
+      messages: [
+        {
+          id: "a1",
+          conversation_id: SEED,
+          position: 0,
+          role: "assistant",
+          content: '<tool_call>{"name": "x__send", "arguments": {}}</tool_call>',
+          finish_reason: "stop",
+          error: null,
+          model: null,
+          created_at: 1,
+          attachments: [],
+          stats: {
+            tool_calls: [
+              {
+                id: "a1:0",
+                name: "x__send",
+                tool: "send",
+                status: "ok",
+                decision: "approved_once",
+                durationMs: 5
+              }
+            ]
+          } as never
+        }
+      ]
+    });
+    await useChatStore.getState().loadConversations();
+    expect(useChatToolsStore.getState().enabledFor(SEED)).toEqual(["conn-2"]);
+    expect(useChatToolsStore.getState().alwaysAllowed[SEED]).toEqual([allowKey("conn-2", "send")]);
+    await vi.waitFor(() =>
+      expect(
+        useChatStore.getState().getActiveConversation()?.messages[0]?.toolCalls?.[0]?.decision
+      ).toBe("approved_once")
+    );
+    expect(h.calls.some((c) => c.name === "patchConversation")).toBe(false);
+  });
+
+  it("stores what happened to a step's calls with the reply that made them", async () => {
+    setBackend(createDemoBackend());
+    useConnectorsStore.setState({ entries: [], tools: {}, audit: {}, busy: {}, error: null });
+    await useConnectorsStore.getState().add({ name: "Demo", kind: "stdio", command: "demo" });
+    await useConnectorsStore.getState().load();
+    const cid = useConnectorsStore.getState().entries[0]!.config.id;
+    await useConnectorsStore.getState().setPermission(cid, "list_events", "allow");
+    seedConversation([]);
+    useChatToolsStore.getState().toggle(SEED, cid);
+    const steps = [
+      chunks(
+        '<tool_call>{"name": "demo__list_events", "arguments": {"range": "today"}}</tool_call>',
+        "stop",
+        50
+      ),
+      chunks("You have two events.", "stop", 80)
+    ];
+    vi.spyOn(apiClient, "streamChat").mockImplementation(async (req: ChatRequest) => {
+      sent.push(req);
+      return gen(steps.shift() ?? []) as never;
+    });
+    await useChatStore.getState().sendMessage("What is on today?");
+    const reply = useChatStore.getState().getActiveConversation()?.messages[1];
+    expect(reply?.toolCalls?.[0]).toMatchObject({
+      tool: "list_events",
+      connectorId: cid,
+      status: "ok",
+      decision: "auto",
+      arguments: { range: "today" }
+    });
+    await vi.waitFor(() => {
+      const stored = h.calls
+        .filter((c) => c.name === "patchMessage" && c.args[0] === reply?.id)
+        .map((c) => (c.args[1] as { stats?: Record<string, unknown> }).stats)
+        .find((s) => s?.["tool_calls"]);
+      expect((stored?.["tool_calls"] as Array<{ decision: string }>)[0]?.decision).toBe("auto");
+      expect(stored?.["usage"]).toBeTruthy();
+    });
+  });
+  it("sends the model back when a tool's job is unfinished and it gives up, then lets it finish", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      setBackend(createDemoBackend());
+      useConnectorsStore.setState({ entries: [], tools: {}, audit: {}, busy: {}, error: null });
+      await useConnectorsStore.getState().add({ name: "Demo", kind: "stdio", command: "demo" });
+      await useConnectorsStore.getState().load();
+      const cid = useConnectorsStore.getState().entries[0]!.config.id;
+      await useConnectorsStore.getState().setPermission(cid, "list_events", "allow");
+      // a job that is pending the first time it is asked and done the second time
+      let asked = 0;
+      useConnectorsStore.setState({
+        call: async () => ({
+          outcome: "ok",
+          content: [
+            {
+              type: "text",
+              text:
+                asked++ === 0
+                  ? '{"status": "pending", "job": "j1", "note": "Wait at least 15 seconds before checking again."}'
+                  : '{"status": "completed", "url": "https://x.example/d/1"}'
+            }
+          ],
+          structuredContent: null,
+          isError: false,
+          truncated: false
+        })
+      } as never);
+      seedConversation([]);
+      useChatToolsStore.getState().toggle(SEED, cid);
+      const steps = [
+        chunks(
+          '<tool_call>{"name": "demo__list_events", "arguments": {"range": "today"}}</tool_call>',
+          "stop",
+          50
+        ),
+        chunks("The job is pending. I will check back shortly!", "stop", 60),
+        chunks(
+          '<tool_call>{"name": "dara__wait", "arguments": {"seconds": 15}}</tool_call>' +
+            '<tool_call>{"name": "demo__list_events", "arguments": {"range": "today"}}</tool_call>',
+          "stop",
+          70
+        ),
+        chunks("Done: https://x.example/d/1", "stop", 80)
+      ];
+      vi.spyOn(apiClient, "streamChat").mockImplementation(async (req: ChatRequest) => {
+        sent.push(req);
+        return gen(steps.shift() ?? []) as never;
+      });
+      const run = useChatStore.getState().sendMessage("Make it");
+      await vi.advanceTimersByTimeAsync(20000);
+      await run;
+      const msgs = useChatStore.getState().getActiveConversation()?.messages ?? [];
+      expect(steps).toEqual([]); // all four model turns were used
+      expect(msgs[msgs.length - 1]?.content).toBe("Done: https://x.example/d/1");
+      const nudge = msgs.find((m) => m.role === "user" && m.content.includes("dara:nudge:1"));
+      expect(nudge?.content).toContain("not finished");
+      expect(nudge?.content).toContain("dara__wait block for 15 seconds");
+      expect(asked).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

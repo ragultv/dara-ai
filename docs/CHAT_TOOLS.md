@@ -32,7 +32,7 @@ Which models can do this well is measured, not assumed: a small test set per mod
 
 ## Safety (same rules as connectors, applied to chat)
 
-- Every call goes through the permission check: **Block** never runs; **Needs approval** shows an approval card in the chat (tool, arguments, which agent asked) and waits; **Allow** runs. A server's own hints are not trusted.
+- Every call goes through the permission check: **Block** never runs; **Needs approval** opens an approval dialog (connector, tool, its description, the arguments; Deny is focused, Escape denies, Stop closes it; "1 of N" when several wait) and the call row says "Waiting for your approval"; **Allow** runs. A server's own hints are not trusted.
 - The model cannot change permissions, add connectors or raise a tool's level.
 - Approval cards are per call; "allow for this conversation" is a user choice, never the model's.
 - Results are scrubbed of anything that looks like a secret before they reach the model or the log; tool output is shown to the user collapsed under the step it came from.
@@ -41,8 +41,13 @@ Which models can do this well is measured, not assumed: a small test set per mod
 ## UI
 
 - Composer: a Connectors button (like Claude's) listing the connected ones, with a switch per connector for this conversation; a tool count and a "needs approval" hint.
-- Messages: a collapsible "Used Google Calendar: list events" row per call (arguments, result, time, status), approval cards inline, an agent panel while sub-agents run (each with state and Stop).
+- Messages: a collapsible "Used Google Calendar: list events" row per call (arguments, result, time, status), the approval dialog, an agent panel while sub-agents run (each with state and Stop).
 - Conversations remember which connectors were on.
+
+## What is stored
+
+- Each assistant message that made calls keeps `stats.tool_calls` (app/src/lib/chat/tools/records.ts): id, name, connector, tool, arguments (each capped at about 2000 characters, `{"_truncated": true, "preview": ...}` above that), status, decision (`auto`, `approved_once`, `approved_always`, `denied_by_user`, `blocked`, `skipped`), start time and duration. The whole stats object stays under the engine's 64 KB: arguments are dropped first, then the last calls. Rows render from it after a restart, with results from the tool-results message.
+- Each conversation keeps `params.connectors` (connector ids on in it) and `params.allowed_tools` (`[connectorId, tool]` pairs allowed for the rest of the chat). Only the choice made before a chat exists stays in localStorage (`__new__`).
 
 ## Build order
 
@@ -57,3 +62,11 @@ Which models can do this well is measured, not assumed: a small test set per mod
 
 - Which loaded models pass the tool test (needs a real run on the dev GPU).
 - Whether to store tool rows in the conversation database (needs a schema change in the engine's store, which only accepts `system`, `user` and `assistant` roles today) or keep them app-side.
+
+## Jobs that take time (wait tool)
+
+Some tools start a job and answer "pending, check again in 15 seconds" (Canva's design generation). Dara offers its own tool, `dara__wait` (1 to 60 seconds, no approval, Stop ends it), whenever connector tools are on. Calls in one reply run at the same time, except around a wait: calls written after a wait block run once it is over, so the model can write "wait 15 s, then check the job" in one step and keep going until the job is done. The prompt tells it not to end a reply promising to check back, and to give the user any links from the results. The step limit is 12 per message to leave room for a few checks.
+
+### Unfinished work (any connector)
+
+A small model often ends its reply right after a tool starts a job ("I will check back shortly"), or stops when a result needs one more call to become the answer. Nothing here knows a particular connector. `app/src/lib/chat/tools/jobs.ts` reads the *text* of results: a status such as pending, queued or in progress, "still processing", "check again", "wait N seconds" / "retry after", "next step", "to finish, call ...". When the reply that follows makes no call and either the last results look unfinished or the reply promises to come back, the loop sends the model back with a hidden message: wait (`dara__wait`, for the time the tool gave, else 15 s), call the checking or completing tool, repeat, then answer with the result and its links. At most 3 times per message, inside the 12-step limit. The prompt also says to make the next call itself and give links to the user. The nudge is stored like a tool-results message, so it never shows as a bubble; a reply that promised more stays inside the tools fold.
