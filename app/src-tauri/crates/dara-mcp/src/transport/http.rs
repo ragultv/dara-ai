@@ -51,15 +51,33 @@ impl SseParser {
     }
 }
 
-fn resource_metadata(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(WWW_AUTHENTICATE)?.to_str().ok()?;
-    let start = value.find("resource_metadata=")? + "resource_metadata=".len();
-    let rest = &value[start..];
-    if let Some(quoted) = rest.strip_prefix('"') {
-        quoted.split('"').next().map(str::to_string)
-    } else {
-        rest.split([',', ' ']).next().map(str::to_string)
+/// One parameter (`name="value"` or `name=value`) of a `WWW-Authenticate: Bearer ...` challenge.
+pub(crate) fn auth_param(value: &str, name: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut from = 0;
+    while let Some(found) = value[from..].find(name) {
+        let at = from + found;
+        from = at + name.len();
+        let before_ok = at == 0 || matches!(bytes[at - 1], b' ' | b',' | b'\t');
+        if !before_ok || bytes.get(from) != Some(&b'=') {
+            continue;
+        }
+        let rest = &value[from + 1..];
+        return if let Some(quoted) = rest.strip_prefix('"') {
+            quoted.split('"').next().map(str::to_string)
+        } else {
+            rest.split([',', ' ']).next().map(str::to_string)
+        };
     }
+    None
+}
+
+fn resource_metadata(headers: &HeaderMap) -> Option<String> {
+    auth_param(headers.get(WWW_AUTHENTICATE)?.to_str().ok()?, "resource_metadata")
+}
+
+fn challenge_scope(headers: &HeaderMap) -> Option<String> {
+    auth_param(headers.get(WWW_AUTHENTICATE)?.to_str().ok()?, "scope")
 }
 
 impl HttpTransport {
@@ -112,6 +130,23 @@ impl HttpTransport {
             .map_err(|e| McpError::Transport(format!("could not reach the server: {e}")))
     }
 
+    /// Posts and checks the status. A 401 with a token provider gets ONE retry after the provider refreshes its token; a second 401 is
+    /// reported as it is (the connector then needs signing in again).
+    async fn post_checked(&self, body: &Value) -> Result<Response, McpError> {
+        let resp = self.post(body).await?;
+        match self.check(resp).await {
+            Err(first @ McpError::AuthRequired { .. }) => {
+                let Some(provider) = &self.token else { return Err(first) };
+                if !provider.refresh().await {
+                    return Err(first);
+                }
+                let resp = self.post(body).await?;
+                self.check(resp).await
+            }
+            other => other,
+        }
+    }
+
     /// Turns a bad status into the right error. `Ok` for 2xx.
     async fn check(&self, resp: Response) -> Result<Response, McpError> {
         let status = resp.status();
@@ -119,7 +154,16 @@ impl HttpTransport {
             return Ok(resp);
         }
         if status == StatusCode::UNAUTHORIZED {
-            return Err(McpError::AuthRequired { resource_metadata: resource_metadata(resp.headers()) });
+            return Err(McpError::AuthRequired {
+                resource_metadata: resource_metadata(resp.headers()),
+                scope: challenge_scope(resp.headers()),
+            });
+        }
+        if status == StatusCode::FORBIDDEN {
+            let www = resp.headers().get(WWW_AUTHENTICATE).and_then(|v| v.to_str().ok()).map(str::to_string);
+            if www.as_deref().and_then(|w| auth_param(w, "error")).as_deref() == Some("insufficient_scope") {
+                return Err(McpError::InsufficientScope { scope: www.as_deref().and_then(|w| auth_param(w, "scope")) });
+            }
         }
         if status == StatusCode::NOT_FOUND && self.session().is_some() {
             if let Ok(mut s) = self.session.lock() {
@@ -179,8 +223,7 @@ impl HttpTransport {
 #[async_trait]
 impl Transport for HttpTransport {
     async fn send_request(&self, id: u64, method: &str, params: Value) -> Result<Value, McpError> {
-        let resp = self.post(&rpc::request(id, method, params)).await?;
-        let resp = self.check(resp).await?;
+        let resp = self.post_checked(&rpc::request(id, method, params)).await?;
         if method == "initialize" {
             if let Some(sid) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
                 if let Ok(mut s) = self.session.lock() {
@@ -228,8 +271,7 @@ impl Transport for HttpTransport {
     }
 
     async fn send_notification(&self, method: &str, params: Value) -> Result<(), McpError> {
-        let resp = self.post(&rpc::notification(method, params)).await?;
-        self.check(resp).await.map(|_| ())
+        self.post_checked(&rpc::notification(method, params)).await.map(|_| ())
     }
 
     fn set_protocol_version(&self, version: &str) {
@@ -287,5 +329,14 @@ mod tests {
             Some("https://x.io/.well-known/oauth-protected-resource")
         );
         assert_eq!(resource_metadata(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn reads_scope_and_ignores_look_alikes() {
+        let v = "Bearer realm=\"mcp\", error=\"insufficient_scope\", scope=\"mail.read calendar.read\", resource_metadata=\"https://x.io/m\"";
+        assert_eq!(auth_param(v, "scope").as_deref(), Some("mail.read calendar.read"));
+        assert_eq!(auth_param(v, "resource_metadata").as_deref(), Some("https://x.io/m"));
+        assert_eq!(auth_param("Bearer x_scope=\"no\"", "scope"), None);
+        assert_eq!(auth_param("Bearer scope=read", "scope").as_deref(), Some("read"));
     }
 }

@@ -1,6 +1,8 @@
 //! A small Streamable-HTTP MCP server for tests (JSON or SSE answers, sessions, a 401 mode, a session-expired mode, a redirect mode).
 #![allow(dead_code)]
 
+pub mod auth;
+
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
