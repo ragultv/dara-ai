@@ -21,6 +21,9 @@ export const AddConnectorDialog: React.FC<{ isOpen: boolean; onClose: () => void
   const [args, setArgs] = useState("");
   const [env, setEnv] = useState("");
   const [url, setUrl] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [scope, setScope] = useState("");
   const [trust, setTrust] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -31,6 +34,9 @@ export const AddConnectorDialog: React.FC<{ isOpen: boolean; onClose: () => void
     setArgs("");
     setEnv("");
     setUrl("");
+    setClientId("");
+    setClientSecret("");
+    setScope("");
     setTrust(false);
     setError(null);
     onClose();
@@ -45,7 +51,20 @@ export const AddConnectorDialog: React.FC<{ isOpen: boolean; onClose: () => void
     const input: AddConnectorInput =
       kind === "stdio"
         ? { name, kind, command, args: parseArgs(args), env: parsedEnv.env }
-        : { name, kind, url };
+        : {
+            name,
+            kind,
+            url,
+            ...(clientId.trim() || clientSecret || scope.trim()
+              ? {
+                  oauth: {
+                    ...(clientId.trim() ? { clientId: clientId.trim() } : {}),
+                    ...(clientSecret ? { clientSecret } : {}),
+                    ...(scope.trim() ? { scope: scope.trim() } : {})
+                  }
+                }
+              : {})
+          };
     setBusy(true);
     const problem = await add(input);
     setBusy(false);
@@ -121,11 +140,43 @@ export const AddConnectorDialog: React.FC<{ isOpen: boolean; onClose: () => void
         ) : (
           <Input
             label="Server address"
-            hint="An https address such as https://example.com/mcp. Signing in to the server comes in the next version."
+            hint="An https address such as https://example.com/mcp. If the server asks you to sign in, Dara opens your browser when you press Sign in."
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             spellCheck={false}
           />
+        )}
+        {kind === "http" && (
+          <details className="rounded-lg border border-border px-3 py-2">
+            <summary className="cursor-pointer text-xs font-semibold text-text-muted">
+              Sign-in settings (only if the server needs your own client ID)
+            </summary>
+            <div className="mt-3 space-y-3">
+              <p className="text-xs text-text-muted">
+                Most servers register Dara by themselves. Some, such as Google's, need a client you
+                create in their console. The secret is kept in the Windows credential store.
+              </p>
+              <Input
+                label="Client ID"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                spellCheck={false}
+              />
+              <Input
+                label="Client secret (if the console gave you one)"
+                type="password"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                autoComplete="off"
+              />
+              <Input
+                label="Scope (optional)"
+                value={scope}
+                onChange={(e) => setScope(e.target.value)}
+                spellCheck={false}
+              />
+            </div>
+          </details>
         )}
         {error && (
           <p role="alert" className="text-xs text-danger">

@@ -11,6 +11,7 @@
 pub mod client;
 pub mod error;
 pub mod manager;
+pub mod oauth;
 pub mod rpc;
 pub mod secrets;
 pub mod store;
@@ -20,8 +21,9 @@ pub use client::{McpClient, RemoteTool, ServerInfo, ToolResult, SUPPORTED_PROTOC
 pub use error::McpError;
 pub use manager::{
     AuditEntry, CallOutcome, ConnState, ConnStatus, ConnectorConfig, ConnectorPatch, ConnectorView, Kind, Manager,
-    NewConnector, Outcome, ToolView,
+    NewConnector, OAuthInfo, OAuthInput, Outcome, ToolView,
 };
+pub use oauth::{OAuthTokens, StoredTokens, DEFAULT_SIGN_IN_TIMEOUT};
 pub use secrets::{KeyringSecrets, MemorySecrets, SecretStore};
 pub use transport::{
     check_http_url, HttpTransport, StdioConfig, StdioTransport, TokenProvider, Transport,

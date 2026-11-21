@@ -2,8 +2,8 @@
   "audit": [
     {
       "argsJson": "{\"text\":\"hi\"}",
-      "connectorId": "9eb84ca9-590b-4eb9-9e63-cf402eb507ca",
-      "createdAt": 1795222458574,
+      "connectorId": "3242f706-3b31-4f45-83f8-f61289af5384",
+      "createdAt": 1795224176598,
       "durationMs": 0,
       "id": 2,
       "outcome": "ok",
@@ -12,8 +12,8 @@
     },
     {
       "argsJson": "{\"text\":\"hi\"}",
-      "connectorId": "9eb84ca9-590b-4eb9-9e63-cf402eb507ca",
-      "createdAt": 1795222458572,
+      "connectorId": "3242f706-3b31-4f45-83f8-f61289af5384",
+      "createdAt": 1795224176596,
       "durationMs": 0,
       "id": 1,
       "outcome": "needs_approval",
@@ -45,22 +45,29 @@
       "config": {
         "args": [],
         "command": "mock-mcp",
-        "createdAt": 1795222458519,
+        "createdAt": 1795224176427,
         "enabled": true,
         "envNames": [],
-        "id": "9eb84ca9-590b-4eb9-9e63-cf402eb507ca",
+        "id": "3242f706-3b31-4f45-83f8-f61289af5384",
         "kind": "stdio",
         "name": "Mock",
+        "oauth": {
+          "clientId": null,
+          "hasSecret": false,
+          "scope": null
+        },
         "url": null
       },
       "status": {
         "error": null,
+        "neededScope": null,
         "resourceMetadata": null,
         "server": {
           "name": "mock-mcp",
           "protocol": "2025-06-18",
           "version": "0.0.1"
         },
+        "signedIn": false,
         "state": "ready",
         "toolCount": 8,
         "toolsChanged": false

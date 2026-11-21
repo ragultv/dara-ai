@@ -51,7 +51,7 @@ Data flow in one sentence: **the model runs on this computer; only tool calls an
 - **Pinning.** Each tool has a fingerprint (hash of its name, description, schema and annotations). If a tool changes after the user chose a permission it goes back to Ask and is marked "changed". A tool that disappears keeps the user's choice.
 - **Local programs are code.** Adding a stdio connector shows the command and requires an explicit "I trust this program". Variables for it are kept in the credential store; the database keeps only their names.
 - **Results are untrusted text.** The UI shows them as plain text, never as HTML or Markdown. LLM steps that read them get no tools.
-- **OAuth** (next): HTTP servers that need sign-in use OAuth 2.1 with PKCE, a loopback redirect and the system browser, dynamic client registration and metadata discovery where the server offers them; tokens go in the credential store. A 401 puts the connector in `needs_auth`.
+- **OAuth** (built, module `oauth` in the crate): HTTP servers that need sign-in use the MCP authorization flow. Discovery reads the 401's `WWW-Authenticate`, then the protected-resource metadata (RFC 9728), then the authorization-server metadata (RFC 8414, or OIDC discovery). The client is a user-supplied client ID, else Dynamic Client Registration (the registered ID and its loopback port are remembered). PKCE S256, a random `state`, the `resource` parameter (RFC 8707) and the `iss` check (RFC 9207). The sign-in page opens in the system browser and a loopback listener (127.0.0.1, random port, one request, 5-minute timeout, cancellable) receives the answer. Tokens live only in the credential store, in chunks with the header written last, so a half-written token never reads as valid. One refresh at a time; a rotated refresh token is saved before the new access token is used; `invalid_grant` goes to "Needs sign-in" without a retry loop; a 403 `insufficient_scope` shows "Approve more access" and never re-authorizes silently. Every metadata, token and registration address must be https, is not redirected and is refused if it points at a private, loopback (unless the server itself is local), link-local or unique-local address. Signing out revokes at the server when it offers revocation, and deletes the tokens either way.
 - **Audit.** Every call (tool, arguments cut at 8 KB, outcome, duration) is kept, at most 5000 rows, and can be purged.
 
 ## Workflow format
@@ -91,7 +91,7 @@ References between steps use a small expression syntax (`steps.events.output[0].
 ## Build order (revised)
 
 1. **Connector core**: MCP client (stdio, Streamable HTTP), manager, permissions, audit, Connectors page. Tested against mock servers. *(done)*
-2. **OAuth for HTTP connectors** and the credential store.
+2. **OAuth for HTTP connectors** and the credential store. *(done)*
 3. **Workflow format and engine** with tool, transform and output steps only, run against a fake connector so it needs no sign-in. Run history.
 4. **LLM steps** with schemas (validate and repair-retry) and token budgeting. In parallel, scope constrained decoding in the runtime.
 5. **Scheduler**, catch-up on wake, sidecar health check after resume.
@@ -119,7 +119,8 @@ None of this has been verified against a live endpoint; it comes from search exc
 - **`dara-mcp` crate** (`app/src-tauri/crates/dara-mcp`): MCP client (spec 2025-06-18, negotiating down to 2025-03-26 and 2024-11-05) over stdio and Streamable HTTP; connector manager; per-tool permissions with fingerprint pinning; audit; secrets in the Windows Credential Manager. 40 offline tests against mock servers, including a contract test that records the payloads in `docs/ui/samples/connectors.json`.
 - **Tauri commands** (`app/src-tauri/src/connectors.rs`): `connectors_list`, `connector_add`, `connector_update`, `connector_remove`, `connector_connect`, `connector_disconnect`, `connector_tools`, `connector_set_permission`, `connector_call`, `connector_audit`, `connector_stderr`. Payloads are camelCase; errors are plain strings.
 - **Connectors page** (`app/src/routes/ConnectorsPage.tsx`): add, connect, per-tool Ask/Allow/Block, try a tool, call history. In a browser tab it runs on a demo backend whose output is tested against the recorded sample, so it cannot drift from the real one.
-- **Not done:** OAuth (a `TokenProvider` hook and the `needs_auth` state are in place), and everything from step 3 on.
+- **OAuth (step 2):** see the Connectors section above. 79 offline tests against a mock authorization server and OAuth-protected MCP endpoint, including the negative cases (wrong state, wrong or missing PKCE verifier, mismatched `iss`, expired code, redirect to a non-loopback address, port collision, a browser that never returns, a rotating refresh, a revoked refresh token, `insufficient_scope`, private or non-https metadata addresses). The Connectors page has Sign in, Cancel sign-in, Sign out, "Approve more access" and sign-in settings (client ID, secret, scope).
+- **Not done:** everything from step 3 on, and no real server has been tried (Google's remote server needs your own OAuth client ID; Canva's should register Dara by itself).
 
 Things found while building that the first plan did not say:
 
@@ -130,3 +131,12 @@ Things found while building that the first plan did not say:
 - If the tool list changed and a tool's definition changed with it, a call that was approved is **not** made: what the user approved is no longer what is there. The reset itself is in the store (`Store::sync_tools`), so it holds for every connector kind; a test covers an HTTP connector, and the fingerprint includes the tool's title as well as its name, description, schema and annotations.
 
 Run the tests: `cd app/src-tauri && cargo test -p dara-mcp` (use `CARGO_TARGET_DIR` outside the repo while `tauri dev` is running) and `cd app && npm run test`.
+
+More found while building OAuth that the first plan did not say:
+
+- The 401 can carry a `scope`; it is sent on the authorization request.
+- A random loopback port is a problem for registration, because many servers register an exact redirect address; the registered port is stored and reused when free.
+- Microsoft's JWT access tokens can be larger than a Windows credential, so chunking is required.
+- A server with no resource metadata is treated as its own authorization server (the older 2025-03-26 behaviour).
+- Client ID Metadata Documents are detected, but Dara cannot host one for a desktop app, so it falls through to Dynamic Client Registration.
+- If a server's authorization page itself refuses a redirect address, nothing tells Dara; that case ends in the 5-minute timeout.

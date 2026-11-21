@@ -19,6 +19,8 @@ export interface ConnectorConfig {
   url: string | null;
   enabled: boolean;
   createdAt: number;
+  /** sign-in settings for a server that asks you to sign in (the secret itself is in the credential store) */
+  oauth: { clientId: string | null; scope: string | null; hasSecret: boolean };
 }
 
 export interface ConnectorStatus {
@@ -31,6 +33,10 @@ export interface ConnectorStatus {
   toolsChanged: boolean;
   /** for needs_auth: where the server describes its sign-in */
   resourceMetadata: string | null;
+  /** valid sign-in tokens are stored */
+  signedIn: boolean;
+  /** the server answered that a tool needs more access than was granted; signing in again asks for it */
+  neededScope: string | null;
 }
 
 export interface ConnectorEntry {
@@ -74,6 +80,13 @@ export interface AuditEntry {
   createdAt: number;
 }
 
+/** Only needed for a server that does not register clients by itself (Google's, for example): your own client from its console. */
+export interface OAuthSettings {
+  clientId?: string;
+  clientSecret?: string;
+  scope?: string;
+}
+
 export interface AddConnectorInput {
   name: string;
   kind: ConnectorKind;
@@ -81,6 +94,7 @@ export interface AddConnectorInput {
   args?: string[];
   env?: Record<string, string>;
   url?: string;
+  oauth?: OAuthSettings;
 }
 
 export interface ConnectorPatch {
@@ -88,6 +102,8 @@ export interface ConnectorPatch {
   enabled?: boolean;
   args?: string[];
   env?: Record<string, string>;
+  /** a clientSecret of "" keeps the one already stored */
+  oauth?: OAuthSettings;
 }
 
 /** What the UI needs from the desktop layer. The desktop app implements it with Tauri commands; a browser tab gets a demo with sample data. */
@@ -99,6 +115,10 @@ export interface ConnectorsBackend {
   remove(id: string): Promise<void>;
   connect(id: string): Promise<ConnectorStatus>;
   disconnect(id: string): Promise<void>;
+  /** Opens the sign-in page in the browser and waits (up to 5 minutes) for it to finish; resolves with the new status. */
+  signIn(id: string): Promise<ConnectorStatus>;
+  cancelSignIn(id: string): Promise<void>;
+  signOut(id: string): Promise<ConnectorStatus>;
   tools(id: string): Promise<ConnectorTool[]>;
   setPermission(id: string, tool: string, permission: ToolPermission): Promise<void>;
   call(

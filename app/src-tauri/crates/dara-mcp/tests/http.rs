@@ -69,7 +69,7 @@ async fn a_401_asks_for_sign_in_and_names_the_metadata() {
     let mock = start_http().await;
     mock.state.unauthorized.store(true, Ordering::SeqCst);
     match connect(&mock.url(), None).await {
-        Err(McpError::AuthRequired { resource_metadata }) => {
+        Err(McpError::AuthRequired { resource_metadata, .. }) => {
             let url = resource_metadata.expect("the challenge names the metadata");
             assert!(url.ends_with("/.well-known/oauth-protected-resource"), "{url}");
         }
