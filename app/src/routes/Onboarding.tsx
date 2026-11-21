@@ -7,6 +7,7 @@ import { Button } from "../lib/ui/Button.tsx";
 import { Skeleton } from "../lib/ui/Skeleton.tsx";
 import { ProgressBar } from "../lib/ui/ProgressBar.tsx";
 import { StorageChooser } from "../lib/features/models/StorageChooser.tsx";
+import { StartupCheck } from "../lib/features/models/StartupCheck.tsx";
 import { DownloadProgress } from "../lib/features/models/DownloadProgress.tsx";
 import {
   diskCheck,
@@ -59,6 +60,8 @@ export const Onboarding: React.FC = () => {
             this computer. The recommended one fits your GPU.
           </p>
         </header>
+
+        <StartupCheck />
 
         {!isSettingUp && <StorageChooser />}
 
@@ -143,8 +146,8 @@ export const Onboarding: React.FC = () => {
                       {typeof d.context === "number" && (
                         <>
                           {" "}
-                          Up to <span className="font-mono">{formatContext(d.context)}</span>{" "}
-                          tokens of context.
+                          Up to <span className="font-mono">{formatContext(d.context)}</span> tokens
+                          of context.
                         </>
                       )}
                     </p>
