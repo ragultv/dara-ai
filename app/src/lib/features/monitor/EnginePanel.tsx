@@ -11,6 +11,16 @@ interface EnginePanelProps {
 
 export const EnginePanel: React.FC<EnginePanelProps> = ({ stats }) => {
   const e = stats.engine;
+  // With no model loaded the engine reports nothing yet.
+  if (!e) {
+    return (
+      <Panel title="Engine" icon="activity">
+        <p className="text-xs text-text-muted">
+          No model is loaded, so there is nothing to report. Load one on the Models page.
+        </p>
+      </Panel>
+    );
+  }
   // An average of 0 before any request means "not measured", not "zero speed".
   const hasRequests = e.requests > 0;
   return (
