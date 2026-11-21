@@ -504,4 +504,67 @@ describe("connectors stored with the chat", () => {
       expect(stored?.["usage"]).toBeTruthy();
     });
   });
+  it("sends the model back when a tool's job is unfinished and it gives up, then lets it finish", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      setBackend(createDemoBackend());
+      useConnectorsStore.setState({ entries: [], tools: {}, audit: {}, busy: {}, error: null });
+      await useConnectorsStore.getState().add({ name: "Demo", kind: "stdio", command: "demo" });
+      await useConnectorsStore.getState().load();
+      const cid = useConnectorsStore.getState().entries[0]!.config.id;
+      await useConnectorsStore.getState().setPermission(cid, "list_events", "allow");
+      // a job that is pending the first time it is asked and done the second time
+      let asked = 0;
+      useConnectorsStore.setState({
+        call: async () => ({
+          outcome: "ok",
+          content: [
+            {
+              type: "text",
+              text:
+                asked++ === 0
+                  ? '{"status": "pending", "job": "j1", "note": "Wait at least 15 seconds before checking again."}'
+                  : '{"status": "completed", "url": "https://x.example/d/1"}'
+            }
+          ],
+          structuredContent: null,
+          isError: false,
+          truncated: false
+        })
+      } as never);
+      seedConversation([]);
+      useChatToolsStore.getState().toggle(SEED, cid);
+      const steps = [
+        chunks(
+          '<tool_call>{"name": "demo__list_events", "arguments": {"range": "today"}}</tool_call>',
+          "stop",
+          50
+        ),
+        chunks("The job is pending. I will check back shortly!", "stop", 60),
+        chunks(
+          '<tool_call>{"name": "dara__wait", "arguments": {"seconds": 15}}</tool_call>' +
+            '<tool_call>{"name": "demo__list_events", "arguments": {"range": "today"}}</tool_call>',
+          "stop",
+          70
+        ),
+        chunks("Done: https://x.example/d/1", "stop", 80)
+      ];
+      vi.spyOn(apiClient, "streamChat").mockImplementation(async (req: ChatRequest) => {
+        sent.push(req);
+        return gen(steps.shift() ?? []) as never;
+      });
+      const run = useChatStore.getState().sendMessage("Make it");
+      await vi.advanceTimersByTimeAsync(20000);
+      await run;
+      const msgs = useChatStore.getState().getActiveConversation()?.messages ?? [];
+      expect(steps).toEqual([]); // all four model turns were used
+      expect(msgs[msgs.length - 1]?.content).toBe("Done: https://x.example/d/1");
+      const nudge = msgs.find((m) => m.role === "user" && m.content.includes("dara:nudge:1"));
+      expect(nudge?.content).toContain("not finished");
+      expect(nudge?.content).toContain("dara__wait block for 15 seconds");
+      expect(asked).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

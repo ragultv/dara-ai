@@ -43,7 +43,8 @@ import {
   parseToolCalls,
   toolSystemPrompt
 } from "../chat/tools/protocol.ts";
-import { MAX_REPAIRS, MAX_STEPS, type ChatTool } from "../chat/tools/types.ts";
+import { MAX_REPAIRS, MAX_STEPS, type ChatTool, type ToolResultItem } from "../chat/tools/types.ts";
+import { MAX_NUDGES, nudgeText, promisesMore, unfinishedWork } from "../chat/tools/jobs.ts";
 import {
   buildMessageStats,
   parseToolCallRecords,
@@ -1042,6 +1043,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       let stepMsgId = assistantMsg.id;
       let repairs = 0;
+      let nudges = 0;
+      // the results of the previous step, to tell unfinished work from a finished answer
+      let lastItems: ToolResultItem[] | null = null;
       for (let step = 1; ; step++) {
         set({ streamingText: "", currentTps: undefined });
         finish = await streamStep(stepMsgId);
@@ -1057,6 +1061,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             break;
           }
           const items = await runCalls(id, parsed.calls, tools, signal);
+          lastItems = items;
           saveToolCalls(
             stepMsgId,
             parsed.calls.map((c) => c.id)
@@ -1070,9 +1075,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
             break;
           }
           repairs++;
+          lastItems = null;
           resultsText = formatProblems(parsed.problems, tools);
         } else {
-          break; // a normal answer: done
+          // A reply with no call is the answer, unless work a tool started is not finished and the model is giving up on it
+          // ("I will check back shortly"): send it back to wait and check, a few times at most. Any connector, nothing specific.
+          const unfinished = lastItems ? unfinishedWork(lastItems) : null;
+          if (
+            lastItems === null ||
+            nudges >= MAX_NUDGES ||
+            step >= MAX_STEPS ||
+            !(unfinished || promisesMore(parsed.text))
+          )
+            break;
+          nudges++;
+          lastItems = null;
+          resultsText =
+            formatResults([
+              {
+                id: `dara:nudge:${nudges}`,
+                name: "dara",
+                status: "ok",
+                text: "The work is not finished yet."
+              }
+            ]) +
+            `
+${nudgeText(unfinished)}`;
         }
 
         if (signal.aborted) {
