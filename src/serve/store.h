@@ -53,6 +53,30 @@ public:
     nlohmann::json message_patch(const std::string& id, const nlohmann::json& body);
     int messages_truncate(const std::string& conversation_id, int from_position);   // deletes messages at positions >= from; returns how many
 
+    // artifacts: documents now (Markdown), slides and designs later. docs/ui/09-artifacts.md
+    nlohmann::json artifacts_list(const std::string& kind, int limit, int offset);   // newest first, pinned first; each with a short `snippet`, no full content
+    nlohmann::json artifact_get(const std::string& id);
+    nlohmann::json artifact_create(const nlohmann::json& body);
+    nlohmann::json artifact_patch(const std::string& id, const nlohmann::json& body);
+    bool artifact_delete(const std::string& id);             // with its versions, chat, comments and assets
+    // version history: the states an artifact had before a change (explicit `snapshot` in a patch, an edit after a long pause, a restore)
+    nlohmann::json artifact_versions_list(const std::string& id, int limit, int offset);   // newest first; short `snippet`, no full content
+    nlohmann::json artifact_version_get(const std::string& id, int64_t rev);
+    nlohmann::json artifact_restore(const std::string& id, const nlohmann::json& body);    // {"rev": N}; returns the artifact
+    // the chat, the comments and the images/videos that belong to an artifact (docs/ui/10-artifact-collab.md)
+    nlohmann::json artifact_chat_list(const std::string& id);                                                           // by seq
+    nlohmann::json artifact_chat_put(const std::string& id, const std::string& mid, const nlohmann::json& body);       // {"data": {...}}: upsert
+    int64_t artifact_chat_clear(const std::string& id);                                                                 // rows deleted
+    nlohmann::json artifact_comments_list(const std::string& id);                                                       // flat, oldest first
+    nlohmann::json artifact_comment_create(const std::string& id, const nlohmann::json& body);
+    nlohmann::json artifact_comment_patch(const std::string& id, const std::string& cid, const nlohmann::json& body);
+    int64_t artifact_comment_delete(const std::string& id, const std::string& cid);                                     // rows deleted (a root takes its replies); 0 = not found
+    nlohmann::json artifact_asset_add(const std::string& id, const std::string& mime, const std::string& name, const std::string& bytes);
+    nlohmann::json artifact_assets_list(const std::string& id);                                                         // metadata only
+    bool artifact_asset_open(const std::string& id, const std::string& asset_id, std::string& mime, std::string& bytes);
+    bool artifact_asset_delete(const std::string& id, const std::string& asset_id);
+    nlohmann::json artifact_duplicate(const std::string& id, const nlohmann::json& body);   // a copy with its assets (ids rewritten in the text); no versions, chat or comments
+
     // attachments (images)
     nlohmann::json attachment_add(const std::string& message_id, const std::string& mime_hint, const std::string& bytes);
     bool attachment_open(const std::string& id, std::string& mime, std::string& bytes);

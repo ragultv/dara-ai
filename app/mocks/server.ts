@@ -12,6 +12,44 @@ const samplesDir = path.resolve(repoRoot, "docs", "ui", "samples");
 export interface MockServerOptions {
   port?: number;
   apiKey?: string;
+  /** keep the chats the app creates in memory (conversations, messages with their stats and params) instead of serving
+   *  the recorded samples; off by default so tests that expect the samples keep them */
+  keepChats?: boolean;
+}
+
+interface MockMessage {
+  id: string;
+  conversation_id: string;
+  position: number;
+  role: string;
+  content: string;
+  finish_reason: string | null;
+  error: string | null;
+  stats: Record<string, unknown> | null;
+  model: string | null;
+  created_at: number;
+  attachments: unknown[];
+}
+interface MockConversation {
+  id: string;
+  title: string;
+  model: string | null;
+  system_prompt: string;
+  params: Record<string, unknown>;
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
+  messages: MockMessage[];
+}
+
+interface MockArtifact {
+  id: string;
+  kind: string;
+  title: string;
+  content: string;
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
 }
 
 export function createMockServer(options: MockServerOptions = {}): {
@@ -19,11 +57,56 @@ export function createMockServer(options: MockServerOptions = {}): {
   start: () => Promise<number>;
   stop: () => Promise<void>;
 } {
+  const artifacts = new Map<string, MockArtifact>();
+  const chatsDb = new Map<string, MockConversation>();
+  const summaryOf = ({ messages, ...c }: MockConversation) => ({
+    ...c,
+    message_count: messages.length
+  });
+  // version history (docs/ui/09-artifacts.md): the mock keeps a version only for an explicit `snapshot` label or a restore
+  const versions = new Map<
+    string,
+    Array<{ rev: number; title: string; content: string; label: string; created_at: number }>
+  >();
+  // chat, comments and media that belong to an artifact (docs/ui/10-artifact-collab.md)
+  const chats = new Map<
+    string,
+    Array<{ id: string; seq: number; data: unknown; created_at: number; updated_at: number }>
+  >();
+  const comments = new Map<string, Array<Record<string, unknown>>>();
+  const assets = new Map<
+    string,
+    Array<{
+      id: string;
+      name: string;
+      mime: string;
+      size: number;
+      created_at: number;
+      bytes: Buffer;
+    }>
+  >();
+  const keepVersion = (a: MockArtifact, label: string) => {
+    if (!a.title && !a.content) return;
+    const list = versions.get(a.id) ?? [];
+    const last = list[list.length - 1];
+    if (last && last.title === a.title && last.content === a.content) return;
+    list.push({
+      rev: (last?.rev ?? 0) + 1,
+      title: a.title,
+      content: a.content,
+      label,
+      created_at: a.updated_at
+    });
+    versions.set(a.id, list);
+  };
   const server = http.createServer((req, res) => {
     // Enable CORS for testing & local webview dev
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, Accept, X-Dara-Name"
+    );
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -111,6 +194,99 @@ export function createMockServer(options: MockServerOptions = {}): {
           log: ["Benchmark cancelled by user."]
         })
       );
+      return;
+    }
+
+    // Chats kept in memory (keepChats): the same routes and limits as src/serve/store.cpp, enough for a reload to show them.
+    if (
+      options.keepChats &&
+      (pathname.startsWith("/dara/conversations") || pathname.startsWith("/dara/messages/"))
+    ) {
+      const send = (status: number, body: unknown) => {
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      const parts: Buffer[] = [];
+      req.on("data", (c: Buffer) => parts.push(c));
+      req.on("end", () => {
+        const raw = Buffer.concat(parts).toString("utf-8");
+        const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
+        const tooBig = (v: unknown) => JSON.stringify(v ?? null).length > 64 * 1024;
+        if (tooBig(body["params"]) || tooBig(body["stats"]))
+          return send(400, { error: { message: "too large" } });
+        const now = Date.now();
+        const seg = pathname.split("/").filter(Boolean); // dara, conversations|messages, id?, messages?
+        if (seg[1] === "conversations" && seg.length === 2) {
+          if (req.method === "GET") {
+            const data = [...chatsDb.values()]
+              .sort((a, b) => b.updated_at - a.updated_at)
+              .map(summaryOf);
+            return send(200, { object: "list", data, total: data.length, limit: 200, offset: 0 });
+          }
+          const id = String(body["id"] ?? crypto.randomUUID());
+          const c: MockConversation = {
+            id,
+            title: String(body["title"] ?? "New Chat"),
+            model: (body["model"] as string | undefined) ?? null,
+            system_prompt: String(body["system_prompt"] ?? ""),
+            params: (body["params"] as Record<string, unknown> | undefined) ?? {},
+            pinned: body["pinned"] === true,
+            created_at: now,
+            updated_at: now,
+            messages: []
+          };
+          chatsDb.set(id, c);
+          return send(201, summaryOf(c));
+        }
+        if (seg[1] === "conversations") {
+          const c = chatsDb.get(seg[2] ?? "");
+          if (!c) return send(404, { error: { message: "no such conversation" } });
+          if (seg[3] === "messages") {
+            if (req.method === "DELETE") {
+              const from = Number(url.searchParams.get("from") ?? 0);
+              const before = c.messages.length;
+              c.messages = c.messages.filter((m) => m.position < from);
+              return send(200, { deleted: before - c.messages.length });
+            }
+            const m: MockMessage = {
+              id: String(body["id"] ?? crypto.randomUUID()),
+              conversation_id: c.id,
+              position: c.messages.length,
+              role: String(body["role"] ?? "user"),
+              content: String(body["content"] ?? ""),
+              finish_reason: (body["finish_reason"] as string | undefined) ?? null,
+              error: (body["error"] as string | undefined) ?? null,
+              stats: (body["stats"] as Record<string, unknown> | undefined) ?? null,
+              model: null,
+              created_at: Number(body["created_at"] ?? now),
+              attachments: []
+            };
+            c.messages.push(m);
+            c.updated_at = now;
+            return send(201, m);
+          }
+          if (req.method === "GET") return send(200, { ...summaryOf(c), messages: c.messages });
+          if (req.method === "DELETE") {
+            chatsDb.delete(c.id);
+            return send(200, { deleted: true });
+          }
+          for (const k of ["title", "model", "system_prompt", "params", "pinned"] as const)
+            if (k in body) (c as unknown as Record<string, unknown>)[k] = body[k];
+          c.updated_at = now;
+          return send(200, summaryOf(c));
+        }
+        // /dara/messages/{id}
+        const id = seg[2] ?? "";
+        for (const c of chatsDb.values()) {
+          const m = c.messages.find((x) => x.id === id);
+          if (!m) continue;
+          for (const k of ["content", "finish_reason", "error", "stats"] as const)
+            if (k in body) (m as unknown as Record<string, unknown>)[k] = body[k];
+          c.updated_at = now;
+          return send(200, m);
+        }
+        return send(404, { error: { message: "no such message" } });
+      });
       return;
     }
 
@@ -258,6 +434,212 @@ export function createMockServer(options: MockServerOptions = {}): {
     if (pathname.startsWith("/dara/models/") && req.method === "DELETE") {
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    // ---- artifacts (docs/ui/09-artifacts.md): kept in memory for the dev mock ----
+    const artifactMatch =
+      /^\/dara\/artifacts(?:\/([0-9a-f-]{36})(?:\/([a-z]+)(?:\/([\w-]+))?)?)?$/i.exec(pathname);
+    if (artifactMatch) {
+      const id = artifactMatch[1];
+      const sub = artifactMatch[2];
+      const subId = artifactMatch[3];
+      const subRev = subId && /^\d+$/.test(subId) ? Number(subId) : undefined;
+      const send = (status: number, body: unknown) => {
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => {
+        chunks.push(c);
+      });
+      req.on("end", () => {
+        const bytes = Buffer.concat(chunks);
+        const isAsset = sub === "assets";
+        const body = !isAsset && bytes.length ? JSON.parse(bytes.toString("utf-8")) : {};
+        const full = (a: MockArtifact) => ({ ...a, chars: a.content.length });
+        const summary = (a: MockArtifact) => {
+          const { content, ...rest } = a;
+          return { ...rest, chars: content.length, snippet: content.slice(0, 600) };
+        };
+        if (!id && req.method === "GET") {
+          const kind = url.searchParams.get("kind");
+          const data = [...artifacts.values()]
+            .filter((a) => !kind || a.kind === kind)
+            .sort((a, b) => b.updated_at - a.updated_at);
+          return send(200, {
+            object: "list",
+            data: data.map(summary),
+            total: data.length,
+            limit: 200,
+            offset: 0
+          });
+        }
+        if (!id && req.method === "POST") {
+          const now = Date.now();
+          const a: MockArtifact = {
+            id: body.id ?? crypto.randomUUID(),
+            kind: body.kind ?? "doc",
+            title: body.title ?? "",
+            content: body.content ?? "",
+            pinned: false,
+            created_at: now,
+            updated_at: now
+          };
+          artifacts.set(a.id, a);
+          return send(201, full(a));
+        }
+        const a = id ? artifacts.get(id) : undefined;
+        if (!a) return send(404, { error: { message: "artifact not found", type: "not_found" } });
+        if (sub === "chat") {
+          const rows = chats.get(a.id) ?? [];
+          if (req.method === "GET")
+            return send(200, { object: "list", data: rows, total: rows.length });
+          if (req.method === "DELETE") {
+            chats.delete(a.id);
+            return send(200, { deleted: rows.length });
+          }
+          if (req.method === "PUT" && subId) {
+            const now = Date.now();
+            let row = rows.find((r) => r.id === subId);
+            if (row) {
+              row.data = body.data;
+              row.updated_at = now;
+            } else {
+              row = {
+                id: subId,
+                seq: (rows[rows.length - 1]?.seq ?? 0) + 1,
+                data: body.data,
+                created_at: now,
+                updated_at: now
+              };
+              rows.push(row);
+            }
+            chats.set(a.id, rows);
+            return send(200, row);
+          }
+        }
+        if (sub === "comments") {
+          const rows = comments.get(a.id) ?? [];
+          if (req.method === "GET")
+            return send(200, { object: "list", data: rows, total: rows.length });
+          if (req.method === "POST") {
+            const now = Date.now();
+            const c = {
+              id: body.id ?? crypto.randomUUID(),
+              parent_id: body.parent_id ?? null,
+              author: body.author ?? "user",
+              body: body.body,
+              quote: body.quote ?? "",
+              nth: body.nth ?? 0,
+              resolved: false,
+              created_at: now,
+              updated_at: now
+            };
+            rows.push(c);
+            comments.set(a.id, rows);
+            return send(201, c);
+          }
+          const c = rows.find((r) => r.id === subId);
+          if (!c) return send(404, { error: { message: "comment not found", type: "not_found" } });
+          if (req.method === "PATCH") {
+            for (const k of ["body", "resolved", "quote", "nth"]) if (k in body) c[k] = body[k];
+            c.updated_at = Date.now();
+            return send(200, c);
+          }
+          if (req.method === "DELETE") {
+            const keep = rows.filter((r) => r.id !== subId && r.parent_id !== subId);
+            comments.set(a.id, keep);
+            return send(200, { deleted: rows.length - keep.length });
+          }
+        }
+        if (sub === "assets") {
+          const rows = assets.get(a.id) ?? [];
+          if (req.method === "POST") {
+            const mime = String(req.headers["content-type"] ?? "");
+            if (!/^(image\/(png|jpeg|gif|webp)|video\/(mp4|webm))$/.test(mime))
+              return send(415, {
+                error: { message: "unsupported type", type: "invalid_request_error" }
+              });
+            const item = {
+              id: crypto.randomUUID(),
+              name: decodeURIComponent(String(req.headers["x-dara-name"] ?? "file")),
+              mime,
+              size: bytes.length,
+              created_at: Date.now(),
+              bytes
+            };
+            rows.push(item);
+            assets.set(a.id, rows);
+            const { bytes: _b, ...meta } = item;
+            return send(201, meta);
+          }
+          if (req.method === "GET" && subId) {
+            const item = rows.find((r) => r.id === subId);
+            if (!item)
+              return send(404, { error: { message: "asset not found", type: "not_found" } });
+            res.writeHead(200, { "Content-Type": item.mime });
+            return res.end(item.bytes);
+          }
+        }
+        if (sub === "duplicate" && req.method === "POST") {
+          const now = Date.now();
+          const copy: MockArtifact = {
+            ...a,
+            id: body.id ?? crypto.randomUUID(),
+            title: body.title ?? (a.title ? `${a.title} (copy)` : ""),
+            created_at: now,
+            updated_at: now
+          };
+          +artifacts.set(copy.id, copy);
+          return send(201, full(copy));
+        }
+        if (sub === "versions" && req.method === "GET") {
+          const list = [...(versions.get(a.id) ?? [])].reverse();
+          if (subRev !== undefined) {
+            const v = list.find((x) => x.rev === subRev);
+            if (!v)
+              return send(404, { error: { message: "version not found", type: "not_found" } });
+            return send(200, { ...v, chars: v.content.length });
+          }
+          return send(200, {
+            object: "list",
+            data: list.map(({ content, ...rest }) => ({
+              ...rest,
+              chars: content.length,
+              snippet: content.slice(0, 200)
+            })),
+            total: list.length,
+            limit: 100,
+            offset: 0
+          });
+        }
+        if (sub === "restore" && req.method === "POST") {
+          const v = (versions.get(a.id) ?? []).find((x) => x.rev === body.rev);
+          if (!v) return send(404, { error: { message: "version not found", type: "not_found" } });
+          keepVersion(a, "Before restore");
+          a.title = v.title;
+          a.content = v.content;
+          a.updated_at = Date.now();
+          return send(200, full(a));
+        }
+        if (req.method === "GET") return send(200, full(a));
+        if (req.method === "PATCH") {
+          if (typeof body.snapshot === "string") keepVersion(a, body.snapshot);
+          if (typeof body.title === "string") a.title = body.title;
+          if (typeof body.content === "string") a.content = body.content;
+          if (typeof body.pinned === "boolean") a.pinned = body.pinned;
+          a.updated_at = Date.now();
+          return send(200, full(a));
+        }
+        if (req.method === "DELETE") {
+          artifacts.delete(a.id);
+          return send(200, { deleted: true });
+        }
+        return send(405, {
+          error: { message: "method not allowed", type: "invalid_request_error" }
+        });
+      });
       return;
     }
 

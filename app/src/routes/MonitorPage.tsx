@@ -185,7 +185,7 @@ export const MonitorPage: React.FC = () => {
               {gpu && <GpuPanel gpu={gpu} />}
               <EnginePanel stats={stats} />
               <MemoryPanel stats={stats} />
-              <DiskPanel disk={stats.disk} />
+              {stats.disk && <DiskPanel disk={stats.disk} />}
               <DownloadsPanel downloads={stats.downloads} />
             </div>
 

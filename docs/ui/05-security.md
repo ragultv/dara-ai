@@ -64,3 +64,7 @@ The server validates requests, but the UI also checks: image type and size (png/
 - [ ] No secrets or message content in logs, URLs or storage
 - [ ] New remote host? There should be none; if so, it needs sign-off and a CSP change
 - [ ] `npm audit` / `cargo audit` clean
+
+## Document widgets (artifacts)
+
+The Tauri Content-Security-Policy allows `frame-src data:` and `media-src 'self' blob:` for documents ([09-artifacts.md](09-artifacts.md)). A widget runs in an `<iframe sandbox="allow-scripts">` whose page is a `data:` URL with its own CSP (`default-src 'none'`; inline script and style only): no network, no same-origin access, no navigation or popups. The parent accepts only a height number from a frame, and only from the frame that owns the message's id. Images and video load only from the document's own stored assets (`dara-asset:<uuid>`), through an authenticated request; any other address is never fetched.

@@ -6,7 +6,7 @@ import { KeyValue } from "./KeyValue.tsx";
 import { Panel } from "./Panel.tsx";
 
 interface DiskPanelProps {
-  disk: Stats["disk"];
+  disk: NonNullable<Stats["disk"]>;
 }
 
 export const DiskPanel: React.FC<DiskPanelProps> = ({ disk }) => {

@@ -9,7 +9,8 @@ interface SummaryTilesProps {
 }
 
 export const SummaryTiles: React.FC<SummaryTilesProps> = ({ stats }) => {
-  const model = stats.model;
+  const model = stats.model ?? undefined;
+  const ctx = stats.context;
   const quant = readString(model, "quant");
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
@@ -24,9 +25,17 @@ export const SummaryTiles: React.FC<SummaryTilesProps> = ({ stats }) => {
           <Tile
             icon="layers"
             label="Context"
-            value={`${formatInt(stats.context.held_tokens)} / ${formatContext(stats.context.capacity)}`}
+            value={
+              ctx
+                ? `${formatInt(ctx.held_tokens)} / ${formatContext(ctx.capacity)}`
+                : "not measured"
+            }
             sub="tokens held / capacity"
-            title={`${stats.context.held_tokens.toLocaleString("en-US")} of ${stats.context.capacity.toLocaleString("en-US")} tokens`}
+            title={
+              ctx
+                ? `${ctx.held_tokens.toLocaleString("en-US")} of ${ctx.capacity.toLocaleString("en-US")} tokens`
+                : "No context is held"
+            }
           />
           <Tile
             icon="cpu"

@@ -20,6 +20,9 @@ import { OptionsPage } from "./routes/OptionsPage.tsx";
 import { SettingsPage } from "./routes/SettingsPage.tsx";
 import { Onboarding } from "./routes/Onboarding.tsx";
 import { KitPage } from "./routes/KitPage.tsx";
+import { ArtifactsPage } from "./routes/ArtifactsPage.tsx";
+import { ArtifactEditorPage } from "./routes/ArtifactEditorPage.tsx";
+import { PageErrorBoundary } from "./lib/ui/PageErrorBoundary.tsx";
 
 export const App: React.FC = () => {
   const [isRailCollapsed, setIsRailCollapsed] = useState(false);
@@ -76,6 +79,10 @@ export const App: React.FC = () => {
         return <SettingsPage />;
       case "kit":
         return scrollable(<KitPage />);
+      case "artifacts":
+        return scrollable(<ArtifactsPage />);
+      case "artifact":
+        return <ArtifactEditorPage />;
       case "chat":
       default:
         return <ChatPage />;
@@ -99,7 +106,12 @@ export const App: React.FC = () => {
           />
 
           {/* Dynamic Route Viewport */}
-          <div className="flex-1 overflow-hidden relative bg-bg">{renderRoute()}</div>
+          <div className="flex-1 overflow-hidden relative bg-bg">
+            {/* a page that throws shows a message here instead of leaving the window blank */}
+            <PageErrorBoundary key={currentRoute} page={currentRoute}>
+              {renderRoute()}
+            </PageErrorBoundary>
+          </div>
 
           {/* Bottom Status Pill Footer */}
           <StatusPill />

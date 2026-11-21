@@ -5,9 +5,16 @@ import { MessageActions } from "./MessageActions.tsx";
 import type { UiMessage } from "../../chat/types.ts";
 import { Logo } from "../../ui/Logo.tsx";
 import { Reasoning } from "./Reasoning.tsx";
+import { ToolGroup, type TurnStep } from "./ToolCalls.tsx";
+import { displayText, extractBlocks } from "../../chat/tools/protocol.ts";
 
 interface MessagePairProps {
   message: UiMessage;
+  /**
+   * The reply's tool steps (assistant messages that made calls, with their results), shown in one fold above the answer.
+   * When `message` is itself the last of them (still working, or stopped), its text is shown inside the fold, not again below.
+   */
+  toolSteps?: TurnStep[];
   isStreaming?: boolean;
   /** The newest assistant message: only it offers Continue. */
   isLast?: boolean;
@@ -20,6 +27,7 @@ interface MessagePairProps {
 
 export const MessagePair: React.FC<MessagePairProps> = ({
   message,
+  toolSteps = [],
   isStreaming = false,
   isLast = false,
   onEdit,
@@ -141,13 +149,16 @@ export const MessagePair: React.FC<MessagePairProps> = ({
     );
   }
 
-  // Assistant message
-  if (!isStreaming && !message.content.trim() && !message.error && !message.reasoning?.trim()) {
+  // Assistant message: the tool steps of this reply in one fold, then the answer (the text without tool_call blocks)
+  const inFold = toolSteps.some((st) => st.message.id === message.id);
+  const shown = displayText(message.content);
+  const hasCalls = toolSteps.length > 0 || extractBlocks(message.content).length > 0;
+  if (!isStreaming && !shown && !hasCalls && !message.error && !message.reasoning?.trim()) {
     return null; // no empty phantom bubbles
   }
 
   const hasError = Boolean(message.error);
-  const hasText = message.content.trim().length > 0;
+  const hasText = shown.length > 0 && !inFold;
   const hasReasoning = Boolean(message.reasoning?.trim());
   // the thought is still being written while the reply streams and no answer text has started
   const thinkingNow = isStreaming && hasReasoning && !hasText;
@@ -160,6 +171,8 @@ export const MessagePair: React.FC<MessagePairProps> = ({
         className={`w-7 h-7 object-contain shrink-0 ${isStreaming ? "animate-pulse" : ""}`}
       />
       <div className="flex-1 min-w-0 space-y-1">
+        {toolSteps.length > 0 && <ToolGroup steps={toolSteps} streaming={isStreaming} />}
+
         {hasReasoning && (
           <Reasoning
             text={message.reasoning ?? ""}
@@ -169,7 +182,7 @@ export const MessagePair: React.FC<MessagePairProps> = ({
           />
         )}
 
-        {isStreaming && !hasText && !hasReasoning && (
+        {isStreaming && !hasText && !hasReasoning && !hasCalls && (
           <div className="flex items-center gap-2 h-7 text-text-subtle">
             <span className="w-1.5 h-1.5 rounded-full bg-text-muted animate-pulse" />
             <span className="text-xs text-text-muted font-medium">Generating response...</span>
@@ -178,7 +191,7 @@ export const MessagePair: React.FC<MessagePairProps> = ({
 
         {hasText && (
           <div className="text-sm leading-relaxed text-text">
-            <Markdown content={message.content} />
+            <Markdown content={shown} />
           </div>
         )}
 
@@ -246,10 +259,10 @@ export const MessagePair: React.FC<MessagePairProps> = ({
           </div>
         )}
 
-        {!isStreaming && (hasText || hasReasoning) && !hasError && (
+        {!isStreaming && (hasText || hasReasoning || toolSteps.length > 0) && !hasError && (
           <div className="pt-1">
             <MessageActions
-              content={message.content}
+              content={inFold ? "" : shown}
               stats={message.stats}
               onRegenerate={onRegenerate}
             />

@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "author": "dara",
+      "body": "Should the beta ship on Friday or Monday? Reply here and I will update the plan.",
+      "created_at": 1795214121622,
+      "id": "78c33ffb-3dcb-4b10-a67e-931e2b8953da",
+      "nth": 0,
+      "parent_id": null,
+      "quote": "the beta on Friday",
+      "resolved": false,
+      "updated_at": 1795214121622
+    },
+    {
+      "author": "user",
+      "body": "Monday, after the review.",
+      "created_at": 1795214121624,
+      "id": "e2345eb8-16db-4fb7-80a3-43638cb9dbd7",
+      "nth": 0,
+      "parent_id": "78c33ffb-3dcb-4b10-a67e-931e2b8953da",
+      "quote": "",
+      "resolved": false,
+      "updated_at": 1795214121624
+    }
+  ],
+  "object": "list",
+  "total": 2
+}
