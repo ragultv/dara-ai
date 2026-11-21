@@ -5,16 +5,16 @@ import { MessageActions } from "./MessageActions.tsx";
 import type { UiMessage } from "../../chat/types.ts";
 import { Logo } from "../../ui/Logo.tsx";
 import { Reasoning } from "./Reasoning.tsx";
-import { ToolCalls } from "./ToolCalls.tsx";
+import { ToolGroup, type TurnStep } from "./ToolCalls.tsx";
 import { displayText, extractBlocks } from "../../chat/tools/protocol.ts";
-import type { ToolResultItem } from "../../chat/tools/types.ts";
 
 interface MessagePairProps {
   message: UiMessage;
-  /** Needed to show the reply's tool calls with their live state. */
-  conversationId?: string;
-  /** Results of this reply's tool calls (from the tool-results message after it), when there is one. */
-  toolResults?: ToolResultItem[] | null;
+  /**
+   * The reply's tool steps (assistant messages that made calls, with their results), shown in one fold above the answer.
+   * When `message` is itself the last of them (still working, or stopped), its text is shown inside the fold, not again below.
+   */
+  toolSteps?: TurnStep[];
   isStreaming?: boolean;
   /** The newest assistant message: only it offers Continue. */
   isLast?: boolean;
@@ -27,8 +27,7 @@ interface MessagePairProps {
 
 export const MessagePair: React.FC<MessagePairProps> = ({
   message,
-  conversationId,
-  toolResults = null,
+  toolSteps = [],
   isStreaming = false,
   isLast = false,
   onEdit,
@@ -150,15 +149,16 @@ export const MessagePair: React.FC<MessagePairProps> = ({
     );
   }
 
-  // Assistant message: the text without tool_call blocks, the calls shown as rows
+  // Assistant message: the tool steps of this reply in one fold, then the answer (the text without tool_call blocks)
+  const inFold = toolSteps.some((st) => st.message.id === message.id);
   const shown = displayText(message.content);
-  const hasCalls = conversationId !== undefined && extractBlocks(message.content).length > 0;
+  const hasCalls = toolSteps.length > 0 || extractBlocks(message.content).length > 0;
   if (!isStreaming && !shown && !hasCalls && !message.error && !message.reasoning?.trim()) {
     return null; // no empty phantom bubbles
   }
 
   const hasError = Boolean(message.error);
-  const hasText = shown.length > 0;
+  const hasText = shown.length > 0 && !inFold;
   const hasReasoning = Boolean(message.reasoning?.trim());
   // the thought is still being written while the reply streams and no answer text has started
   const thinkingNow = isStreaming && hasReasoning && !hasText;
@@ -171,6 +171,8 @@ export const MessagePair: React.FC<MessagePairProps> = ({
         className={`w-7 h-7 object-contain shrink-0 ${isStreaming ? "animate-pulse" : ""}`}
       />
       <div className="flex-1 min-w-0 space-y-1">
+        {toolSteps.length > 0 && <ToolGroup steps={toolSteps} streaming={isStreaming} />}
+
         {hasReasoning && (
           <Reasoning
             text={message.reasoning ?? ""}
@@ -191,17 +193,6 @@ export const MessagePair: React.FC<MessagePairProps> = ({
           <div className="text-sm leading-relaxed text-text">
             <Markdown content={shown} />
           </div>
-        )}
-
-        {hasCalls && conversationId !== undefined && (
-          <ToolCalls
-            conversationId={conversationId}
-            assistantMessageId={message.id}
-            content={message.content}
-            results={toolResults}
-            records={message.toolCalls}
-            streaming={isStreaming}
-          />
         )}
 
         {hasError && (
@@ -268,9 +259,13 @@ export const MessagePair: React.FC<MessagePairProps> = ({
           </div>
         )}
 
-        {!isStreaming && (hasText || hasReasoning) && !hasError && (
+        {!isStreaming && (hasText || hasReasoning || toolSteps.length > 0) && !hasError && (
           <div className="pt-1">
-            <MessageActions content={shown} stats={message.stats} onRegenerate={onRegenerate} />
+            <MessageActions
+              content={inFold ? "" : shown}
+              stats={message.stats}
+              onRegenerate={onRegenerate}
+            />
           </div>
         )}
       </div>

@@ -7,9 +7,10 @@ import { Composer } from "../lib/components/assistant-ui/Composer.tsx";
 import { MessagePair } from "../lib/components/assistant-ui/MessagePair.tsx";
 import { toast } from "../lib/ui/Toast.tsx";
 import { enableAddon } from "../lib/chat/addons.ts";
-import type { ContextWindow } from "../lib/chat/types.ts";
+import type { ContextWindow, UiMessage } from "../lib/chat/types.ts";
 import { Logo } from "../lib/ui/Logo.tsx";
-import { isToolResultsContent, parseResults } from "../lib/chat/tools/protocol.ts";
+import { extractBlocks, isToolResultsContent, parseResults } from "../lib/chat/tools/protocol.ts";
+import type { TurnStep } from "../lib/components/assistant-ui/ToolCalls.tsx";
 import { ToolApprovalDialog } from "../lib/components/assistant-ui/ToolApprovalDialog.tsx";
 
 function groupConversations(convs: Conversation[]) {
@@ -194,30 +195,20 @@ export const ChatPage: React.FC = () => {
           ) : (
             /* Messages List - Exactly ONE render per message, zero duplicate streaming bubbles */
             <div className="max-w-3xl mx-auto space-y-6 w-full pb-4">
-              {activeConv.messages.map((m, index) => {
-                const windowHere = activeConv.windows.find((w) => w.startMessageId === m.id);
-                // tool results are messages for the model: shown inside the reply that asked for them, not as a bubble
-                if (m.role === "user" && isToolResultsContent(m.content))
-                  return windowHere ? (
-                    <ContextWindowDivider key={m.id} window={windowHere} />
-                  ) : null;
-                const isLastMessage = index === activeConv.messages.length - 1;
+              {groupReplies(activeConv.messages).map((item) => {
+                const m = item.message;
+                const windowHere = item.ids
+                  .map((mid) => activeConv.windows.find((w) => w.startMessageId === mid))
+                  .find(Boolean);
+                const isLastMessage = item.lastIndex === activeConv.messages.length - 1;
                 const isLastAssistant =
                   isGenerating && phase === "generating" && isLastMessage && m.role === "assistant";
-                const next = activeConv.messages[index + 1];
-                const toolResults =
-                  m.role === "assistant" &&
-                  next?.role === "user" &&
-                  isToolResultsContent(next.content)
-                    ? parseResults(next.content)
-                    : null;
 
                 return (
-                  <React.Fragment key={m.id}>
+                  <React.Fragment key={item.ids[0]}>
                     {windowHere && <ContextWindowDivider window={windowHere} />}
                     <MessagePair
-                      conversationId={activeConv.id}
-                      toolResults={toolResults}
+                      toolSteps={item.steps}
                       message={m}
                       isStreaming={isLastAssistant}
                       isLast={isLastMessage}
@@ -242,6 +233,60 @@ export const ChatPage: React.FC = () => {
     </div>
   );
 };
+
+interface ReplyItem {
+  /** the message shown: a user message, or the last assistant message of a reply */
+  message: UiMessage;
+  /** the reply's assistant messages that made tool calls, with the results that answered them */
+  steps: TurnStep[];
+  /** every message this item stands for (for context-window dividers and keys) */
+  ids: string[];
+  lastIndex: number;
+}
+
+/**
+ * One item per user message and one per reply. A reply with tools is several messages (assistant, tool results, assistant...);
+ * it is shown as one: its tool steps in one fold, then the final answer. Tool-results messages are never shown as bubbles.
+ */
+function groupReplies(messages: UiMessage[]): ReplyItem[] {
+  const out: ReplyItem[] = [];
+  let i = 0;
+  while (i < messages.length) {
+    const m = messages[i]!;
+    if (m.role !== "assistant") {
+      if (!(m.role === "user" && isToolResultsContent(m.content)))
+        out.push({ message: m, steps: [], ids: [m.id], lastIndex: i });
+      i++;
+      continue;
+    }
+    const steps: TurnStep[] = [];
+    const ids: string[] = [];
+    let last = m;
+    let lastIndex = i;
+    while (i < messages.length) {
+      const cur = messages[i]!;
+      if (cur.role === "assistant") {
+        last = cur;
+        lastIndex = i;
+        ids.push(cur.id);
+        const next = messages[i + 1];
+        const answered = next?.role === "user" && isToolResultsContent(next.content);
+        if (extractBlocks(cur.content).length > 0)
+          steps.push({
+            message: cur,
+            results: answered && next ? parseResults(next.content) : null
+          });
+        i++;
+      } else if (cur.role === "user" && isToolResultsContent(cur.content)) {
+        ids.push(cur.id);
+        lastIndex = i;
+        i++;
+      } else break;
+    }
+    out.push({ message: last, steps, ids, lastIndex });
+  }
+  return out;
+}
 
 /** Marks where a new context window starts. The messages above stay saved and visible; the model sees the summary instead. */
 const ContextWindowDivider: React.FC<{ window: ContextWindow }> = ({ window: win }) => {
