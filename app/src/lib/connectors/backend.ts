@@ -148,7 +148,23 @@ export function createDemoBackend(): ConnectorsBackend {
         ...(patch.name !== undefined ? { name: patch.name.trim() } : {}),
         ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
         ...(patch.args !== undefined ? { args: patch.args } : {}),
-        ...(patch.env !== undefined ? { envNames: Object.keys(patch.env) } : {})
+        ...(patch.env !== undefined ? { envNames: Object.keys(patch.env) } : {}),
+        ...(patch.oauth !== undefined
+          ? {
+              oauth: {
+                clientId:
+                  patch.oauth.clientId === undefined
+                    ? c.oauth.clientId
+                    : patch.oauth.clientId.trim() || null,
+                scope:
+                  patch.oauth.scope === undefined
+                    ? c.oauth.scope
+                    : patch.oauth.scope.trim() || null,
+                // an empty secret keeps the stored one
+                hasSecret: patch.oauth.clientSecret ? true : c.oauth.hasSecret
+              }
+            }
+          : {})
       });
       if (patch.enabled === false) status.set(id, disconnected());
     },
