@@ -183,9 +183,12 @@ impl HttpTransport {
                 status.as_u16()
             )));
         }
+        let www = resp.headers().get(WWW_AUTHENTICATE).and_then(|v| v.to_str().ok()).map(str::to_string);
         let body = resp.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(200).collect();
-        Err(McpError::Transport(format!("HTTP {}: {}", status.as_u16(), snippet.trim())))
+        // enough of the answer to see why the server refused; a sign-in challenge header says it too (it holds no secret)
+        let snippet: String = body.chars().take(1500).collect();
+        let challenge = www.map(|w| format!(" [WWW-Authenticate: {w}]")).unwrap_or_default();
+        Err(McpError::Transport(format!("HTTP {}: {}{}", status.as_u16(), snippet.trim(), challenge)))
     }
 
     async fn read_body(resp: Response) -> Result<Vec<u8>, McpError> {
