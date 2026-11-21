@@ -192,6 +192,7 @@ export function toolSystemPrompt(tools: ChatTool[], now: Date = new Date()): str
     "- When you have what you need, answer normally with no block.",
     "- Never invent results. If a tool fails, say so or try another way.",
     `- If a tool starts a job and says to wait or check later, do not end your reply promising to check back. Write a ${WAIT_TOOL} block and then the status call after it; repeat until the job is done, then answer with the result.`,
+    "- If a result says the work is not finished, or hands back something that needs one more call to become the answer, make that next call yourself. Stop only when you have the final result or need something from the user.",
     "- When a result has links (a design, a document, an event), give them to the user in your answer.",
     `Current date and time: ${localIso(now)}`,
     "",

@@ -271,7 +271,7 @@ function groupReplies(messages: UiMessage[]): ReplyItem[] {
         ids.push(cur.id);
         const next = messages[i + 1];
         const answered = next?.role === "user" && isToolResultsContent(next.content);
-        if (extractBlocks(cur.content).length > 0)
+        if (extractBlocks(cur.content).length > 0 || answered)
           steps.push({
             message: cur,
             results: answered && next ? parseResults(next.content) : null
