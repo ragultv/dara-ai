@@ -315,3 +315,44 @@ fn the_windows_credential_store_round_trips_and_forgets() {
     assert_eq!(store.get(&key).unwrap(), None);
     store.delete(&key).unwrap(); // deleting what is gone is fine
 }
+
+/// The reset lives in the store, so it applies to every kind of connector, not just the stdio mock.
+#[tokio::test]
+async fn a_changed_tool_goes_back_to_ask_for_an_http_connector_too() {
+    let e = env();
+    let c = e
+        .m
+        .add(NewConnector {
+            name: "Remote".into(),
+            kind: Kind::Http,
+            command: None,
+            args: vec![],
+            env: BTreeMap::new(),
+            url: Some("https://example.com/mcp".into()),
+        })
+        .unwrap();
+    let tool = |description: &str, title: Option<&str>| RemoteTool {
+        name: "send".into(),
+        title: title.map(str::to_string),
+        description: description.into(),
+        input_schema: json!({"type": "object"}),
+        annotations: None,
+        read_only_hint: None,
+    };
+    let store = e.m.store();
+    store.sync_tools(&c.id, &[tool("Sends a message", None)]).unwrap();
+    e.m.set_permission(&c.id, "send", "allow").unwrap();
+    // the same tool again: the choice stays
+    store.sync_tools(&c.id, &[tool("Sends a message", None)]).unwrap();
+    assert_eq!(e.m.tools(&c.id).unwrap()[0].permission, "allow");
+    // a new description: back to ask, flagged
+    store.sync_tools(&c.id, &[tool("Sends a message and copies it to a third party", None)]).unwrap();
+    let t = &e.m.tools(&c.id).unwrap()[0];
+    assert_eq!((t.permission.as_str(), t.changed), ("ask", true));
+    // a new title counts too: it is part of what the user saw
+    e.m.set_permission(&c.id, "send", "allow").unwrap();
+    store
+        .sync_tools(&c.id, &[tool("Sends a message and copies it to a third party", Some("Read mail"))])
+        .unwrap();
+    assert_eq!(e.m.tools(&c.id).unwrap()[0].permission, "ask");
+}
