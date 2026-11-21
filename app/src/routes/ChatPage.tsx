@@ -9,6 +9,7 @@ import { toast } from "../lib/ui/Toast.tsx";
 import { enableAddon } from "../lib/chat/addons.ts";
 import type { ContextWindow } from "../lib/chat/types.ts";
 import { Logo } from "../lib/ui/Logo.tsx";
+import { isToolResultsContent, parseResults } from "../lib/chat/tools/protocol.ts";
 
 function groupConversations(convs: Conversation[]) {
   const now = new Date();
@@ -193,15 +194,29 @@ export const ChatPage: React.FC = () => {
             /* Messages List - Exactly ONE render per message, zero duplicate streaming bubbles */
             <div className="max-w-3xl mx-auto space-y-6 w-full pb-4">
               {activeConv.messages.map((m, index) => {
+                const windowHere = activeConv.windows.find((w) => w.startMessageId === m.id);
+                // tool results are messages for the model: shown inside the reply that asked for them, not as a bubble
+                if (m.role === "user" && isToolResultsContent(m.content))
+                  return windowHere ? (
+                    <ContextWindowDivider key={m.id} window={windowHere} />
+                  ) : null;
                 const isLastMessage = index === activeConv.messages.length - 1;
                 const isLastAssistant =
                   isGenerating && phase === "generating" && isLastMessage && m.role === "assistant";
-                const windowHere = activeConv.windows.find((w) => w.startMessageId === m.id);
+                const next = activeConv.messages[index + 1];
+                const toolResults =
+                  m.role === "assistant" &&
+                  next?.role === "user" &&
+                  isToolResultsContent(next.content)
+                    ? parseResults(next.content)
+                    : null;
 
                 return (
                   <React.Fragment key={m.id}>
                     {windowHere && <ContextWindowDivider window={windowHere} />}
                     <MessagePair
+                      conversationId={activeConv.id}
+                      toolResults={toolResults}
                       message={m}
                       isStreaming={isLastAssistant}
                       isLast={isLastMessage}
