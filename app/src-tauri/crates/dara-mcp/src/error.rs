@@ -14,9 +14,13 @@ pub enum McpError {
     /// The server answered with a JSON-RPC error.
     #[error("server error {code}: {message}")]
     Rpc { code: i64, message: String },
-    /// HTTP 401: the server wants a token. `resource_metadata` is the URL from `WWW-Authenticate`, when given.
+    /// HTTP 401: the server wants a token. `resource_metadata` and `scope` come from `WWW-Authenticate`, when given.
     #[error("authorization required")]
-    AuthRequired { resource_metadata: Option<String> },
+    AuthRequired { resource_metadata: Option<String>, scope: Option<String> },
+    /// HTTP 403 with `error="insufficient_scope"`: the token is fine but does not allow this. Never fixed silently: the user decides
+    /// whether to sign in again with `scope`.
+    #[error("this server needs more access")]
+    InsufficientScope { scope: Option<String> },
     /// The HTTP session id is no longer known to the server (404 with a session). Handled inside the client.
     #[error("the session expired")]
     SessionExpired,

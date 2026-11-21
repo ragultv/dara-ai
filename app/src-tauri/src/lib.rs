@@ -164,7 +164,10 @@ pub fn run() {
             connectors::connector_set_permission,
             connectors::connector_call,
             connectors::connector_audit,
-            connectors::connector_stderr
+            connectors::connector_stderr,
+            connectors::connector_sign_in,
+            connectors::connector_cancel_sign_in,
+            connectors::connector_sign_out
         ])
         .setup(move |_app| {
             manager_for_setup.start();
