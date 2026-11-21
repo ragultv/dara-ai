@@ -86,7 +86,10 @@ export interface ToolResultItem {
   text: string;
 }
 
-export const MAX_STEPS = 8; // model turns per user message
+export const MAX_STEPS = 12; // model turns per user message (room for a job that has to be checked a few times)
+/** Dara's own tool: wait, so a job a tool started (a design being generated) can be checked again in the same reply. */
+export const WAIT_TOOL = "dara__wait";
+export const MAX_WAIT_SECONDS = 60;
 export const MAX_CALLS_PER_TURN = 6;
 export const MAX_RESULT_CHARS = 6000;
 export const MAX_REPAIRS = 2;

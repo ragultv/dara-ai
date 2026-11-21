@@ -1,7 +1,7 @@
 import { useConnectorsStore } from "../../stores/useConnectorsStore.ts";
 import { allowKey, useChatToolsStore } from "../../stores/useChatToolsStore.ts";
 import type { ToolCallResult } from "../../connectors/types.ts";
-import { buildToolList, resultToText } from "./protocol.ts";
+import { waitTool, buildToolList, resultToText } from "./protocol.ts";
 import {
   CALL_TIMEOUT_MS,
   MAX_RESULT_CHARS,
@@ -10,7 +10,9 @@ import {
   type CallStatus,
   type ChatTool,
   type ParsedCall,
-  type ToolResultItem
+  type ToolResultItem,
+  WAIT_TOOL,
+  MAX_WAIT_SECONDS
 } from "./types.ts";
 
 // Runs the tool calls the model asked for (docs/CHAT_TOOLS.md). Every call goes through the connector permission path:
@@ -65,7 +67,8 @@ export async function loadChatTools(
   );
 
   const s = store();
-  return { tools: buildToolList(s.entries, s.tools, enabledIds), problems };
+  const tools = buildToolList(s.entries, s.tools, enabledIds);
+  return { tools: tools.length > 0 ? [...tools, waitTool()] : tools, problems };
 }
 
 const findEntry = (id: string) =>
@@ -201,6 +204,25 @@ export async function runCalls(
     chat().setCall(base);
     refreshStatus(conversationId, ids);
 
+    // Dara's own wait: no connector, no approval; Stop ends it at once
+    if (tool.name === WAIT_TOOL) {
+      const raw = Number(call.arguments["seconds"]);
+      const secs = Math.min(
+        MAX_WAIT_SECONDS,
+        Math.max(1, Number.isFinite(raw) ? Math.round(raw) : 10)
+      );
+      try {
+        await guard(
+          new Promise<void>((r) => setTimeout(r, secs * 1000)),
+          signal,
+          (secs + 5) * 1000
+        );
+      } catch {
+        return end("skipped", "Stopped while waiting.", "skipped");
+      }
+      return end("ok", `Waited ${secs} seconds.`, "auto");
+    }
+
     const invoke = async (approved: boolean): Promise<ToolCallResult> => {
       const r = await guard(
         useConnectorsStore.getState().call(tool.connectorId, tool.tool, call.arguments, approved),
@@ -257,7 +279,18 @@ export async function runCalls(
   };
 
   try {
-    return await Promise.all(calls.map(runOne));
+    // Calls run at the same time, except around a wait: the calls after a wait block run once it is over (check a job's status).
+    const out: ToolResultItem[] = [];
+    let batch: ParsedCall[] = [];
+    for (const c of calls) {
+      if (c.name === WAIT_TOOL) {
+        out.push(...(await Promise.all(batch.map(runOne))));
+        batch = [];
+        out.push(await runOne(c));
+      } else batch.push(c);
+    }
+    out.push(...(await Promise.all(batch.map(runOne))));
+    return out;
   } finally {
     refreshStatus(conversationId, ids);
   }
