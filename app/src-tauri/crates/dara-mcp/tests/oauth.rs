@@ -142,9 +142,11 @@ async fn a_server_that_cannot_register_dara_says_a_client_id_is_needed() {
 }
 
 #[tokio::test]
-async fn a_server_that_needs_no_sign_in_says_so() {
+async fn a_server_that_answers_without_a_challenge_can_still_be_signed_in_to() {
+    // Google's servers are stateless: connecting needs no token, only a tool call does, so there is no 401 to read the
+    // sign-in description from. Sign-in then finds it at the well-known address instead of refusing.
     let r = rig(|k| k.mcp_open = true, None).await;
-    assert!(err_text(r.sign_in().await).contains("does not ask you to sign in"));
+    assert!(r.sign_in().await.unwrap().signed_in);
 }
 
 // ---- the authorization request and the callback ----
