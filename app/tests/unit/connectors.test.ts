@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   checkServerUrl,
   parseArgs,
@@ -313,8 +313,28 @@ describe("the connector catalog", () => {
     await b.add({ name: "Mine", kind: "stdio", command: "tool" });
     const items = buildItems(await b.list());
     expect(items.find((i) => i.key === "canva")?.connector?.config.name).toBe("Canva");
-    expect(items.find((i) => i.key === "notion")?.connector).toBeUndefined();
+    expect(items.find((i) => i.key === "gmail")?.connector).toBeUndefined();
+    expect(items.some((i) => i.key === "notion" || i.key === "linear")).toBe(false);
     expect(items.filter((i) => i.key.startsWith("c:")).map((i) => i.name)).toEqual(["Mine"]);
     expect(items.find((i) => i.key === "outlook")?.soon).toBe(true);
+  });
+});
+
+describe("Dara's own Google client", () => {
+  it("is used only for Google's servers and only when the build has one", async () => {
+    const { builtinClient, CATALOG } = await import("../../src/lib/connectors/catalog.ts");
+    const google = CATALOG.find((c) => c.id === "gmail")!;
+    const canva = CATALOG.find((c) => c.id === "canva")!;
+    // none in the test build
+    expect(builtinClient(google)).toBeNull();
+    vi.stubEnv("VITE_DARA_GOOGLE_CLIENT_ID", " id.apps.googleusercontent.com ");
+    vi.stubEnv("VITE_DARA_GOOGLE_CLIENT_SECRET", "shh");
+    expect(builtinClient(google)).toEqual({
+      clientId: "id.apps.googleusercontent.com",
+      clientSecret: "shh"
+    });
+    // a server that registers Dara itself never gets Google's client
+    expect(builtinClient(canva)).toBeNull();
+    vi.unstubAllEnvs();
   });
 });

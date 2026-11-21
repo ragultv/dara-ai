@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useConnectorsStore } from "../../stores/useConnectorsStore.ts";
-import { hostOf, humanizeToolName, type CatalogEntry } from "../../connectors/catalog.ts";
+import {
+  builtinClient,
+  hostOf,
+  humanizeToolName,
+  type CatalogEntry
+} from "../../connectors/catalog.ts";
 import type { ConnectorEntry } from "../../connectors/types.ts";
 import { relativeTime } from "../../artifacts/format.ts";
 import { Icon } from "../../ui/Icon.tsx";
@@ -37,11 +42,27 @@ const ClientForm: React.FC<{ entry: CatalogEntry; connector: ConnectorEntry }> =
 }) => {
   const update = useConnectorsStore((s) => s.update);
   const have = connector.config.oauth.clientId;
+  const builtin = builtinClient(entry);
+  const usingBuiltin = !!builtin && have === builtin.clientId;
   const [editing, setEditing] = useState(!have);
   const [clientId, setClientId] = useState("");
   const [secret, setSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  // Dara's own client: nothing to set up; a user who wants their own can still switch
+  if (usingBuiltin && !editing)
+    return (
+      <Row label="Sign-in app">
+        Dara's {entry.publisher} sign-in{" "}
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="cursor-pointer text-xs text-text-muted underline underline-offset-2 hover:text-text"
+        >
+          Use my own
+        </button>
+      </Row>
+    );
   if (have && !editing)
     return (
       <Row label="Client ID">
@@ -199,6 +220,7 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
   const connect = useConnectorsStore((s) => s.connect);
   const disconnect = useConnectorsStore((s) => s.disconnect);
   const signIn = useConnectorsStore((s) => s.signIn);
+  const updateConnector = useConnectorsStore((s) => s.update);
   const cancelSignIn = useConnectorsStore((s) => s.cancelSignIn);
   const signOut = useConnectorsStore((s) => s.signOut);
   const setEnabled = useConnectorsStore((s) => s.setEnabled);
@@ -241,7 +263,9 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
   const host = hostOf(url);
   const status = connector?.status;
   const needsClientId = catalog?.registers === "own-client";
-  const clientMissing = needsClientId && !connector?.config.oauth.clientId;
+  // with Dara's own client in the build, a freshly added connector already has it; one added before that still needs it saved
+  const clientMissing =
+    needsClientId && !connector?.config.oauth.clientId && !(catalog && builtinClient(catalog));
   // a stateless server (Google's) lists its tools without a token, so "connected" can still mean "not signed in"
   const wantsSignIn =
     !!connector && (status?.state === "needs_auth" || (!!catalog && !status?.signedIn));
@@ -250,6 +274,16 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
     if (!catalog) return;
     const problem = await addFromCatalog(catalog);
     if (problem) toast.show(problem, "error");
+  };
+
+  /** Sign in; first give the connector Dara's own client when this build has one and the connector was added without it. */
+  const signInNow = async () => {
+    const b = catalog ? builtinClient(catalog) : null;
+    if (b && connector && !connector.config.oauth.clientId)
+      await updateConnector(id, {
+        oauth: { clientId: b.clientId, ...(b.clientSecret ? { clientSecret: b.clientSecret } : {}) }
+      });
+    void signIn(id);
   };
 
   const primary = (() => {
@@ -266,7 +300,7 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
           variant="primary"
           size="sm"
           disabled={clientMissing || !connector.config.enabled}
-          onClick={() => void signIn(id)}
+          onClick={() => void signInNow()}
         >
           {status.neededScope ? "Approve more access" : "Sign in"}
         </Button>
