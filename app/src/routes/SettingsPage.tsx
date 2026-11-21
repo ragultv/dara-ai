@@ -6,11 +6,13 @@ import { EngineSection } from "../lib/features/settings/EngineSection.tsx";
 import { DefaultsSection } from "../lib/features/settings/DefaultsSection.tsx";
 import { DataSection } from "../lib/features/settings/DataSection.tsx";
 import { AboutSection } from "../lib/features/settings/AboutSection.tsx";
+import { ConnectorsSection } from "../lib/features/connectors/ConnectorsSection.tsx";
 import { useServerFacts } from "../lib/features/settings/useServerFacts.ts";
 
 const NAV_ITEMS: NavItem[] = [
   { id: "settings-appearance", label: "Appearance" },
   { id: "settings-engine", label: "Engine" },
+  { id: "settings-connectors", label: "Connectors" },
   { id: "settings-defaults", label: "Defaults" },
   { id: "settings-data", label: "Data" },
   { id: "settings-about", label: "About" }
@@ -25,7 +27,11 @@ const SAVE_LABEL = {
 
 export const SettingsPage: React.FC = () => {
   const facts = useServerFacts();
-  const [tab, setTab] = useState<string>(NAV_ITEMS[0]!.id);
+  // #/settings?tab=connectors opens that tab
+  const [tab, setTab] = useState<string>(() => {
+    const wanted = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("tab");
+    return NAV_ITEMS.find((i) => i.id === `settings-${wanted}`)?.id ?? NAV_ITEMS[0]!.id;
+  });
   const saveState = useSettingsStore((s) => s.saveState);
   const loadError = useSettingsStore((s) => s.error);
   const flush = useSettingsStore((s) => s.flush);
@@ -53,7 +59,9 @@ export const SettingsPage: React.FC = () => {
 
       {/* Right: the selected tab, scrolls on its own */}
       <div className="min-w-0 flex-1 overflow-y-auto px-8 py-6 custom-scrollbar">
-        <div className="mx-auto max-w-3xl pb-16 text-left">
+        <div
+          className={`mx-auto pb-16 text-left ${tab === "settings-connectors" ? "max-w-5xl" : "max-w-3xl"}`}
+        >
           {loadError && (
             <p
               role="alert"
@@ -66,6 +74,7 @@ export const SettingsPage: React.FC = () => {
           <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
             {tab === "settings-appearance" && <AppearanceSection />}
             {tab === "settings-engine" && <EngineSection facts={facts} />}
+            {tab === "settings-connectors" && <ConnectorsSection />}
             {tab === "settings-defaults" && <DefaultsSection />}
             {tab === "settings-data" && <DataSection facts={facts} />}
             {tab === "settings-about" && <AboutSection facts={facts} />}

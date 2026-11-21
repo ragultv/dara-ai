@@ -27,11 +27,6 @@ export const LeftRail: React.FC<LeftRailProps> = ({ isCollapsed = false }) => {
       icon: "file-text"
     },
     {
-      route: "connectors",
-      label: "Connectors",
-      icon: "plug"
-    },
-    {
       route: "models",
       label: "Models",
       icon: "box"

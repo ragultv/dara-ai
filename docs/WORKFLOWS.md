@@ -38,7 +38,7 @@ The architecture holds. These are the places where the plan, checked against how
 | Tauri commands and events | `app/src-tauri/src/connectors.rs` | the only way the UI reaches connectors |
 | Secrets | Windows Credential Manager (service `Dara`) | never in SQLite, never in exports, deleted on disconnect |
 | Connector database | `%LOCALAPPDATA%\Dara\connectors.db` | connectors, per-tool permissions, audit; later workflows and runs |
-| Connectors page | `app/src/routes/ConnectorsPage.tsx`, `app/src/lib/connectors/` | add, connect, per-tool Ask/Allow/Block, try a tool, call history |
+| Connectors (Settings > Connectors) | `app/src/lib/features/connectors/`, `app/src/lib/connectors/` | an apps view: cards from a catalog plus your own, a page per connector (Overview, Permissions), sign-in, per-tool Allow / Needs approval / Block, try a tool |
 | Workflow engine, scheduler | Rust (step 2 and 4) | |
 | LLM steps | the runtime, over its HTTP API | the runtime only ever sees one step |
 
@@ -70,6 +70,27 @@ A workflow is **JSON** with a `version`, validated by a JSON Schema, stored loca
 | output | panel card, notification, file or draft |
 
 References between steps use a small expression syntax (`steps.events.output[0].title`) that cannot run code. Schemas are named and versioned (`digest_v1`) and live in the app, so the digest is drawn from typed fields.
+
+## The connector catalog
+
+Settings > Connectors shows suggested connectors as cards (`app/src/lib/connectors/catalog.ts`); a connector you add by hand shows up next to them. Every address in the catalog was probed against the live server on 2025-11-21 (an unauthenticated MCP request, then the OAuth metadata it points to):
+
+| Connector | Address | Sign-in | Registers Dara by itself? |
+| --- | --- | --- | --- |
+| Google Calendar | `https://calendarmcp.googleapis.com/mcp/v1` | OAuth (Google) | No: your own client ID (Desktop app type) |
+| Gmail | `https://gmailmcp.googleapis.com/mcp/v1` | OAuth (Google) | No: your own client ID |
+| Canva | `https://mcp.canva.com/mcp` | OAuth | Yes (dynamic registration) |
+| Notion | `https://mcp.notion.com/mcp` | OAuth | Yes |
+| Linear | `https://mcp.linear.app/mcp` | OAuth | Yes |
+| Outlook mail and calendar | (built in, not available yet) | | |
+
+Facts worth knowing:
+
+- Google's servers are **stateless**: `initialize` and `tools/list` answer without a token, and only `tools/call` needs one (a 401 whose `WWW-Authenticate` points at the protected-resource metadata, with the tool name in the path). So a Google connector can say "Connected" and still be "not signed in"; the page shows Sign in whenever there are no tokens. Google offers no dynamic registration, so Sign in stays disabled until a client ID is saved.
+- Each Google connector asks for an **access level**: Read only (the default; `gmail.readonly`, `calendar.readonly` and `calendar.calendarlist.readonly`) or Read and write / organize (`calendar`; `gmail.modify` and `gmail.compose`, which cannot send). Changing it takes a new sign-in.
+- Gmail's tools can search threads and read messages and drafts (`search_threads`, `get_thread`, `get_message`); Calendar's can list events in a date range (`list_events` with start and end time). That fits the daily summary.
+- Seen but **not** in the catalog yet, because sign-in was not verified for them: Asana (`mcp.asana.com/v2/mcp`, no registration), Slack (`mcp.slack.com/mcp`, no registration), Stripe (`mcp.stripe.com`), Atlassian (`mcp.atlassian.com/v1/mcp`, no resource metadata), Sentry, Supabase, HubSpot. GitHub's server (`api.githubcopilot.com/mcp/`) advertises no PKCE (S256), so it is not usable. A Shopify address I tried answered 404.
+- The cards show a letter badge, not brand logos, and no "Verified" mark: Dara does not know who runs a server, only its address ("Can send data to ...").
 
 ## Safety rules for user-built workflows
 
