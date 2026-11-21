@@ -5,6 +5,7 @@ import type {
   AddConnectorInput,
   AuditEntry,
   ConnectorEntry,
+  ConnectorPatch,
   ConnectorStatus,
   ConnectorTool,
   ToolCallResult,
@@ -29,6 +30,8 @@ interface ConnectorsState {
   /** Returns an error message, or null when the connector was added. */
   add: (input: AddConnectorInput) => Promise<string | null>;
   remove: (id: string) => Promise<void>;
+  /** Changes a connector's settings (its sign-in client or access level, for instance). Returns an error message or null. */
+  update: (id: string, patch: ConnectorPatch) => Promise<string | null>;
   setEnabled: (id: string, enabled: boolean) => Promise<void>;
   connect: (id: string) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
@@ -100,6 +103,16 @@ export const useConnectorsStore = create<ConnectorsState>((set, get) => {
         }));
       } catch (e) {
         set({ error: message(e) });
+      }
+    },
+
+    update: async (id, patch) => {
+      try {
+        await getBackend().update(id, patch);
+        await get().load();
+        return null;
+      } catch (e) {
+        return message(e);
       }
     },
 
