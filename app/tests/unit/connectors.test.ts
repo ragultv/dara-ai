@@ -277,3 +277,44 @@ describe("the demo backend has the same shapes as the desktop layer", () => {
     expect(differences(shape(actual), shape(recorded))).toEqual([]);
   });
 });
+
+describe("the connector catalog", () => {
+  it("lists only addresses that are https, unique, and complete", async () => {
+    const { CATALOG } = await import("../../src/lib/connectors/catalog.ts");
+    expect(new Set(CATALOG.map((c) => c.id)).size).toBe(CATALOG.length);
+    for (const c of CATALOG.filter((x) => x.status === "available")) {
+      expect(c.url.startsWith("https://")).toBe(true);
+      expect(checkServerUrl(c.url)).toBeNull();
+      // a server that does not register Dara needs steps for getting a client ID, and a scope to ask for
+      if (c.registers === "own-client") {
+        expect(c.clientHelp?.length).toBeGreaterThan(0);
+        expect(c.access?.length).toBeGreaterThan(0);
+      }
+    }
+    // read-only is always the first (default) level
+    for (const c of CATALOG.filter((x) => x.access)) expect(c.access![0]!.id).toBe("read");
+  });
+
+  it("finds the catalog entry of a connector by its address", async () => {
+    const { entryForUrl, humanizeToolName, hostOf } =
+      await import("../../src/lib/connectors/catalog.ts");
+    expect(entryForUrl("https://MCP.canva.com/mcp/")?.id).toBe("canva");
+    expect(entryForUrl("https://example.com/mcp")).toBeUndefined();
+    expect(entryForUrl(null)).toBeUndefined();
+    expect(humanizeToolName("outlook_calendar_search")).toBe("Outlook calendar search");
+    expect(humanizeToolName("getMe")).toBe("Get Me");
+    expect(hostOf("https://calendarmcp.googleapis.com/mcp/v1")).toBe("calendarmcp.googleapis.com");
+  });
+
+  it("turns connectors into tiles: catalog ones by entry, the rest by hand", async () => {
+    const { buildItems } = await import("../../src/lib/features/connectors/items.ts");
+    const b = createDemoBackend();
+    await b.add({ name: "Canva", kind: "http", url: "https://mcp.canva.com/mcp" });
+    await b.add({ name: "Mine", kind: "stdio", command: "tool" });
+    const items = buildItems(await b.list());
+    expect(items.find((i) => i.key === "canva")?.connector?.config.name).toBe("Canva");
+    expect(items.find((i) => i.key === "notion")?.connector).toBeUndefined();
+    expect(items.filter((i) => i.key.startsWith("c:")).map((i) => i.name)).toEqual(["Mine"]);
+    expect(items.find((i) => i.key === "outlook")?.soon).toBe(true);
+  });
+});
