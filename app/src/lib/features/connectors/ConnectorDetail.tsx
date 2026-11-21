@@ -471,7 +471,7 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
                     {primary}
                   </div>
 
-                  {status.state === "error" && status.error && (
+                  {(status.state === "error" || status.state === "needs_auth") && status.error && (
                     <p
                       role="alert"
                       className="mt-2 rounded-lg border border-danger/40 bg-danger-subtle px-3 py-2 text-xs text-danger"

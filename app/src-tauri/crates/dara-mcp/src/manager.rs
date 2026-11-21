@@ -985,15 +985,19 @@ impl Manager {
         *self.sign_in_timeout.lock().expect("timeout") = d;
     }
 
-    /// Asks the server what it wants, with no token: the 401's pointer to its sign-in description and the scope it names.
+    /// Asks the server what it wants, with no token: the 401's pointer to its sign-in description and the scope it names (neither when
+    /// the server answers without a challenge).
     async fn probe_challenge(&self, url: &url::Url) -> Result<(Option<String>, Option<String>), McpError> {
         let shared = Shared::new();
         let transport = Arc::new(HttpTransport::new(url.as_str(), None, Arc::clone(&shared))?);
         match McpClient::connect(transport, shared).await {
             Err(McpError::AuthRequired { resource_metadata, scope }) => Ok((resource_metadata, scope)),
             Ok(client) => {
+                // A server that does not gate `initialize` and `tools/list` (Google's are stateless: only a tool call needs a token)
+                // answers without a challenge. It can still require sign-in, so discovery falls back to the well-known address of its
+                // protected resource metadata (RFC 9728) instead of refusing to sign in.
                 client.close().await;
-                Err(McpError::Invalid("this server does not ask you to sign in".into()))
+                Ok((None, None))
             }
             Err(e) => Err(e),
         }
