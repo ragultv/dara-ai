@@ -54,7 +54,12 @@ export function validateNewConnector(input: AddConnectorInput, existing: number)
     if (/[\u0000\r\n]/.test(c)) return "The program name has a line break in it.";
     return null;
   }
-  return checkServerUrl(input.url ?? "");
+  const bad = checkServerUrl(input.url ?? "");
+  if (bad) return bad;
+  const o = input.oauth;
+  if (o?.clientSecret && !o.clientId?.trim()) return "A client secret needs a client ID.";
+  if (o?.scope && /[\r\n\u0000]/.test(o.scope)) return "The scope must be on one line.";
+  return null;
 }
 
 /** A starting set of arguments for a tool, from its input schema: every required property, empty. */

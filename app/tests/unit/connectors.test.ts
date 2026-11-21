@@ -164,6 +164,69 @@ describe("connectors store (demo backend)", () => {
   });
 });
 
+describe("signing in to a server", () => {
+  beforeEach(() => {
+    setBackend(createDemoBackend());
+    useConnectorsStore.setState({
+      entries: [],
+      tools: {},
+      audit: {},
+      busy: {},
+      signingIn: {},
+      error: null
+    });
+  });
+
+  it("asks for a client ID when a secret is given without one", () => {
+    expect(
+      validateNewConnector(
+        { name: "x", kind: "http", url: "https://x.io/mcp", oauth: { clientSecret: "s" } },
+        0
+      )
+    ).toMatch(/client ID/);
+    expect(
+      validateNewConnector(
+        {
+          name: "x",
+          kind: "http",
+          url: "https://x.io/mcp",
+          oauth: { clientId: "id", clientSecret: "s" }
+        },
+        0
+      )
+    ).toBeNull();
+  });
+
+  it("goes from needs sign-in to ready, and back after signing out", async () => {
+    await useConnectorsStore.getState().add({
+      name: "Remote",
+      kind: "http",
+      url: "https://auth.example.com/mcp",
+      oauth: { clientId: "abc", clientSecret: "shh" }
+    });
+    const id = useConnectorsStore.getState().entries[0]!.config.id;
+    // only the fact that there is a secret is kept in the config, never the secret
+    expect(useConnectorsStore.getState().entries[0]!.config.oauth).toEqual({
+      clientId: "abc",
+      scope: null,
+      hasSecret: true
+    });
+    await useConnectorsStore.getState().connect(id);
+    expect(useConnectorsStore.getState().entries[0]!.status.state).toBe("needs_auth");
+    expect(useConnectorsStore.getState().tools[id]).toBeUndefined();
+
+    await useConnectorsStore.getState().signIn(id);
+    const s = useConnectorsStore.getState().entries[0]!.status;
+    expect([s.state, s.signedIn]).toEqual(["ready", true]);
+    expect(useConnectorsStore.getState().tools[id]).toHaveLength(2);
+
+    await useConnectorsStore.getState().signOut(id);
+    const out = useConnectorsStore.getState().entries[0]!.status;
+    expect([out.state, out.signedIn]).toEqual(["disconnected", false]);
+    expect(useConnectorsStore.getState().tools[id]).toBeUndefined();
+  });
+});
+
 // The desktop layer's real output is recorded in docs/ui/samples/connectors.json by the Rust contract test. The demo backend (what a browser
 // tab and these tests run on) must have the same fields, so the page cannot work in the demo and break in the app.
 function shape(v: unknown): unknown {

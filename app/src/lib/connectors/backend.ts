@@ -36,6 +36,9 @@ export const tauriBackend: ConnectorsBackend = {
   remove: (id) => invoke("connector_remove", { id }),
   connect: (id) => invoke("connector_connect", { id }),
   disconnect: (id) => invoke("connector_disconnect", { id }),
+  signIn: (id) => invoke("connector_sign_in", { id }),
+  cancelSignIn: (id) => invoke("connector_cancel_sign_in", { id }),
+  signOut: (id) => invoke("connector_sign_out", { id }),
   tools: (id) => invoke("connector_tools", { id }),
   setPermission: (id, tool, permission) =>
     invoke("connector_set_permission", { id, tool, permission }),
@@ -88,6 +91,7 @@ export function createDemoBackend(): ConnectorsBackend {
   const configs = new Map<string, ConnectorConfig>();
   const status = new Map<string, ConnectorStatus>();
   const perms = new Map<string, ToolPermission>(); // `${id}/${tool}`
+  const signedIn = new Set<string>();
   const audit: AuditEntry[] = [];
 
   const disconnected = (): ConnectorStatus => ({
@@ -96,7 +100,8 @@ export function createDemoBackend(): ConnectorsBackend {
     server: null,
     toolCount: 0,
     toolsChanged: false,
-    resourceMetadata: null
+    resourceMetadata: null,
+    signedIn: false
   });
   const permOf = (id: string, tool: string) => perms.get(`${id}/${tool}`) ?? "ask";
   const need = (id: string) => {
@@ -124,7 +129,12 @@ export function createDemoBackend(): ConnectorsBackend {
         envNames: Object.keys(input.env ?? {}),
         url: input.kind === "http" ? (input.url ?? "").trim() : null,
         enabled: true,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        oauth: {
+          clientId: input.oauth?.clientId?.trim() || null,
+          scope: input.oauth?.scope?.trim() || null,
+          hasSecret: Boolean(input.oauth?.clientSecret)
+        }
       };
       configs.set(id, config);
       status.set(id, disconnected());
@@ -155,14 +165,38 @@ export function createDemoBackend(): ConnectorsBackend {
         server: { name: "Demo calendar", version: "1.0.0", protocol: "2025-06-18" },
         toolCount: DEMO_TOOLS.length,
         toolsChanged: false,
-        resourceMetadata: null
+        resourceMetadata: null,
+        signedIn: signedIn.has(id)
       };
+      // a server on a host that starts with "auth." asks for sign-in first, so the demo can show that state too
+      if (c.kind === "http" && /^https?:\/\/auth\./.test(c.url ?? "") && !signedIn.has(id)) {
+        const needs: ConnectorStatus = {
+          ...disconnected(),
+          state: "needs_auth",
+          resourceMetadata: `${c.url}/.well-known/oauth-protected-resource`
+        };
+        status.set(id, needs);
+        return needs;
+      }
       status.set(id, s);
       return s;
     },
     async disconnect(id: string) {
       need(id);
-      status.set(id, disconnected());
+      status.set(id, { ...disconnected(), signedIn: signedIn.has(id) });
+    },
+    async signIn(id: string) {
+      need(id);
+      signedIn.add(id);
+      return this.connect(id);
+    },
+    async cancelSignIn() {},
+    async signOut(id: string) {
+      need(id);
+      signedIn.delete(id);
+      const s = { ...disconnected(), signedIn: false };
+      status.set(id, s);
+      return s;
     },
     async tools(id: string): Promise<ConnectorTool[]> {
       need(id);
