@@ -33,6 +33,17 @@ import { toast } from "../ui/Toast.tsx";
 import { useModelsStore } from "./useModelsStore.ts";
 import { useServerStore } from "./useServerStore.ts";
 import { useSettingsStore } from "./useSettingsStore.ts";
+import { useChatToolsStore } from "./useChatToolsStore.ts";
+import { loadChatTools, runCalls } from "../chat/tools/runner.ts";
+import {
+  formatProblems,
+  formatResults,
+  isToolResultsContent,
+  parseResults,
+  parseToolCalls,
+  toolSystemPrompt
+} from "../chat/tools/protocol.ts";
+import { MAX_REPAIRS, MAX_STEPS, type ChatTool } from "../chat/tools/types.ts";
 
 export type { Conversation, UiMessage, ContextWindow } from "../chat/types.ts";
 
@@ -496,6 +507,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const nextActive =
       get().activeConversationId === id ? (rest[0]?.id ?? null) : get().activeConversationId;
     if (conv) revokeUrls(conv);
+    useChatToolsStore.getState().forgetConversation(id);
     set({ conversations: rest, activeConversationId: nextActive });
     if (rest.length === 0) {
       const blank = blankConversation();
@@ -607,8 +619,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (get().isGenerating) return;
 
     let convId = get().activeConversationId;
-    if (!convId || !findConv(convId))
+    if (!convId || !findConv(convId)) {
       convId = get().createConversation(text.slice(0, 40).trim() || "New Chat");
+      // connectors picked before the chat existed now belong to it
+      if (useChatToolsStore.getState().enabledFor(convId).length === 0)
+        useChatToolsStore.getState().adoptNew(convId);
+    }
     let conv = findConv(convId);
     if (!conv) return;
     const id = convId;
@@ -693,6 +709,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     saveLocal();
 
+    // ---- connectors chosen for this chat (docs/CHAT_TOOLS.md); none chosen: nothing below changes the request ----
+    abortController = new AbortController();
+    const signal = abortController.signal;
+    const chatTools = useChatToolsStore.getState();
+    const enabledIds = chatTools.enabledFor(id);
+    let tools: ChatTool[] = [];
+    if (enabledIds.length > 0) {
+      chatTools.setStatus(id, "Getting connectors ready");
+      try {
+        const r = await loadChatTools(enabledIds);
+        tools = r.tools;
+        if (r.problems.length > 0) toast.show(r.problems.join(". ") + ".", "info");
+      } catch (err) {
+        toast.show(
+          `Could not get the connectors ready: ${err instanceof Error ? err.message : "unknown error"}`,
+          "error"
+        );
+      } finally {
+        chatTools.setStatus(id, undefined);
+      }
+    }
+    const toolPrompt = tools.length > 0 ? toolSystemPrompt(tools) : "";
+
     // ---- build the request from the current window ----
     const latest = findConv(id) ?? conv;
     const windowMsgs = currentWindowMessages(latest.messages, latest.windows).filter(
@@ -700,8 +739,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
     const summary = currentSummary(latest.messages, latest.windows);
     const apiMessages: ChatMessage[] = [];
-    if (latest.systemPrompt?.trim())
-      apiMessages.push({ role: "system", content: latest.systemPrompt.trim() });
+    const ownPrompt = latest.systemPrompt?.trim() ?? "";
+    const systemText = toolPrompt
+      ? ownPrompt
+        ? `${ownPrompt}\n\n${toolPrompt}`
+        : toolPrompt
+      : ownPrompt;
+    if (systemText) apiMessages.push({ role: "system", content: systemText });
     if (summary) apiMessages.push(summarySystemMessage(summary));
     try {
       for (const m of windowMsgs) {
@@ -720,172 +764,278 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const capacity = contextCapacity(latest);
-    const promptEstimate =
+    let promptEstimate =
       estimateTokens(latest.systemPrompt ?? "") +
+      (toolPrompt ? estimateTokens(toolPrompt) : 0) +
       estimateTokens(summary) +
       estimateMessagesTokens(windowMsgs);
     const wanted =
       latest.maxTokens && latest.maxTokens > 0
         ? latest.maxTokens
         : inferenceDefaults().maxTokens || 4096;
-    const maxTokens = capacity
-      ? planMaxTokens({ capacity, promptTokens: Math.max(promptEstimate, 0), wanted })
-      : wanted;
     const flashOn = loaded?.dara.flash?.active === true;
     const effort = useEffortStore.getState().effort;
-    const chatReq: ChatRequest = {
-      model: targetModel,
-      messages: apiMessages,
-      stream: true,
-      temperature: latest.temperature ?? 0.7,
-      max_tokens: maxTokens,
-      ...(flashOn ? { flash: latest.flash !== false } : {}),
-      ...(effort !== "none" ? { reasoning_effort: effort } : {})
+
+    let finish: string | undefined;
+
+    /** Streams one model reply into the assistant message `msgId`; returns how it ended. */
+    const streamStep = async (msgId: string): Promise<string | undefined> => {
+      const maxTokens = capacity
+        ? planMaxTokens({ capacity, promptTokens: Math.max(promptEstimate, 0), wanted })
+        : wanted;
+      const chatReq: ChatRequest = {
+        model: targetModel,
+        messages: apiMessages,
+        stream: true,
+        temperature: latest.temperature ?? 0.7,
+        max_tokens: maxTokens,
+        ...(flashOn ? { flash: latest.flash !== false } : {}),
+        ...(effort !== "none" ? { reasoning_effort: effort } : {})
+      };
+
+      tokenBuffer = "";
+      let stepFinish: string | undefined;
+      let raw: UiMessage["raw"];
+      let lastCheckpoint = Date.now();
+      let reasoningBuffer = "";
+      let thinkStart: number | null = null;
+      let thinkEnd: number | null = null;
+
+      const patchAssistant = (patch: Partial<UiMessage>) =>
+        updateConv(id, (c) => ({
+          ...c,
+          messages: c.messages.map((m) => (m.id === msgId ? { ...m, ...patch } : m))
+        }));
+      const flush = () => {
+        set({ streamingText: tokenBuffer });
+        patchAssistant({
+          content: tokenBuffer,
+          ...(reasoningBuffer ? { reasoning: reasoningBuffer } : {})
+        });
+      };
+      const scheduleFlush = () => {
+        if (rafId === null) {
+          rafId = requestAnimationFrame(() => {
+            rafId = null;
+            flush();
+          });
+        }
+      };
+
+      // what to store about the thinking once the reply ends (the engine's own numbers win over the stopwatch here)
+      const thinkingResult = (): Partial<UiMessage> => {
+        if (!reasoningBuffer) return {};
+        const measured = thinkStart !== null ? (thinkEnd ?? Date.now()) - thinkStart : undefined;
+        const ms = raw?.timings?.thinking_ms || measured;
+        return {
+          reasoning: reasoningBuffer,
+          ...(ms ? { reasoningMs: ms } : {}),
+          ...(raw?.timings?.thinking_cut ? { reasoningCut: true } : {})
+        };
+      };
+
+      try {
+        const stream = await apiClient.streamChat(chatReq, signal);
+        for await (const chunk of stream) {
+          const serverError = (chunk as unknown as { error?: { message?: string } }).error;
+          if (serverError) throw new Error(serverError.message || "The engine reported an error");
+
+          const choice = chunk.choices?.[0];
+          if (choice?.finish_reason) stepFinish = choice.finish_reason;
+          const thought = choice?.delta?.reasoning_content;
+          if (thought) {
+            thinkStart ??= Date.now();
+            reasoningBuffer += thought;
+            scheduleFlush();
+          }
+          const delta = choice?.delta?.content;
+          if (delta) {
+            if (thinkStart !== null) thinkEnd ??= Date.now();
+            tokenBuffer += delta;
+            scheduleFlush();
+            if (Date.now() - lastCheckpoint > CHECKPOINT_MS) {
+              lastCheckpoint = Date.now();
+              const snapshot = tokenBuffer;
+              void enqueue(id, () => storeApi.patchMessage(msgId, { content: snapshot }));
+            }
+          }
+
+          if (chunk.timings || chunk.usage) {
+            raw = {
+              ...(chunk.usage ? { usage: chunk.usage } : {}),
+              ...(chunk.timings ? { timings: chunk.timings } : {}),
+              ...(chunk.context ? { context: chunk.context } : {}),
+              ...(chunk.speculative ? { speculative: chunk.speculative } : {})
+            } as UiMessage["raw"];
+            const tps = chunk.timings?.decode_tokens_per_second;
+            if (tps) set({ currentTps: tps });
+          }
+          if (chunk.context) {
+            const ctx: ContextView = {
+              capacity: chunk.context.capacity,
+              used: chunk.context.used,
+              compacted: chunk.context.compacted,
+              summarized_messages: chunk.context.summarized_messages,
+              dropped_messages: chunk.context.dropped_messages,
+              truncated_last_message: chunk.context.truncated_last_message ?? false,
+              summary_cached: chunk.context.summary_cached ?? false
+            };
+            updateConv(id, (c) => ({ ...c, context: ctx }));
+          }
+        }
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        flush();
+        patchAssistant({
+          finishReason: stepFinish ?? "stop",
+          raw,
+          stats: statsFromRaw(raw),
+          ...thinkingResult()
+        });
+      } catch (err: unknown) {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        if (signal.aborted) {
+          stepFinish = "interrupted";
+          patchAssistant({
+            content: tokenBuffer,
+            ...thinkingResult(),
+            interrupted: true,
+            finishReason: "interrupted",
+            raw,
+            stats: statsFromRaw(raw)
+          });
+        } else {
+          stepFinish = "error";
+          const e = userFacingError(err);
+          patchAssistant({
+            content: tokenBuffer,
+            ...thinkingResult(),
+            error: e.message,
+            errorCode: e.code,
+            finishReason: "error"
+          });
+        }
+      } finally {
+        const final = findConv(id)?.messages.find((m) => m.id === msgId);
+        if (final) {
+          void enqueue(id, () =>
+            storeApi.patchMessage(msgId, {
+              content: final.content,
+              finish_reason: final.finishReason ?? stepFinish ?? "stop",
+              error: final.error ?? null,
+              stats: withReasoning(final)
+            })
+          );
+        }
+        saveLocal();
+      }
+      return stepFinish;
     };
 
-    abortController = new AbortController();
-    tokenBuffer = "";
-    let finish: string | undefined;
-    let raw: UiMessage["raw"];
-    let lastCheckpoint = Date.now();
-    let reasoningBuffer = "";
-    let thinkStart: number | null = null;
-    let thinkEnd: number | null = null;
-
-    const patchAssistant = (patch: Partial<UiMessage>) =>
+    /** Appends the tool results (a user message) and the next empty assistant reply, stored like any other messages. */
+    const appendStep = (resultsText: string, nextAssistant: UiMessage | null): void => {
+      const t = Date.now();
+      const resultsMsg: UiMessage = {
+        id: newId(),
+        role: "user",
+        content: resultsText,
+        createdAt: t
+      };
       updateConv(id, (c) => ({
         ...c,
-        messages: c.messages.map((m) => (m.id === assistantMsg.id ? { ...m, ...patch } : m))
+        updatedAt: t,
+        messages: [...c.messages, resultsMsg, ...(nextAssistant ? [nextAssistant] : [])]
       }));
-    const flush = () => {
-      set({ streamingText: tokenBuffer });
-      patchAssistant({
-        content: tokenBuffer,
-        ...(reasoningBuffer ? { reasoning: reasoningBuffer } : {})
-      });
-    };
-    const scheduleFlush = () => {
-      if (rafId === null) {
-        rafId = requestAnimationFrame(() => {
-          rafId = null;
-          flush();
+      void enqueue(id, async () => {
+        await storeApi.appendMessage(id, {
+          id: resultsMsg.id,
+          role: "user",
+          content: resultsText,
+          created_at: t
         });
-      }
+        if (nextAssistant)
+          await storeApi.appendMessage(id, {
+            id: nextAssistant.id,
+            role: "assistant",
+            content: "",
+            created_at: nextAssistant.createdAt ?? t + 1
+          });
+      });
+      saveLocal();
     };
 
-    // what to store about the thinking once the reply ends (the engine's own numbers win over the stopwatch here)
-    const thinkingResult = (): Partial<UiMessage> => {
-      if (!reasoningBuffer) return {};
-      const measured = thinkStart !== null ? (thinkEnd ?? Date.now()) - thinkStart : undefined;
-      const ms = raw?.timings?.thinking_ms || measured;
-      return {
-        reasoning: reasoningBuffer,
-        ...(ms ? { reasoningMs: ms } : {}),
-        ...(raw?.timings?.thinking_cut ? { reasoningCut: true } : {})
-      };
+    /** Adds a short note to the end of an assistant reply (shown and stored). */
+    const noteOn = (msgId: string, note: string): void => {
+      const cur = findConv(id)?.messages.find((m) => m.id === msgId);
+      if (!cur) return;
+      const content = `${cur.content.trimEnd()}\n\n${note}`;
+      updateConv(id, (c) => ({
+        ...c,
+        messages: c.messages.map((m) => (m.id === msgId ? { ...m, content } : m))
+      }));
+      void enqueue(id, () => storeApi.patchMessage(msgId, { content }));
+      saveLocal();
     };
 
     try {
-      const stream = await apiClient.streamChat(chatReq, abortController.signal);
-      for await (const chunk of stream) {
-        const serverError = (chunk as unknown as { error?: { message?: string } }).error;
-        if (serverError) throw new Error(serverError.message || "The engine reported an error");
+      let stepMsgId = assistantMsg.id;
+      let repairs = 0;
+      for (let step = 1; ; step++) {
+        set({ streamingText: "", currentTps: undefined });
+        finish = await streamStep(stepMsgId);
+        if (tools.length === 0 || finish === "error" || finish === "interrupted" || signal.aborted)
+          break;
 
-        const choice = chunk.choices?.[0];
-        if (choice?.finish_reason) finish = choice.finish_reason;
-        const thought = choice?.delta?.reasoning_content;
-        if (thought) {
-          thinkStart ??= Date.now();
-          reasoningBuffer += thought;
-          scheduleFlush();
-        }
-        const delta = choice?.delta?.content;
-        if (delta) {
-          if (thinkStart !== null) thinkEnd ??= Date.now();
-          tokenBuffer += delta;
-          scheduleFlush();
-          if (Date.now() - lastCheckpoint > CHECKPOINT_MS) {
-            lastCheckpoint = Date.now();
-            const snapshot = tokenBuffer;
-            void enqueue(id, () => storeApi.patchMessage(assistantMsg.id, { content: snapshot }));
+        const reply = findConv(id)?.messages.find((m) => m.id === stepMsgId)?.content ?? "";
+        const parsed = parseToolCalls(reply, tools, stepMsgId);
+        let resultsText: string;
+        if (parsed.calls.length > 0) {
+          if (step >= MAX_STEPS) {
+            noteOn(stepMsgId, `Stopped after ${MAX_STEPS} steps.`);
+            break;
           }
+          const items = await runCalls(id, parsed.calls, tools, signal);
+          const problemItems =
+            parsed.problems.length > 0 ? parseResults(formatProblems(parsed.problems, tools)) : [];
+          resultsText = formatResults([...items, ...problemItems]);
+        } else if (parsed.problems.length > 0 && repairs < MAX_REPAIRS) {
+          if (step >= MAX_STEPS) {
+            noteOn(stepMsgId, `Stopped after ${MAX_STEPS} steps.`);
+            break;
+          }
+          repairs++;
+          resultsText = formatProblems(parsed.problems, tools);
+        } else {
+          break; // a normal answer: done
         }
 
-        if (chunk.timings || chunk.usage) {
-          raw = {
-            ...(chunk.usage ? { usage: chunk.usage } : {}),
-            ...(chunk.timings ? { timings: chunk.timings } : {}),
-            ...(chunk.context ? { context: chunk.context } : {}),
-            ...(chunk.speculative ? { speculative: chunk.speculative } : {})
-          } as UiMessage["raw"];
-          const tps = chunk.timings?.decode_tokens_per_second;
-          if (tps) set({ currentTps: tps });
+        if (signal.aborted) {
+          // keep the history whole: the calls that were made, and that the rest was stopped
+          appendStep(resultsText, null);
+          finish = "interrupted";
+          break;
         }
-        if (chunk.context) {
-          const ctx: ContextView = {
-            capacity: chunk.context.capacity,
-            used: chunk.context.used,
-            compacted: chunk.context.compacted,
-            summarized_messages: chunk.context.summarized_messages,
-            dropped_messages: chunk.context.dropped_messages,
-            truncated_last_message: chunk.context.truncated_last_message ?? false,
-            summary_cached: chunk.context.summary_cached ?? false
-          };
-          updateConv(id, (c) => ({ ...c, context: ctx }));
-        }
-      }
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-        rafId = null;
-      }
-      flush();
-      patchAssistant({
-        finishReason: finish ?? "stop",
-        raw,
-        stats: statsFromRaw(raw),
-        ...thinkingResult()
-      });
-    } catch (err: unknown) {
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-        rafId = null;
-      }
-      if (abortController?.signal.aborted) {
-        finish = "interrupted";
-        patchAssistant({
-          content: tokenBuffer,
-          ...thinkingResult(),
-          interrupted: true,
-          finishReason: "interrupted",
-          raw,
-          stats: statsFromRaw(raw)
-        });
-      } else {
-        finish = "error";
-        const e = userFacingError(err);
-        patchAssistant({
-          content: tokenBuffer,
-          ...thinkingResult(),
-          error: e.message,
-          errorCode: e.code,
-          finishReason: "error"
-        });
+        const next: UiMessage = {
+          id: newId(),
+          role: "assistant",
+          content: "",
+          createdAt: Date.now() + 1
+        };
+        appendStep(resultsText, next);
+        apiMessages.push({ role: "assistant", content: reply });
+        apiMessages.push({ role: "user", content: resultsText });
+        promptEstimate += estimateTokens(reply) + estimateTokens(resultsText);
+        stepMsgId = next.id;
       }
     } finally {
       abortController = null;
+      if (tools.length > 0) useChatToolsStore.getState().setStatus(id, undefined);
       set({ isGenerating: false, phase: "idle", currentTps: undefined });
-      const final = findConv(id)?.messages.find((m) => m.id === assistantMsg.id);
-      if (final) {
-        void enqueue(id, () =>
-          storeApi.patchMessage(assistantMsg.id, {
-            content: final.content,
-            finish_reason: final.finishReason ?? finish ?? "stop",
-            error: final.error ?? null,
-            stats: withReasoning(final)
-          })
-        );
-      }
-      saveLocal();
     }
 
     // A reply that filled the window: start the next context window now, while the user reads.
@@ -915,7 +1065,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     let userIdx = -1;
     for (let i = target; i >= 0; i--) {
-      if (conv.messages[i]?.role === "user") {
+      const m = conv.messages[i];
+      // tool results are user messages too; a regenerate goes back to what the person wrote and drops the tool steps
+      if (m?.role === "user" && !isToolResultsContent(m.content)) {
         userIdx = i;
         break;
       }
@@ -937,7 +1089,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!conv || get().isGenerating) return;
     const idx = conv.messages.findIndex((m) => m.id === messageId);
     const original = conv.messages[idx];
-    if (idx === -1 || !original) return;
+    if (idx === -1 || !original || isToolResultsContent(original.content)) return;
     const kept = conv.messages.slice(0, idx);
     updateConv(conv.id, (c) => ({
       ...c,

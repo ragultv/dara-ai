@@ -5,9 +5,16 @@ import { MessageActions } from "./MessageActions.tsx";
 import type { UiMessage } from "../../chat/types.ts";
 import { Logo } from "../../ui/Logo.tsx";
 import { Reasoning } from "./Reasoning.tsx";
+import { ToolCalls } from "./ToolCalls.tsx";
+import { displayText, extractBlocks } from "../../chat/tools/protocol.ts";
+import type { ToolResultItem } from "../../chat/tools/types.ts";
 
 interface MessagePairProps {
   message: UiMessage;
+  /** Needed to show the reply's tool calls with their live state. */
+  conversationId?: string;
+  /** Results of this reply's tool calls (from the tool-results message after it), when there is one. */
+  toolResults?: ToolResultItem[] | null;
   isStreaming?: boolean;
   /** The newest assistant message: only it offers Continue. */
   isLast?: boolean;
@@ -20,6 +27,8 @@ interface MessagePairProps {
 
 export const MessagePair: React.FC<MessagePairProps> = ({
   message,
+  conversationId,
+  toolResults = null,
   isStreaming = false,
   isLast = false,
   onEdit,
@@ -141,13 +150,15 @@ export const MessagePair: React.FC<MessagePairProps> = ({
     );
   }
 
-  // Assistant message
-  if (!isStreaming && !message.content.trim() && !message.error && !message.reasoning?.trim()) {
+  // Assistant message: the text without tool_call blocks, the calls shown as rows
+  const shown = displayText(message.content);
+  const hasCalls = conversationId !== undefined && extractBlocks(message.content).length > 0;
+  if (!isStreaming && !shown && !hasCalls && !message.error && !message.reasoning?.trim()) {
     return null; // no empty phantom bubbles
   }
 
   const hasError = Boolean(message.error);
-  const hasText = message.content.trim().length > 0;
+  const hasText = shown.length > 0;
   const hasReasoning = Boolean(message.reasoning?.trim());
   // the thought is still being written while the reply streams and no answer text has started
   const thinkingNow = isStreaming && hasReasoning && !hasText;
@@ -169,7 +180,7 @@ export const MessagePair: React.FC<MessagePairProps> = ({
           />
         )}
 
-        {isStreaming && !hasText && !hasReasoning && (
+        {isStreaming && !hasText && !hasReasoning && !hasCalls && (
           <div className="flex items-center gap-2 h-7 text-text-subtle">
             <span className="w-1.5 h-1.5 rounded-full bg-text-muted animate-pulse" />
             <span className="text-xs text-text-muted font-medium">Generating response...</span>
@@ -178,8 +189,18 @@ export const MessagePair: React.FC<MessagePairProps> = ({
 
         {hasText && (
           <div className="text-sm leading-relaxed text-text">
-            <Markdown content={message.content} />
+            <Markdown content={shown} />
           </div>
+        )}
+
+        {hasCalls && conversationId !== undefined && (
+          <ToolCalls
+            conversationId={conversationId}
+            assistantMessageId={message.id}
+            content={message.content}
+            results={toolResults}
+            streaming={isStreaming}
+          />
         )}
 
         {hasError && (
@@ -248,11 +269,7 @@ export const MessagePair: React.FC<MessagePairProps> = ({
 
         {!isStreaming && (hasText || hasReasoning) && !hasError && (
           <div className="pt-1">
-            <MessageActions
-              content={message.content}
-              stats={message.stats}
-              onRegenerate={onRegenerate}
-            />
+            <MessageActions content={shown} stats={message.stats} onRegenerate={onRegenerate} />
           </div>
         )}
       </div>
