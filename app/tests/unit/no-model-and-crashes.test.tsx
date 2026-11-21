@@ -80,3 +80,36 @@ describe("a page that throws", () => {
     expect(screen.getByRole("button", { name: "Copy details" })).toBeTruthy();
   });
 });
+
+describe("answers the engine leaves incomplete", () => {
+  it("normalizes stats: null sensors are missing, a missing downloads list is empty, a half context is none", async () => {
+    const { normalizeStats } = await import("../../src/lib/api/normalize.ts");
+    const s = normalizeStats({
+      ...NO_MODEL,
+      downloads: null,
+      context: { capacity: 4096 },
+      gpu: { ...NO_MODEL.gpu, power_w: null, temperature_c: 50 }
+    } as unknown as Stats);
+    expect(s.downloads).toEqual([]);
+    expect(s.context).toBeNull();
+    expect(s.gpu && "power_w" in s.gpu).toBe(false);
+    expect(s.gpu?.temperature_c).toBe(50);
+  });
+  it("says why an options answer cannot be shown (different engine and app versions)", async () => {
+    const { optionsProblem } = await import("../../src/lib/api/normalize.ts");
+    expect(optionsProblem(null)).toMatch(/could not be read/);
+    expect(
+      optionsProblem({
+        machine: {},
+        formats: [],
+        options: [],
+        recommended: {},
+        calibration: {},
+        vision: {}
+      })
+    ).toBeNull();
+    const bad = optionsProblem({ machine: {}, formats: null, options: [], vision: {} });
+    expect(bad).toMatch(/missing formats, recommended, calibration/);
+    expect(bad).toMatch(/different versions/);
+  });
+});

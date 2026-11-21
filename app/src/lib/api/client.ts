@@ -1,5 +1,6 @@
 import { ApiError } from "./errors.ts";
 import { parseSseStream } from "./sse.ts";
+import { normalizeOptions, normalizeStats, optionsProblem } from "./normalize.ts";
 import type {
   Health,
   ModelList,
@@ -263,7 +264,7 @@ export class DaraApiClient {
     if (signal) {
       opts.signal = signal;
     }
-    return this.request<Stats>("/dara/stats", opts);
+    return normalizeStats(await this.request<Stats>("/dara/stats", opts));
   }
 
   async getVersion(signal?: AbortSignal): Promise<VersionInfo> {
@@ -349,7 +350,13 @@ export class DaraApiClient {
     if (signal) {
       opts.signal = signal;
     }
-    return this.request<OptionsResponse>(`/dara/models/${modelId}/options${query}`, opts);
+    const answer = await this.request<OptionsResponse>(
+      `/dara/models/${modelId}/options${query}`,
+      opts
+    );
+    const problem = optionsProblem(answer);
+    if (problem) throw new ApiError(0, problem, "incompatible_engine");
+    return normalizeOptions(answer);
   }
 
   async startBenchmark(
