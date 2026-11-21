@@ -1,0 +1,10 @@
+{
+  "chars": 165,
+  "content": "We ship the beta on Friday.\n\n## Owners\n\n| Task | Owner |\n| --- | --- |\n| Final testing | Alice |\n| Deployment | Bob |\n\n- Risk: server capacity\n- Risk: late feedback\n",
+  "created_at": 1795198207608,
+  "id": "a025d8f3-0683-4f62-94c9-225b561031f5",
+  "kind": "doc",
+  "pinned": false,
+  "title": "Launch plan",
+  "updated_at": 1795198207608
+}

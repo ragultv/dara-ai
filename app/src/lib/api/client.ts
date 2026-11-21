@@ -1,5 +1,6 @@
 import { ApiError } from "./errors.ts";
 import { parseSseStream } from "./sse.ts";
+import { normalizeOptions, normalizeStats, optionsProblem } from "./normalize.ts";
 import type {
   Health,
   ModelList,
@@ -26,6 +27,7 @@ export class DaraApiClient {
   private baseUrl: string;
   private apiKey?: string | undefined;
   private defaultTimeoutMs: number;
+  private authRefresher?: (() => Promise<boolean>) | undefined;
 
   constructor(config: ClientConfig = { baseUrl: "http://127.0.0.1:11435" }) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -38,13 +40,21 @@ export class DaraApiClient {
     this.apiKey = apiKey;
   }
 
+  /**
+   * A function that fetches the engine's current key (the desktop app generates a new one each time it restarts the engine).
+   * When a request is answered 401 it is called once; if it returns true the request is repeated with the new key.
+   */
+  setAuthRefresher(fn: (() => Promise<boolean>) | undefined): void {
+    this.authRefresher = fn;
+  }
+
   getBaseUrl(): string {
     return this.baseUrl;
   }
 
   async request<T>(
     endpoint: string,
-    options: RequestInit & { timeoutMs?: number | undefined } = {}
+    options: RequestInit & { timeoutMs?: number | undefined; retriedAuth?: boolean } = {}
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
     const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
@@ -83,12 +93,19 @@ export class DaraApiClient {
     try {
       const response = await fetch(url, fetchOptions);
 
+      if (response.status === 401 && this.authRefresher && !options.retriedAuth) {
+        const refreshed = await this.authRefresher().catch(() => false);
+        if (refreshed) return await this.request<T>(endpoint, { ...options, retriedAuth: true });
+      }
+
       if (!response.ok) {
-        let errorBody: unknown;
+        // read the body once (json() would use it up and leave nothing for text())
+        const raw = await response.text().catch(() => "");
+        let errorBody: unknown = raw;
         try {
-          errorBody = await response.json();
+          errorBody = JSON.parse(raw);
         } catch {
-          errorBody = await response.text();
+          // not JSON: keep the text
         }
         throw ApiError.fromResponseBody(
           response.status,
@@ -247,7 +264,7 @@ export class DaraApiClient {
     if (signal) {
       opts.signal = signal;
     }
-    return this.request<Stats>("/dara/stats", opts);
+    return normalizeStats(await this.request<Stats>("/dara/stats", opts));
   }
 
   async getVersion(signal?: AbortSignal): Promise<VersionInfo> {
@@ -333,7 +350,13 @@ export class DaraApiClient {
     if (signal) {
       opts.signal = signal;
     }
-    return this.request<OptionsResponse>(`/dara/models/${modelId}/options${query}`, opts);
+    const answer = await this.request<OptionsResponse>(
+      `/dara/models/${modelId}/options${query}`,
+      opts
+    );
+    const problem = optionsProblem(answer);
+    if (problem) throw new ApiError(0, problem, "incompatible_engine");
+    return normalizeOptions(answer);
   }
 
   async startBenchmark(

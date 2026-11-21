@@ -30,11 +30,14 @@ interface MonitorState {
 
 /** Pure: turns a stats response into one history sample. Exported for tests. */
 export function sampleFromStats(stats: Stats, now: number): MonitorSample {
+  // with no model loaded the engine reports nothing (engine, model and context are null)
   const engine = stats.engine;
   const live =
-    engine.busy && engine.live_tokens_per_second > 0 ? engine.live_tokens_per_second : null;
+    engine && engine.busy && engine.live_tokens_per_second > 0
+      ? engine.live_tokens_per_second
+      : null;
   const gpu = stats.gpu;
-  const hasGpu = gpu !== undefined && gpu.nvml;
+  const hasGpu = gpu !== undefined && gpu !== null && gpu.nvml;
   return {
     t: now,
     tps: live,

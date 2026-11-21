@@ -1,0 +1,24 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "rev": 2,
+      "title": "Launch plan",
+      "label": "Before restore",
+      "created_at": 1795198407608,
+      "chars": 165,
+      "snippet": "We ship the beta on Friday.\n\n## Owners\n\n| Task | Owner |\n| --- | --- |\n| Final testing | Alice |\n| Deployment | Bob |\n\n- Risk: server capacity\n- Risk: late feedback\n"
+    },
+    {
+      "rev": 1,
+      "title": "",
+      "label": "Before Dara edit",
+      "created_at": 1795198207608,
+      "chars": 27,
+      "snippet": "We ship the beta on Friday."
+    }
+  ],
+  "total": 2,
+  "limit": 100,
+  "offset": 0
+}

@@ -1,0 +1,33 @@
+{
+  "data": [
+    {
+      "created_at": 1795214121610,
+      "data": {
+        "role": "user",
+        "text": "Add a risks section"
+      },
+      "id": "6f1c2a90",
+      "seq": 1,
+      "updated_at": 1795214121610
+    },
+    {
+      "created_at": 1795214121614,
+      "data": {
+        "role": "assistant",
+        "status": "done",
+        "steps": [
+          {
+            "label": "Read the document (3 blocks)",
+            "state": "done"
+          }
+        ],
+        "text": "Added 1 block."
+      },
+      "id": "b81d04e7",
+      "seq": 2,
+      "updated_at": 1795214121614
+    }
+  ],
+  "object": "list",
+  "total": 2
+}

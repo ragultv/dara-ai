@@ -137,7 +137,7 @@ export interface Stats {
 }
 
 // ---- app database (docs/ui/08-database.md) ----
-export interface StoreInfo { path: string; attachments_dir: string; schema_version: number; size_bytes: number; conversations: number; messages: number; attachments: number; settings: number; note?: string }
+export interface StoreInfo { path: string; attachments_dir: string; schema_version: number; size_bytes: number; conversations: number; messages: number; attachments: number; settings: number; artifacts: number; note?: string }
 export type Settings = Record<string, unknown>;
 export interface Attachment { id: string; mime: "image/png" | "image/jpeg" | "image/webp"; bytes: number; url: string; width: number | null; height: number | null }
 export interface StoredMessage {
@@ -161,3 +161,28 @@ export interface SearchResult { object: "list"; data: SearchHit[] }
 export interface SavedModelConfig { kv: KvChoice; flash: "auto" | "on" | "off"; vision: boolean; context: number | null; last_loaded_at?: number | null; updated_at?: number }
 export type SavedModelConfigs = Record<string, SavedModelConfig>;
 export interface SavedModelConfigPut { kv?: KvChoice; flash?: "auto" | "on" | "off" | boolean; vision?: boolean; context?: number | null }
+
+// ---- artifacts (09-artifacts.md) ----
+export type ArtifactKind = "doc" | "slides" | "design";
+export interface ArtifactSummary { id: string; kind: ArtifactKind; title: string; pinned: boolean; created_at: number; updated_at: number; chars: number; snippet: string }
+export interface Artifact { id: string; kind: ArtifactKind; title: string; pinned: boolean; created_at: number; updated_at: number; chars: number; content: string }
+export interface ArtifactsList { object: "list"; data: ArtifactSummary[]; total: number; limit: number; offset: number }
+export type ArtifactPatch = { title?: string; content?: string; pinned?: boolean; /** label (max 120 chars): store the state before this change as a version */ snapshot?: string };
+// version history: the states an artifact had before a change (09-artifacts.md, "Version history")
+export interface ArtifactVersionSummary { rev: number; title: string; label: string; created_at: number; chars: number; snippet: string }
+export interface ArtifactVersion { rev: number; title: string; content: string; label: string; created_at: number; chars: number }
+export interface ArtifactVersionsList { object: "list"; data: ArtifactVersionSummary[]; total: number; limit: number; offset: number }
+export type DbArtifactVersionSummary = ArtifactVersionSummary;
+export type DbArtifactVersion = ArtifactVersion;
+export type DbArtifactVersionsResponse = ArtifactVersionsList;
+export type ArtifactRestore = { rev: number };
+// chat, comments, images and video that belong to an artifact (10-artifact-collab.md)
+export interface ArtifactChatRow { id: string; seq: number; /** the app's own message object */ data: Record<string, unknown>; created_at: number; updated_at: number }
+export interface ArtifactChatList { object: "list"; data: ArtifactChatRow[]; total: number }
+export interface ArtifactComment { id: string; parent_id: string | null; author: "user" | "dara"; body: string; /** the exact text the thread points at ("" = the whole document) */ quote: string; /** which occurrence of the quote (0 = the first) */ nth: number; resolved: boolean; created_at: number; updated_at: number }
+export interface ArtifactCommentsList { object: "list"; data: ArtifactComment[]; total: number }
+export type ArtifactCommentCreate = { id?: string; parent_id?: string; author?: "user" | "dara"; body: string; quote?: string; nth?: number };
+export type ArtifactCommentPatch = { body?: string; resolved?: boolean; quote?: string; nth?: number };
+export interface ArtifactAsset { id: string; name: string; mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "video/mp4" | "video/webm"; size: number; created_at: number }
+export interface ArtifactAssetsList { object: "list"; data: ArtifactAsset[]; total: number }
+export type ArtifactDuplicate = { id?: string; title?: string };

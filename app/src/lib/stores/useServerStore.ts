@@ -56,6 +56,14 @@ export const useServerStore = create<ServerState>((set, get) => ({
         const connection = await invoke<ServerConnection>("get_server_connection");
         set({ baseUrl: connection.baseUrl, apiKey: connection.apiKey });
         apiClient.setConnection(connection.baseUrl, connection.apiKey);
+        // the desktop app makes a new key whenever it restarts the engine: on a 401, read the current one and try again
+        apiClient.setAuthRefresher(async () => {
+          const now = await invoke<ServerConnection>("get_server_connection");
+          if (now.apiKey === get().apiKey && now.baseUrl === get().baseUrl) return false;
+          set({ baseUrl: now.baseUrl, apiKey: now.apiKey });
+          apiClient.setConnection(now.baseUrl, now.apiKey);
+          return true;
+        });
       } catch (err: unknown) {
         set({
           status: "error",

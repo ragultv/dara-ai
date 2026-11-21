@@ -8,6 +8,16 @@ import type {
   DbMessage,
   DbMessageAttachment,
   DbSearchResponse,
+  DbArtifact,
+  DbArtifactsResponse,
+  DbArtifactAsset,
+  DbArtifactChatResponse,
+  DbArtifactChatRow,
+  DbArtifactComment,
+  DbArtifactCommentsResponse,
+  DbArtifactVersion,
+  DbArtifactVersionsResponse,
+  ArtifactKind,
   SavedModelConfig,
   ChatStats
 } from "./types.ts";
@@ -53,7 +63,196 @@ export interface MessageAppendBody {
   created_at?: number;
 }
 
+export interface ArtifactCreateBody {
+  id?: string;
+  kind?: ArtifactKind;
+  title?: string;
+  content?: string;
+  pinned?: boolean;
+}
+
 export class StoreApi {
+  listArtifacts(
+    kind?: ArtifactKind,
+    limit = 200,
+    offset = 0,
+    signal?: AbortSignal
+  ): Promise<DbArtifactsResponse> {
+    const q = `limit=${limit}&offset=${offset}${kind ? `&kind=${kind}` : ""}`;
+    return apiClient.request<DbArtifactsResponse>(`/dara/artifacts?${q}`, {
+      method: "GET",
+      ...optSignal(signal)
+    });
+  }
+
+  getArtifact(id: string, signal?: AbortSignal): Promise<DbArtifact> {
+    return apiClient.request<DbArtifact>(`/dara/artifacts/${encodeURIComponent(id)}`, {
+      method: "GET",
+      ...optSignal(signal)
+    });
+  }
+
+  createArtifact(body: ArtifactCreateBody, signal?: AbortSignal): Promise<DbArtifact> {
+    return apiClient.request<DbArtifact>("/dara/artifacts", {
+      method: "POST",
+      body: JSON.stringify(body),
+      ...optSignal(signal)
+    });
+  }
+
+  patchArtifact(
+    id: string,
+    patch: { title?: string; content?: string; pinned?: boolean; snapshot?: string },
+    signal?: AbortSignal
+  ): Promise<DbArtifact> {
+    return apiClient.request<DbArtifact>(`/dara/artifacts/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+      ...optSignal(signal)
+    });
+  }
+
+  listArtifactVersions(id: string, signal?: AbortSignal): Promise<DbArtifactVersionsResponse> {
+    return apiClient.request<DbArtifactVersionsResponse>(
+      `/dara/artifacts/${encodeURIComponent(id)}/versions`,
+      { method: "GET", ...optSignal(signal) }
+    );
+  }
+
+  getArtifactVersion(id: string, rev: number, signal?: AbortSignal): Promise<DbArtifactVersion> {
+    return apiClient.request<DbArtifactVersion>(
+      `/dara/artifacts/${encodeURIComponent(id)}/versions/${rev}`,
+      { method: "GET", ...optSignal(signal) }
+    );
+  }
+
+  restoreArtifact(id: string, rev: number, signal?: AbortSignal): Promise<DbArtifact> {
+    return apiClient.request<DbArtifact>(`/dara/artifacts/${encodeURIComponent(id)}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ rev }),
+      ...optSignal(signal)
+    });
+  }
+
+  // ---- the chat that belongs to an artifact ----
+  listArtifactChat(id: string, signal?: AbortSignal): Promise<DbArtifactChatResponse> {
+    return apiClient.request<DbArtifactChatResponse>(
+      `/dara/artifacts/${encodeURIComponent(id)}/chat`,
+      { method: "GET", ...optSignal(signal) }
+    );
+  }
+
+  putArtifactChatMessage(
+    id: string,
+    messageId: string,
+    data: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<DbArtifactChatRow> {
+    return apiClient.request<DbArtifactChatRow>(
+      `/dara/artifacts/${encodeURIComponent(id)}/chat/${encodeURIComponent(messageId)}`,
+      { method: "PUT", body: JSON.stringify({ data }), ...optSignal(signal) }
+    );
+  }
+
+  clearArtifactChat(id: string, signal?: AbortSignal): Promise<{ deleted: number }> {
+    return apiClient.request<{ deleted: number }>(
+      `/dara/artifacts/${encodeURIComponent(id)}/chat`,
+      { method: "DELETE", ...optSignal(signal) }
+    );
+  }
+
+  // ---- comments ----
+  listArtifactComments(id: string, signal?: AbortSignal): Promise<DbArtifactCommentsResponse> {
+    return apiClient.request<DbArtifactCommentsResponse>(
+      `/dara/artifacts/${encodeURIComponent(id)}/comments`,
+      { method: "GET", ...optSignal(signal) }
+    );
+  }
+
+  createArtifactComment(
+    id: string,
+    body: {
+      id?: string;
+      parent_id?: string;
+      author?: "user" | "dara";
+      body: string;
+      quote?: string;
+      nth?: number;
+    },
+    signal?: AbortSignal
+  ): Promise<DbArtifactComment> {
+    return apiClient.request<DbArtifactComment>(
+      `/dara/artifacts/${encodeURIComponent(id)}/comments`,
+      { method: "POST", body: JSON.stringify(body), ...optSignal(signal) }
+    );
+  }
+
+  patchArtifactComment(
+    id: string,
+    commentId: string,
+    patch: { body?: string; resolved?: boolean; quote?: string; nth?: number },
+    signal?: AbortSignal
+  ): Promise<DbArtifactComment> {
+    return apiClient.request<DbArtifactComment>(
+      `/dara/artifacts/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`,
+      { method: "PATCH", body: JSON.stringify(patch), ...optSignal(signal) }
+    );
+  }
+
+  deleteArtifactComment(
+    id: string,
+    commentId: string,
+    signal?: AbortSignal
+  ): Promise<{ deleted: number }> {
+    return apiClient.request<{ deleted: number }>(
+      `/dara/artifacts/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`,
+      { method: "DELETE", ...optSignal(signal) }
+    );
+  }
+
+  // ---- images and video ----
+  uploadArtifactAsset(
+    id: string,
+    file: Blob,
+    name: string,
+    signal?: AbortSignal
+  ): Promise<DbArtifactAsset> {
+    return apiClient.request<DbArtifactAsset>(`/dara/artifacts/${encodeURIComponent(id)}/assets`, {
+      method: "POST",
+      body: file,
+      headers: { "Content-Type": file.type, "X-Dara-Name": encodeURIComponent(name) },
+      timeoutMs: 120000,
+      ...optSignal(signal)
+    });
+  }
+
+  getArtifactAsset(id: string, assetId: string, signal?: AbortSignal): Promise<Blob> {
+    return apiClient.requestBlob(
+      `/dara/artifacts/${encodeURIComponent(id)}/assets/${encodeURIComponent(assetId)}`,
+      optSignal(signal)
+    );
+  }
+
+  /** Copies a document with its images and videos (the server rewrites the asset ids in the copy). */
+  duplicateArtifact(
+    id: string,
+    body: { id?: string; title?: string },
+    signal?: AbortSignal
+  ): Promise<DbArtifact> {
+    return apiClient.request<DbArtifact>(`/dara/artifacts/${encodeURIComponent(id)}/duplicate`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      ...optSignal(signal)
+    });
+  }
+
+  deleteArtifact(id: string, signal?: AbortSignal): Promise<{ deleted: boolean }> {
+    return apiClient.request<{ deleted: boolean }>(`/dara/artifacts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      ...optSignal(signal)
+    });
+  }
+
   getStoreInfo(signal?: AbortSignal): Promise<DbStoreInfo> {
     return apiClient.request<DbStoreInfo>("/dara/store", { method: "GET", ...optSignal(signal) });
   }

@@ -320,7 +320,16 @@ impl ServerManager {
             }
         }
 
-        // 2. Standard relative paths from workspace/execution root
+        // 2. The installed layout: the installer puts the engine (and its Flash drafters) in `engine` next to the app
+        if let Ok(current_exe) = std::env::current_exe() {
+            if let Some(p) = current_exe.parent().and_then(installed_engine) {
+                if !is_self(&p) {
+                    return Some(p);
+                }
+            }
+        }
+
+        // 3. Standard relative paths from workspace/execution root
         let candidates = [
             "build/cuda/dara.exe",
             "../build/cuda/dara.exe",
@@ -336,7 +345,7 @@ impl ServerManager {
             }
         }
 
-        // 3. Search directory ancestors of current executable for build/cuda/dara.exe
+        // 4. Search directory ancestors of current executable for build/cuda/dara.exe
         if let Ok(current_exe) = std::env::current_exe() {
             let mut ancestor = current_exe.parent();
             while let Some(dir) = ancestor {
@@ -352,6 +361,12 @@ impl ServerManager {
     }
 }
 
+/// `<app folder>/engine/dara.exe`, where the installer puts the engine; None when it is not there (a development run).
+pub(crate) fn installed_engine(app_dir: &Path) -> Option<PathBuf> {
+    let p = app_dir.join("engine").join("dara.exe");
+    p.is_file().then_some(p)
+}
+
 impl Drop for ServerManager {
     fn drop(&mut self) {
         self.stop();
@@ -361,6 +376,18 @@ impl Drop for ServerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_engine_the_installer_put_next_to_the_app() {
+        let dir = std::env::temp_dir().join(format!("dara-installed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(installed_engine(&dir), None);
+        std::fs::create_dir_all(dir.join("engine")).unwrap();
+        assert_eq!(installed_engine(&dir), None, "a folder alone is not an engine");
+        std::fs::write(dir.join("engine").join("dara.exe"), b"x").unwrap();
+        assert_eq!(installed_engine(&dir), Some(dir.join("engine").join("dara.exe")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_find_free_port() {

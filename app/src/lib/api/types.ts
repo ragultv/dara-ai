@@ -333,7 +333,8 @@ export interface Stats {
   uptime_seconds: number;
   pid: number;
   queued: number;
-  context: { capacity: number; held_tokens: number };
+  /** null when no model is loaded (so are engine, model and last_request) */
+  context: { capacity: number; held_tokens: number } | null;
   gpu?: {
     name: string;
     nvml: boolean;
@@ -351,7 +352,7 @@ export interface Stats {
     clock_sm_mhz?: number;
     clock_mem_mhz?: number;
     pstate?: number;
-  };
+  } | null;
   engine: {
     requests: number;
     errors: number;
@@ -364,16 +365,18 @@ export interface Stats {
     prompt_tokens_total: number;
     completion_tokens_total: number;
     cached_tokens_total: number;
-  };
-  model?: Record<string, unknown> & {
-    id: string;
-    kv_format: KvFormat;
-    layers: number;
-    layers_on_gpu: number;
-    output_head: "gpu" | "cpu";
-    load_seconds: number;
-    vision: boolean;
-  };
+  } | null;
+  model?:
+    | (Record<string, unknown> & {
+        id: string;
+        kv_format: KvFormat;
+        layers: number;
+        layers_on_gpu: number;
+        output_head: "gpu" | "cpu";
+        load_seconds: number;
+        vision: boolean;
+      })
+    | null;
   disk: {
     models_dir: string;
     volume_free_gb: number;
@@ -382,7 +385,7 @@ export interface Stats {
     model_file_mb: number;
     mmproj_file_mb: number;
     flash_file_mb: number;
-  };
+  } | null;
   downloads: DownloadJob[];
   last_request: (ChatStats & Record<string, unknown>) | null;
   ram?: Record<string, number>;
@@ -402,6 +405,7 @@ export interface DbStoreInfo {
   messages: number;
   attachments: number;
   settings: number;
+  artifacts: number;
   note?: string;
 }
 
@@ -474,4 +478,100 @@ export interface SavedModelConfig {
   context: number | null;
   last_loaded_at?: number | null;
   updated_at?: number;
+}
+
+// ---- artifacts (docs/ui/09-artifacts.md) ----
+export type ArtifactKind = "doc" | "slides" | "design";
+
+/** One artifact in the gallery list: a short `snippet` of the start of its content, never the whole body. */
+export interface DbArtifactSummary {
+  id: string;
+  kind: ArtifactKind;
+  title: string;
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
+  /** length of the content in characters */
+  chars: number;
+  snippet: string;
+}
+
+export interface DbArtifact extends Omit<DbArtifactSummary, "snippet"> {
+  /** doc: Markdown as written (never HTML) */
+  content: string;
+}
+
+/** A saved earlier state of an artifact (docs/ui/09-artifacts.md, "Version history"). */
+export interface DbArtifactVersionSummary {
+  rev: number;
+  title: string;
+  /** why it was kept ("Before Dara: make it shorter", "Before restore"); empty for an automatic save */
+  label: string;
+  /** when that text was last saved */
+  created_at: number;
+  chars: number;
+  snippet: string;
+}
+
+export interface DbArtifactVersion extends Omit<DbArtifactVersionSummary, "snippet"> {
+  content: string;
+}
+
+export interface DbArtifactVersionsResponse {
+  object: "list";
+  data: DbArtifactVersionSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** One saved message of the chat that belongs to an artifact. `data` is the app's own message object (what was asked, what Dara did). */
+export interface DbArtifactChatRow {
+  id: string;
+  seq: number;
+  data: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+}
+export interface DbArtifactChatResponse {
+  object: "list";
+  data: DbArtifactChatRow[];
+  total: number;
+}
+
+/** A comment on a document. A thread is one root comment (it carries the `quote` it is anchored to) and its replies (`parent_id`). */
+export interface DbArtifactComment {
+  id: string;
+  parent_id: string | null;
+  author: "user" | "dara";
+  body: string;
+  /** the exact text the thread points at (empty = about the whole document) */
+  quote: string;
+  /** which occurrence of `quote` in the document (0 = the first) */
+  nth: number;
+  resolved: boolean;
+  created_at: number;
+  updated_at: number;
+}
+export interface DbArtifactCommentsResponse {
+  object: "list";
+  data: DbArtifactComment[];
+  total: number;
+}
+
+/** An image or video stored with a document. The Markdown refers to it as `dara-asset:<id>`. */
+export interface DbArtifactAsset {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  created_at: number;
+}
+
+export interface DbArtifactsResponse {
+  object: "list";
+  data: DbArtifactSummary[];
+  total: number;
+  limit: number;
+  offset: number;
 }

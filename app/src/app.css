@@ -121,6 +121,120 @@ body {
     "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, Cambria, "Times New Roman", serif;
 }
 
+/* The document editor (Tiptap/ProseMirror). The prose rules come from .oprel-markdown; these are what an editable page adds. */
+.doc-editor {
+  outline: none;
+  min-height: 55vh;
+  font-size: 1.0625rem;
+  caret-color: var(--color-text);
+}
+.doc-editor p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--color-text-subtle);
+}
+.doc-editor ::selection {
+  background: var(--color-primary-subtle-hover);
+}
+.doc-editor ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.25rem;
+}
+.doc-editor ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+.doc-editor ul[data-type="taskList"] li > label {
+  margin-top: 0.35em;
+  user-select: none;
+}
+.doc-editor ul[data-type="taskList"] li > div {
+  flex: 1;
+}
+.doc-editor ul[data-type="taskList"] input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--color-text);
+  cursor: pointer;
+}
+.doc-editor ul[data-type="taskList"] li[data-checked="true"] > div {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+.doc-editor:focus-visible,
+.doc-title:focus-visible {
+  outline: none !important;
+}
+.doc-editor .tableWrapper {
+  overflow-x: auto;
+  padding: 0.25rem 0;
+}
+.doc-editor table {
+  table-layout: fixed;
+  width: 100%;
+  border-collapse: collapse;
+}
+/* dragging the border between two columns changes their width (Tiptap column resizing) */
+.doc-editor .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 4px;
+  background: var(--color-primary);
+  pointer-events: none;
+}
+.doc-editor.resize-cursor,
+.doc-editor.resize-cursor * {
+  cursor: col-resize;
+}
+.doc-editor th,
+.doc-editor td {
+  position: relative;
+  min-width: 4rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border);
+  vertical-align: top;
+  text-align: left;
+}
+.doc-editor th {
+  background: var(--color-surface-raised);
+  font-weight: 600;
+}
+.doc-editor th > p,
+.doc-editor td > p {
+  margin: 0;
+}
+.doc-editor .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--color-primary-subtle);
+  opacity: 0.6;
+  pointer-events: none;
+}
+.doc-editor pre {
+  background: var(--color-code-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: 0.8rem 1rem;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  line-height: 1.55;
+}
+.doc-editor pre code {
+  background: none;
+  padding: 0;
+  white-space: pre;
+}
+.doc-editor a {
+  cursor: text;
+}
+
 #root,
 #app {
   height: 100%;
@@ -492,4 +606,299 @@ textarea:focus-visible {
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: var(--color-border-strong);
+}
+
+/* A row of the Timeline element appears with a short slide and fade. */
+@keyframes timeline-row-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.timeline-row {
+  animation: timeline-row-in 300ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .timeline-row {
+    animation: none;
+  }
+}
+
+/* ---- document editor extras: folding, comment highlights, media, widgets ---- */
+
+/* a chevron before each heading folds the section under it */
+.doc-editor h1,
+.doc-editor h2,
+.doc-editor h3 {
+  position: relative;
+}
+.doc-editor .fold-toggle {
+  position: absolute;
+  left: -1.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background-color 120ms ease;
+}
+.doc-editor .fold-toggle svg {
+  transform: rotate(90deg);
+  transition: transform 150ms ease;
+}
+.doc-editor .fold-toggle[data-folded="true"] {
+  opacity: 1;
+}
+.doc-editor .fold-toggle[data-folded="true"] svg {
+  transform: rotate(0deg);
+}
+.doc-editor h1:hover .fold-toggle,
+.doc-editor h2:hover .fold-toggle,
+.doc-editor h3:hover .fold-toggle,
+.doc-editor .fold-toggle:focus-visible {
+  opacity: 1;
+}
+.doc-editor .fold-toggle:hover {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+.doc-editor .section-folded {
+  display: none;
+}
+
+/* the words a comment thread points at */
+.doc-editor .comment-mark {
+  background: var(--color-warning-subtle);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-warning) 25%, transparent);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.doc-editor .comment-mark-active {
+  background: color-mix(in srgb, var(--color-warning) 28%, transparent);
+}
+
+/* images and video */
+.doc-editor .doc-media {
+  margin: 1rem 0;
+}
+.doc-editor .doc-media img,
+.doc-editor .doc-media video {
+  display: block;
+  max-width: 100%;
+  max-height: 32rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-border);
+}
+.doc-editor .doc-media-note {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  border: 1px dashed var(--color-border);
+  border-radius: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.85em;
+}
+
+/* a widget (a code block whose language is "widget") is shown live; its code is hidden until asked for */
+.doc-editor .widget-code:not(.widget-code-open) {
+  display: none;
+}
+.doc-editor .doc-widget {
+  position: relative;
+  margin: 1.1rem 0;
+}
+.doc-editor .doc-widget-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+.doc-editor .doc-widget-more {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.doc-editor .doc-widget:hover .doc-widget-more,
+.doc-editor .doc-widget:focus-within .doc-widget-more,
+.doc-editor .doc-widget:has(.doc-widget-menu[data-open="true"]) .doc-widget-more {
+  opacity: 1;
+}
+.doc-editor .doc-widget-more:hover {
+  color: var(--color-text);
+}
+.doc-editor .doc-widget-menu {
+  position: absolute;
+  top: 2.6rem;
+  right: 4px;
+  z-index: 3;
+  min-width: 11rem;
+  padding: 0.35rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgb(0 0 0 / 0.25));
+}
+.doc-editor .doc-widget-menu[data-open="false"] {
+  display: none;
+}
+.doc-editor .doc-widget-item {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.7rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+.doc-editor .doc-widget-item:hover {
+  background: var(--color-primary-subtle-hover);
+}
+.doc-editor .doc-widget-item.danger {
+  color: var(--color-danger);
+}
+.doc-editor .doc-widget .wl-hide {
+  display: none;
+}
+.doc-editor .widget-code-open + .doc-widget .wl-show {
+  display: none;
+}
+.doc-editor .widget-code-open + .doc-widget .wl-hide {
+  display: inline;
+}
+
+/* the closing message in the panel is as small as the rest of the panel */
+.doc-reply .oprel-markdown {
+  font-size: 13px;
+}
+.doc-reply .oprel-markdown p,
+.doc-reply .oprel-markdown ul,
+.doc-reply .oprel-markdown ol {
+  margin: 0 0 0.6rem;
+}
+.doc-reply .oprel-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+/* table cells have room around their text (this beats the plain-prose table rules, which pad only on the right) */
+.doc-editor.oprel-markdown th,
+.doc-editor.oprel-markdown td {
+  padding: 0.65rem 0.9rem;
+  border: 1px solid var(--color-border);
+}
+.doc-editor.oprel-markdown tr:last-child td {
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* ---- PDF export: the print copy of a document, in the page's own look on white ---- */
+#print-root {
+  display: none;
+}
+@media print {
+  @page {
+    size: A4;
+    margin: 18mm 16mm;
+  }
+  :root {
+    color-scheme: light !important;
+  }
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+    background: white !important;
+  }
+  body > *:not(#print-root) {
+    display: none !important;
+  }
+  #print-root {
+    display: block !important;
+    /* the page is always printed in the light palette, whatever the app theme is */
+    --color-text: black;
+    --color-text-muted: color-mix(in srgb, black 62%, white);
+    --color-text-subtle: color-mix(in srgb, black 48%, white);
+    --color-border: color-mix(in srgb, black 16%, white);
+    --color-border-strong: color-mix(in srgb, black 30%, white);
+    --color-surface: white;
+    --color-surface-raised: color-mix(in srgb, black 5%, white);
+    --color-bg: white;
+    --color-code-bg: color-mix(in srgb, black 4%, white);
+    --color-primary: color-mix(in srgb, blue 70%, black);
+    --color-warning-subtle: white;
+    color: black;
+    background: white;
+    font-family: var(--font-reply);
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  #print-root .print-title {
+    font-family: var(--font-reply);
+    font-size: 26pt;
+    font-weight: 700;
+    line-height: 1.15;
+    margin: 0 0 16pt;
+    letter-spacing: -0.01em;
+  }
+  #print-root .doc-editor {
+    min-height: 0;
+    font-size: 11pt;
+    line-height: 1.6;
+  }
+  #print-root h1,
+  #print-root h2,
+  #print-root h3 {
+    break-after: avoid;
+  }
+  #print-root tr,
+  #print-root pre,
+  #print-root img,
+  #print-root blockquote {
+    break-inside: avoid;
+  }
+  #print-root pre {
+    white-space: pre-wrap;
+  }
+  #print-root img {
+    max-width: 100%;
+  }
+  #print-root a {
+    color: var(--color-primary);
+    text-decoration: underline;
+  }
+  #print-root .print-note {
+    font-style: italic;
+    color: var(--color-text-muted);
+  }
+  #print-root .tableWrapper {
+    overflow: visible;
+  }
 }
