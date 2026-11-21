@@ -1,0 +1,35 @@
+[package]
+name = "dara-mcp"
+version = "0.1.0"
+description = "MCP client, connector manager, permissions and audit for Dara (headless: no Tauri dependency)"
+edition = "2021"
+authors = ["Dara Team"]
+
+[lib]
+name = "dara_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mock_mcp"
+path = "src/bin/mock_mcp.rs"
+# a test fixture: a tiny MCP server speaking newline-delimited JSON on stdio; it is not shipped
+test = false
+doc = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "time", "sync", "macros", "net", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

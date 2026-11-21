@@ -1,6 +1,8 @@
+pub mod connectors;
 pub mod engine_settings;
 pub mod sidecar;
 
+use connectors::ConnectorsState;
 use engine_settings::EngineSettings;
 use serde::Serialize;
 use sidecar::{ServerConnection, ServerManager};
@@ -138,16 +140,31 @@ pub fn run() {
     let server_manager = ServerManager::new();
     let manager_for_setup = Arc::clone(&server_manager);
     let manager_for_exit = Arc::clone(&server_manager);
+    // connectors (MCP servers): the manager closes their connections and child processes when the app exits
+    let connectors = ConnectorsState::new();
+    let connectors_for_exit = connectors.manager();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(server_manager)
+        .manage(connectors)
         .invoke_handler(tauri::generate_handler![
             get_server_connection,
             get_engine_settings,
             set_engine_settings,
             restart_engine,
-            list_drives
+            list_drives,
+            connectors::connectors_list,
+            connectors::connector_add,
+            connectors::connector_update,
+            connectors::connector_remove,
+            connectors::connector_connect,
+            connectors::connector_disconnect,
+            connectors::connector_tools,
+            connectors::connector_set_permission,
+            connectors::connector_call,
+            connectors::connector_audit,
+            connectors::connector_stderr
         ])
         .setup(move |_app| {
             manager_for_setup.start();
@@ -159,6 +176,9 @@ pub fn run() {
     app.run(move |_app_handle, event| {
         if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
             manager_for_exit.stop();
+            if let Some(m) = &connectors_for_exit {
+                tauri::async_runtime::block_on(m.close_all());
+            }
         }
     });
 }
