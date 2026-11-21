@@ -118,6 +118,10 @@ const ConnectorCard: React.FC<{ entry: ConnectorEntry }> = ({ entry }) => {
   const connect = useConnectorsStore((s) => s.connect);
   const disconnect = useConnectorsStore((s) => s.disconnect);
   const setEnabled = useConnectorsStore((s) => s.setEnabled);
+  const signIn = useConnectorsStore((s) => s.signIn);
+  const cancelSignIn = useConnectorsStore((s) => s.cancelSignIn);
+  const signOut = useConnectorsStore((s) => s.signOut);
+  const signingIn = useConnectorsStore((s) => s.signingIn[config.id] === true);
   const remove = useConnectorsStore((s) => s.remove);
   const setPermission = useConnectorsStore((s) => s.setPermission);
   const loadTools = useConnectorsStore((s) => s.loadTools);
@@ -182,7 +186,23 @@ const ConnectorCard: React.FC<{ entry: ConnectorEntry }> = ({ entry }) => {
             className={`ml-auto shrink-0 text-text-muted transition-transform ${open ? "rotate-180" : ""}`}
           />
         </button>
-        {status.state === "ready" || status.state === "connecting" ? (
+        {signingIn ? (
+          <Button variant="secondary" size="sm" onClick={() => void cancelSignIn(config.id)}>
+            Cancel sign-in
+          </Button>
+        ) : status.state === "needs_auth" ? (
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={!config.enabled}
+            onClick={() => {
+              setOpen(true);
+              void signIn(config.id);
+            }}
+          >
+            Sign in
+          </Button>
+        ) : status.state === "ready" || status.state === "connecting" ? (
           <Button
             variant="secondary"
             size="sm"
@@ -231,6 +251,19 @@ const ConnectorCard: React.FC<{ entry: ConnectorEntry }> = ({ entry }) => {
               >
                 {config.enabled ? "Turn off" : "Turn on"}
               </button>
+              {status.signedIn && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenu(false);
+                    void signOut(config.id);
+                  }}
+                  className="flex w-full cursor-pointer items-center rounded-md px-2.5 py-1.5 text-left text-xs text-text hover:bg-primary-subtle-hover"
+                >
+                  Sign out
+                </button>
+              )}
               <button
                 type="button"
                 role="menuitem"
@@ -262,7 +295,9 @@ const ConnectorCard: React.FC<{ entry: ConnectorEntry }> = ({ entry }) => {
           )}
           {status.state === "needs_auth" && (
             <p className="mt-2 rounded-lg border border-border bg-surface-raised px-3 py-2 text-xs text-text-muted">
-              This server asks you to sign in first. Signing in comes in the next version.
+              {signingIn
+                ? "Finish signing in in your browser. Dara is waiting."
+                : "This server asks you to sign in first. Sign in opens your browser; Dara keeps the sign-in on this computer and never sees your password."}
             </p>
           )}
           {status.state === "ready" && (
