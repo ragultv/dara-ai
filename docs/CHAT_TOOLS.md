@@ -32,7 +32,7 @@ Which models can do this well is measured, not assumed: a small test set per mod
 
 ## Safety (same rules as connectors, applied to chat)
 
-- Every call goes through the permission check: **Block** never runs; **Needs approval** shows an approval card in the chat (tool, arguments, which agent asked) and waits; **Allow** runs. A server's own hints are not trusted.
+- Every call goes through the permission check: **Block** never runs; **Needs approval** opens an approval dialog (connector, tool, its description, the arguments; Deny is focused, Escape denies, Stop closes it; "1 of N" when several wait) and the call row says "Waiting for your approval"; **Allow** runs. A server's own hints are not trusted.
 - The model cannot change permissions, add connectors or raise a tool's level.
 - Approval cards are per call; "allow for this conversation" is a user choice, never the model's.
 - Results are scrubbed of anything that looks like a secret before they reach the model or the log; tool output is shown to the user collapsed under the step it came from.
@@ -41,8 +41,13 @@ Which models can do this well is measured, not assumed: a small test set per mod
 ## UI
 
 - Composer: a Connectors button (like Claude's) listing the connected ones, with a switch per connector for this conversation; a tool count and a "needs approval" hint.
-- Messages: a collapsible "Used Google Calendar: list events" row per call (arguments, result, time, status), approval cards inline, an agent panel while sub-agents run (each with state and Stop).
+- Messages: a collapsible "Used Google Calendar: list events" row per call (arguments, result, time, status), the approval dialog, an agent panel while sub-agents run (each with state and Stop).
 - Conversations remember which connectors were on.
+
+## What is stored
+
+- Each assistant message that made calls keeps `stats.tool_calls` (app/src/lib/chat/tools/records.ts): id, name, connector, tool, arguments (each capped at about 2000 characters, `{"_truncated": true, "preview": ...}` above that), status, decision (`auto`, `approved_once`, `approved_always`, `denied_by_user`, `blocked`, `skipped`), start time and duration. The whole stats object stays under the engine's 64 KB: arguments are dropped first, then the last calls. Rows render from it after a restart, with results from the tool-results message.
+- Each conversation keeps `params.connectors` (connector ids on in it) and `params.allowed_tools` (`[connectorId, tool]` pairs allowed for the rest of the chat). Only the choice made before a chat exists stays in localStorage (`__new__`).
 
 ## Build order
 

@@ -1,17 +1,22 @@
 import React, { useState } from "react";
 import { Icon } from "../../ui/Icon.tsx";
-import { Button } from "../../ui/Button.tsx";
 import { humanizeToolName } from "../../connectors/catalog.ts";
 import { extractBlocks } from "../../chat/tools/protocol.ts";
 import { useChatToolsStore } from "../../stores/useChatToolsStore.ts";
 import { useConnectorsStore } from "../../stores/useConnectorsStore.ts";
-import type { CallState, CallStatus, ToolResultItem } from "../../chat/tools/types.ts";
+import type {
+  CallDecision,
+  CallState,
+  CallStatus,
+  ToolResultItem
+} from "../../chat/tools/types.ts";
+import type { ToolCallRecord } from "../../chat/tools/records.ts";
 
 type RowStatus = CallStatus | "pending" | "invalid";
 
 const STATUS: Record<RowStatus, { icon: string; label: string; cls: string; spin?: boolean }> = {
   pending: { icon: "clock", label: "Waiting", cls: "text-text-subtle" },
-  waiting_approval: { icon: "hand", label: "Needs your approval", cls: "text-warning" },
+  waiting_approval: { icon: "hand", label: "Waiting for your approval", cls: "text-warning" },
   running: { icon: "refresh-cw", label: "Running", cls: "text-text-muted", spin: true },
   ok: { icon: "check", label: "Done", cls: "text-success" },
   error: { icon: "alert-triangle", label: "Failed", cls: "text-danger" },
@@ -19,6 +24,22 @@ const STATUS: Record<RowStatus, { icon: string; label: string; cls: string; spin
   skipped: { icon: "minus", label: "Stopped", cls: "text-text-subtle" },
   invalid: { icon: "alert-triangle", label: "Could not read this call", cls: "text-danger" }
 };
+
+/** How the call was let through or stopped, as shown on its row and in its details. */
+export const DECISION_LABEL: Record<CallDecision, string> = {
+  auto: "Allowed by your settings",
+  approved_once: "Allowed once",
+  approved_always: "Always allowed",
+  denied_by_user: "Denied",
+  blocked: "Blocked by your settings",
+  skipped: "Stopped"
+};
+/** the decisions worth a word on the row itself (the others show in the details) */
+const ROW_DECISIONS: ReadonlySet<CallDecision> = new Set([
+  "approved_once",
+  "approved_always",
+  "denied_by_user"
+]);
 
 function formatMs(ms: number | undefined): string {
   if (ms == null) return "";
@@ -50,42 +71,23 @@ interface Row {
   status: RowStatus;
   output: string | undefined;
   durationMs: number | undefined;
+  decision: CallDecision | undefined;
 }
 
-/** The approval card shown inline while a call waits for the user. */
-const ApprovalCard: React.FC<{ row: Row }> = ({ row }) => {
-  const resolve = useChatToolsStore((s) => s.resolveApproval);
-  const args = row.arguments ? prettyArgs(row.arguments) : "";
-  return (
-    <div className="mt-1.5 rounded-lg border border-border bg-surface-raised p-3">
-      <p className="text-xs text-text">
-        Dara wants to use <span className="font-semibold">{row.tool}</span> from{" "}
-        <span className="font-semibold">{row.connector}</span>
-      </p>
-      {args && args !== "{}" && (
-        <pre className="mt-2 max-h-40 overflow-auto rounded-md bg-surface-sunken p-2 text-[11px] leading-snug text-text-muted whitespace-pre-wrap break-words custom-scrollbar">
-          {args}
-        </pre>
-      )}
-      <div className="mt-2.5 flex flex-wrap gap-1.5">
-        <Button size="xs" variant="primary" onClick={() => resolve(row.id, true)}>
-          Allow once
-        </Button>
-        <Button size="xs" variant="secondary" onClick={() => resolve(row.id, true, true)}>
-          Always allow in this chat
-        </Button>
-        <Button size="xs" variant="ghost" onClick={() => resolve(row.id, false)}>
-          Deny
-        </Button>
-      </div>
-    </div>
-  );
-};
-
-const CallRow: React.FC<{ row: Row; waiting: boolean }> = ({ row, waiting }) => {
+const CallRow: React.FC<{ row: Row }> = ({ row }) => {
   const [open, setOpen] = useState(false);
   const st = STATUS[row.status];
   const hasDetail = row.arguments !== null || row.raw !== null || !!row.output;
+  const decisionText = row.decision ? DECISION_LABEL[row.decision] : "";
+  const rowDecision = row.decision && ROW_DECISIONS.has(row.decision) ? decisionText : "";
+  const tail =
+    row.status === "ok"
+      ? [rowDecision, formatMs(row.durationMs)].filter(Boolean).join(" · ")
+      : row.status === "denied" && row.decision === "denied_by_user"
+        ? "Denied"
+        : rowDecision && row.status !== "waiting_approval" && row.status !== "running"
+          ? `${st.label} · ${rowDecision}`
+          : st.label;
   return (
     <li className="text-xs">
       <button
@@ -93,7 +95,7 @@ const CallRow: React.FC<{ row: Row; waiting: boolean }> = ({ row, waiting }) => 
         onClick={() => setOpen((v) => !v)}
         disabled={!hasDetail}
         aria-expanded={open}
-        aria-label={`${row.connector} ${row.tool}: ${st.label}. ${open ? "Hide" : "Show"} details`}
+        aria-label={`${row.connector} ${row.tool}: ${st.label}${rowDecision ? `, ${rowDecision}` : ""}. ${open ? "Hide" : "Show"} details`}
         className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-surface-sunken cursor-pointer disabled:cursor-default"
       >
         <Icon
@@ -106,9 +108,7 @@ const CallRow: React.FC<{ row: Row; waiting: boolean }> = ({ row, waiting }) => 
           <span className="text-text-subtle"> · </span>
           <span className="font-medium text-text">{row.tool}</span>
         </span>
-        <span className="shrink-0 text-[11px] text-text-subtle tabular-nums">
-          {row.status === "ok" ? formatMs(row.durationMs) : st.label}
-        </span>
+        <span className="shrink-0 text-[11px] text-text-subtle tabular-nums">{tail}</span>
         {hasDetail && (
           <Icon
             name="chevron-right"
@@ -119,6 +119,11 @@ const CallRow: React.FC<{ row: Row; waiting: boolean }> = ({ row, waiting }) => 
       </button>
       {open && (
         <div className="ml-6 mt-1 mb-1.5 space-y-1.5">
+          {(decisionText || row.durationMs !== undefined) && (
+            <p className="text-[11px] text-text-subtle">
+              {[st.label, decisionText, formatMs(row.durationMs)].filter(Boolean).join(" · ")}
+            </p>
+          )}
           {row.raw !== null ? (
             <Detail label="What the model wrote" text={row.raw} />
           ) : (
@@ -127,7 +132,6 @@ const CallRow: React.FC<{ row: Row; waiting: boolean }> = ({ row, waiting }) => 
           {row.output && <Detail label="Result" text={row.output} />}
         </div>
       )}
-      {waiting && <ApprovalCard row={row} />}
     </li>
   );
 };
@@ -141,22 +145,29 @@ const Detail: React.FC<{ label: string; text: string }> = ({ label, text }) => (
   </div>
 );
 
-/** The tool calls in one assistant reply: live state from the store, finished results from the next tool-results message. */
+/**
+ * The tool calls in one assistant reply: live state from the store while it runs; afterwards (and after a restart) what was
+ * stored with the message (`records`), with the results from the next tool-results message.
+ * Approvals are answered in ToolApprovalDialog; a waiting row only says so.
+ */
 export const ToolCalls: React.FC<{
   conversationId: string;
   assistantMessageId: string;
   content: string;
   results: ToolResultItem[] | null;
+  records?: ToolCallRecord[] | undefined;
   streaming: boolean;
-}> = ({ conversationId, assistantMessageId, content, results, streaming }) => {
-  const calls = useChatToolsStore((s) => s.calls);
-  const approvals = useChatToolsStore((s) => s.approvals);
+}> = ({ conversationId, assistantMessageId, content, results, records, streaming }) => {
+  const liveCalls = useChatToolsStore((s) => s.calls);
   const entries = useConnectorsStore((s) => s.entries);
 
   const blocks = extractBlocks(content);
   if (blocks.length === 0) return null;
 
-  const connectorName = (live: CallState | undefined, slug: string): string => {
+  const connectorName = (
+    live: Pick<CallState, "connectorName" | "connectorId"> | undefined,
+    slug: string
+  ): string => {
     if (live?.connectorName) return live.connectorName;
     if (live?.connectorId) {
       const e = entries.find((x) => x.config.id === live.connectorId);
@@ -167,7 +178,8 @@ export const ToolCalls: React.FC<{
 
   const rows: Row[] = blocks.map((b) => {
     const id = `${assistantMessageId}:${b.index}`;
-    const live = calls[id];
+    const live: (ToolCallRecord & { output?: string | undefined }) | undefined =
+      liveCalls[id] ?? records?.find((r) => r.id === id);
     const result = results?.find((r) => r.id === id);
     if (!("name" in b)) {
       return {
@@ -180,7 +192,8 @@ export const ToolCalls: React.FC<{
         raw: b.raw,
         status: live?.status ?? result?.status ?? (streaming ? "pending" : "invalid"),
         output: live?.output ?? result?.text,
-        durationMs: live?.durationMs
+        durationMs: live?.durationMs,
+        decision: live?.decision
       };
     }
     const { slug, tool } = splitName(b.name);
@@ -196,7 +209,8 @@ export const ToolCalls: React.FC<{
       raw: null,
       status,
       output: live?.output ?? result?.text,
-      durationMs: live?.durationMs
+      durationMs: live?.durationMs,
+      decision: live?.decision
     };
   });
 
@@ -207,11 +221,7 @@ export const ToolCalls: React.FC<{
       className="my-2 rounded-lg border border-border bg-surface p-1"
     >
       {rows.map((row) => (
-        <CallRow
-          key={row.id}
-          row={row}
-          waiting={row.status === "waiting_approval" && approvals.includes(row.id)}
-        />
+        <CallRow key={row.id} row={row} />
       ))}
     </ul>
   );
