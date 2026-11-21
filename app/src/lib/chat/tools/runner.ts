@@ -5,6 +5,7 @@ import { buildToolList, resultToText } from "./protocol.ts";
 import {
   CALL_TIMEOUT_MS,
   MAX_RESULT_CHARS,
+  type CallDecision,
   type CallState,
   type CallStatus,
   type ChatTool,
@@ -168,10 +169,22 @@ export async function runCalls(
       startedAt: Date.now()
     };
 
-    const end = (status: Exclude<CallStatus, "running" | "waiting_approval">, text: string) => {
+    const end = (
+      status: Exclude<CallStatus, "running" | "waiting_approval">,
+      text: string,
+      decision?: CallDecision
+    ) => {
       const output = clip(text);
-      const startedAt = chat().calls[call.id]?.startedAt ?? base.startedAt ?? Date.now();
-      chat().patchCall(call.id, { status, output, durationMs: Date.now() - startedAt });
+      const prev = chat().calls[call.id];
+      const startedAt = prev?.startedAt ?? base.startedAt ?? Date.now();
+      // a decision already made (e.g. "approved_once") stays; `decision` fills in or overrides where it is final
+      const d = decision ?? prev?.decision;
+      chat().patchCall(call.id, {
+        status,
+        output,
+        durationMs: Date.now() - startedAt,
+        ...(d ? { decision: d } : {})
+      });
       refreshStatus(conversationId, ids);
       return { id: call.id, name: call.name, status, text: output } satisfies ToolResultItem;
     };
@@ -182,7 +195,7 @@ export async function runCalls(
     }
     if (signal.aborted) {
       chat().setCall({ ...base, status: "skipped" });
-      return end("skipped", "Stopped before it ran.");
+      return end("skipped", "Stopped before it ran.", "skipped");
     }
 
     chat().setCall(base);
@@ -203,13 +216,14 @@ export async function runCalls(
         allowKey(tool.connectorId, tool.tool)
       );
       let result = await invoke(always);
+      if (result.outcome !== "needs_approval") chat().patchCall(call.id, { decision: "auto" });
 
       if (result.outcome === "needs_approval") {
         chat().patchCall(call.id, { status: "waiting_approval" });
         refreshStatus(conversationId, ids);
         const allow = await chat().requestApproval(call.id, signal);
-        if (signal.aborted) return end("skipped", "Stopped before it ran.");
-        if (!allow) return end("denied", "The user did not allow this call.");
+        if (signal.aborted) return end("skipped", "Stopped before it ran.", "skipped");
+        if (!allow) return end("denied", "The user did not allow this call.", "denied_by_user");
         // the clock starts again once the user said yes
         chat().patchCall(call.id, { status: "running", startedAt: Date.now() });
         refreshStatus(conversationId, ids);
@@ -220,16 +234,24 @@ export async function runCalls(
         case "ok":
           return end(result.isError ? "error" : "ok", resultToText(result));
         case "denied":
-          return end("denied", "This tool is blocked by the user's settings.");
+          return end("denied", "This tool is blocked by the user's settings.", "blocked");
         case "needs_approval":
-          return end("denied", "The call was not approved.");
+          return end("denied", "The call was not approved.", "denied_by_user");
         default:
           return end("error", resultToText(result) || "The tool call failed.");
       }
     } catch (e) {
-      if (e instanceof Stopped) return end("skipped", "Stopped before it finished.");
+      if (e instanceof Stopped)
+        return end(
+          "skipped",
+          "Stopped before it finished.",
+          chat().calls[call.id]?.decision ?? "skipped"
+        );
       if (e instanceof TimedOut)
-        return end("error", `The tool did not answer within ${Math.round(CALL_TIMEOUT_MS / 1000)} seconds.`);
+        return end(
+          "error",
+          `The tool did not answer within ${Math.round(CALL_TIMEOUT_MS / 1000)} seconds.`
+        );
       return end("error", errorText(e));
     }
   };

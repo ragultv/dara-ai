@@ -10,6 +10,7 @@ import { enableAddon } from "../lib/chat/addons.ts";
 import type { ContextWindow } from "../lib/chat/types.ts";
 import { Logo } from "../lib/ui/Logo.tsx";
 import { isToolResultsContent, parseResults } from "../lib/chat/tools/protocol.ts";
+import { ToolApprovalDialog } from "../lib/components/assistant-ui/ToolApprovalDialog.tsx";
 
 function groupConversations(convs: Conversation[]) {
   const now = new Date();
@@ -235,6 +236,9 @@ export const ChatPage: React.FC = () => {
         {/* Assistant-UI Unified Composer */}
         <Composer />
       </main>
+
+      {/* Asks before a tool call runs; shows the first call waiting (docs/CHAT_TOOLS.md) */}
+      <ToolApprovalDialog />
     </div>
   );
 };

@@ -8,6 +8,8 @@ export interface DialogProps {
   onclose: () => void;
   children?: React.ReactNode;
   actions?: React.ReactNode;
+  /** what gets focus when the dialog opens (default: the first focusable element) */
+  initialFocus?: React.RefObject<HTMLElement | null>;
 }
 
 export const Dialog: React.FC<DialogProps> = ({
@@ -16,7 +18,8 @@ export const Dialog: React.FC<DialogProps> = ({
   description,
   onclose,
   children,
-  actions
+  actions,
+  initialFocus
 }) => {
   const dialogRef = useRef<HTMLDivElement | null>(null);
 
@@ -34,6 +37,10 @@ export const Dialog: React.FC<DialogProps> = ({
     window.addEventListener("keydown", handleKeyDown);
 
     const timer = setTimeout(() => {
+      if (initialFocus?.current) {
+        initialFocus.current.focus();
+        return;
+      }
       const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
         'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
       );
@@ -47,7 +54,7 @@ export const Dialog: React.FC<DialogProps> = ({
       window.removeEventListener("keydown", handleKeyDown);
       clearTimeout(timer);
     };
-  }, [isOpen, onclose]);
+  }, [isOpen, onclose, initialFocus]);
 
   if (!isOpen) return null;
 

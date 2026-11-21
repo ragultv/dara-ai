@@ -1,8 +1,10 @@
 import { create } from "zustand";
 import type { CallState } from "../chat/tools/types.ts";
+import { fromToolParams, toToolParams, type ToolParams } from "../chat/tools/records.ts";
 
 // Connectors in chat (docs/CHAT_TOOLS.md): which connectors each conversation uses, the live state of tool calls,
-// and the approvals waiting for the user. Only the per-conversation connector choice is kept across restarts.
+// and the approvals waiting for the user. The connector choice and the "always allow" list of a stored chat live in its
+// conversation params (useChatStore writes them); only the choice made before a chat exists ("__new__") is kept here.
 
 const STORAGE_KEY = "dara.chatConnectors";
 /** the key for a chat that has not been created yet */
@@ -32,7 +34,11 @@ function readEnabled(): Record<string, string[]> {
 
 function writeEnabled(enabled: Record<string, string[]>): void {
   try {
-    globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(enabled));
+    const pending = enabled[NEW_CHAT];
+    globalThis.localStorage?.setItem(
+      STORAGE_KEY,
+      JSON.stringify(pending ? { [NEW_CHAT]: pending } : {})
+    );
   } catch {
     // storage blocked or full: the choice still holds for this session
   }
@@ -60,6 +66,14 @@ interface ChatToolsState {
   resolveApproval: (callId: string, allow: boolean, always?: boolean) => void;
   setStatus: (conversationId: string, s: string | undefined) => void;
   forgetConversation: (conversationId: string) => void;
+  /** what the conversation's params store about connectors */
+  paramsFor: (conversationId: string) => ToolParams;
+  /** takes the connector choice and allowed tools from a stored conversation's params; older chats without them keep
+   *  what this browser had. Returns true when the params had no choice but this browser did (it should be written back). */
+  applyParams: (
+    conversationId: string,
+    params: Record<string, unknown> | null | undefined
+  ) => boolean;
 }
 
 const EMPTY: string[] = [];
@@ -141,13 +155,19 @@ export const useChatToolsStore = create<ChatToolsState>((set, get) => ({
         }
       }
     }
+    if (get().calls[callId])
+      get().patchCall(callId, {
+        decision: allow ? (always ? "approved_always" : "approved_once") : "denied_by_user"
+      });
     const finish = waiting.get(callId);
     if (finish) finish(allow);
     else set((s) => ({ approvals: s.approvals.filter((x) => x !== callId) }));
   },
 
   setStatus: (conversationId, s) =>
-    set((st) => (st.status[conversationId] === s ? st : { status: { ...st.status, [conversationId]: s } })),
+    set((st) =>
+      st.status[conversationId] === s ? st : { status: { ...st.status, [conversationId]: s } }
+    ),
 
   forgetConversation: (conversationId) => {
     const s = get();
@@ -172,5 +192,33 @@ export const useChatToolsStore = create<ChatToolsState>((set, get) => ({
       approvals: get().approvals.filter((x) => !callIds.includes(x))
     });
     if (hadEnabled) writeEnabled(enabled);
+  },
+
+  paramsFor: (conversationId) =>
+    toToolParams(
+      get().enabled[conversationId] ?? EMPTY,
+      get().alwaysAllowed[conversationId] ?? EMPTY
+    ),
+
+  applyParams: (conversationId, params) => {
+    const { enabled: fromDb, allowKeys } = fromToolParams(params);
+    const s = get();
+    const enabled = { ...s.enabled };
+    const legacy = fromDb === null && (s.enabled[conversationId]?.length ?? 0) > 0;
+    if (fromDb !== null) {
+      if (fromDb.length) enabled[conversationId] = fromDb;
+      else delete enabled[conversationId];
+    }
+    const alwaysAllowed = { ...s.alwaysAllowed };
+    if (allowKeys.length) alwaysAllowed[conversationId] = allowKeys;
+    else delete alwaysAllowed[conversationId];
+    const same = (a: string[] | undefined, b: string[] | undefined) =>
+      (a ?? EMPTY).join(" ") === (b ?? EMPTY).join(" ");
+    if (
+      !same(enabled[conversationId], s.enabled[conversationId]) ||
+      !same(alwaysAllowed[conversationId], s.alwaysAllowed[conversationId])
+    )
+      set({ enabled, alwaysAllowed });
+    return legacy;
   }
 }));

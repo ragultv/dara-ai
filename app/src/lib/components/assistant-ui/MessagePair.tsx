@@ -199,6 +199,7 @@ export const MessagePair: React.FC<MessagePairProps> = ({
             assistantMessageId={message.id}
             content={message.content}
             results={toolResults}
+            records={message.toolCalls}
             streaming={isStreaming}
           />
         )}

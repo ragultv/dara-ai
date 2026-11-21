@@ -325,7 +325,9 @@ describe("Dara's own Google client", () => {
     const { builtinClient, CATALOG } = await import("../../src/lib/connectors/catalog.ts");
     const google = CATALOG.find((c) => c.id === "gmail")!;
     const canva = CATALOG.find((c) => c.id === "canva")!;
-    // none in the test build
+    // a build without one (stubbed: a local .env.local may define it)
+    vi.stubEnv("VITE_DARA_GOOGLE_CLIENT_ID", "");
+    vi.stubEnv("VITE_DARA_GOOGLE_CLIENT_SECRET", "");
     expect(builtinClient(google)).toBeNull();
     vi.stubEnv("VITE_DARA_GOOGLE_CLIENT_ID", " id.apps.googleusercontent.com ");
     vi.stubEnv("VITE_DARA_GOOGLE_CLIENT_SECRET", "shh");

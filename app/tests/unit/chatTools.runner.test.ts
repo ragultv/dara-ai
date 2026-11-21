@@ -35,7 +35,13 @@ const call = (i: number, name: string, args: Record<string, unknown> = {}): Pars
 });
 
 const resetChatStore = () =>
-  useChatToolsStore.setState({ calls: {}, approvals: [], alwaysAllowed: {}, status: {}, enabled: {} });
+  useChatToolsStore.setState({
+    calls: {},
+    approvals: [],
+    alwaysAllowed: {},
+    status: {},
+    enabled: {}
+  });
 
 /** waits until a call is waiting for approval */
 async function untilWaiting(id: string) {
@@ -75,7 +81,10 @@ describe("runCalls", () => {
     const started = Date.now();
     const out = await runCalls(
       "c1",
-      [call(0, "demo__list_events", { range: "slow" }), call(1, "demo__list_events", { range: "fast" })],
+      [
+        call(0, "demo__list_events", { range: "slow" }),
+        call(1, "demo__list_events", { range: "fast" })
+      ],
       tools,
       new AbortController().signal
     );
@@ -106,22 +115,37 @@ describe("runCalls", () => {
     expect(r!.status).toBe("ok");
     expect(r!.text).toContain("Lunch");
     expect(useChatToolsStore.getState().approvals).toEqual([]);
+    expect(useChatToolsStore.getState().calls["m1:0"]?.decision).toBe("approved_once");
   });
 
   it("always allow skips the next prompt in the same chat only", async () => {
-    const p1 = runCalls("c1", [call(0, "demo__create_event", { title: "A", start: "1" })], tools, new AbortController().signal);
+    const p1 = runCalls(
+      "c1",
+      [call(0, "demo__create_event", { title: "A", start: "1" })],
+      tools,
+      new AbortController().signal
+    );
     await untilWaiting("m1:0");
     useChatToolsStore.getState().resolveApproval("m1:0", true, true);
     expect((await p1)[0]!.status).toBe("ok");
-    expect(useChatToolsStore.getState().alwaysAllowed["c1"]).toEqual([allowKey(connectorId, "create_event")]);
+    expect(useChatToolsStore.getState().calls["m1:0"]?.decision).toBe("approved_always");
+    expect(useChatToolsStore.getState().alwaysAllowed["c1"]).toEqual([
+      allowKey(connectorId, "create_event")
+    ]);
 
     // the same chat name now pointing at another tool (names are rebuilt each send) must still ask
     await backend.setPermission(connectorId, "list_events", "ask");
     const moved: ChatTool = { ...tool("list_events"), name: "demo__create_event" };
-    const pm = runCalls("c1", [{ id: "m4:0", name: "demo__create_event", arguments: { range: "x" } }], [moved], new AbortController().signal);
+    const pm = runCalls(
+      "c1",
+      [{ id: "m4:0", name: "demo__create_event", arguments: { range: "x" } }],
+      [moved],
+      new AbortController().signal
+    );
     await untilWaiting("m4:0");
     useChatToolsStore.getState().resolveApproval("m4:0", false);
     expect((await pm)[0]!.status).toBe("denied");
+    expect(useChatToolsStore.getState().calls["m4:0"]?.decision).toBe("denied_by_user");
 
     const second = await runCalls(
       "c1",
@@ -130,6 +154,7 @@ describe("runCalls", () => {
       new AbortController().signal
     );
     expect(second[0]!.status).toBe("ok");
+    expect(useChatToolsStore.getState().calls["m2:0"]?.decision).toBe("auto");
 
     const p3 = runCalls(
       "c2",
@@ -144,8 +169,14 @@ describe("runCalls", () => {
 
   it("a blocked tool comes back denied", async () => {
     await backend.setPermission(connectorId, "list_events", "deny");
-    const [r] = await runCalls("c1", [call(0, "demo__list_events", { range: "x" })], tools, new AbortController().signal);
+    const [r] = await runCalls(
+      "c1",
+      [call(0, "demo__list_events", { range: "x" })],
+      tools,
+      new AbortController().signal
+    );
     expect(r!.status).toBe("denied");
+    expect(useChatToolsStore.getState().calls["m1:0"]?.decision).toBe("blocked");
   });
 
   it("stopping skips running calls and refuses waiting approvals", async () => {
@@ -153,7 +184,10 @@ describe("runCalls", () => {
     const ac = new AbortController();
     const p = runCalls(
       "c1",
-      [call(0, "demo__list_events", { range: "x" }), call(1, "demo__create_event", { title: "A", start: "1" })],
+      [
+        call(0, "demo__list_events", { range: "x" }),
+        call(1, "demo__create_event", { title: "A", start: "1" })
+      ],
       tools,
       ac.signal
     );
@@ -161,6 +195,9 @@ describe("runCalls", () => {
     ac.abort();
     const out = await p;
     expect(out.map((r) => r.status)).toEqual(["skipped", "skipped"]);
+    // list_events was allowed by its rule before it was stopped; create_event never got an answer
+    expect(useChatToolsStore.getState().calls["m1:0"]?.decision).toBe("skipped");
+    expect(useChatToolsStore.getState().calls["m1:1"]?.decision).toBe("skipped");
     expect(useChatToolsStore.getState().approvals).toEqual([]);
     expect(useChatToolsStore.getState().status["c1"]).toBeUndefined();
   });
@@ -168,13 +205,23 @@ describe("runCalls", () => {
   it("a call already stopped is skipped without running", async () => {
     const ac = new AbortController();
     ac.abort();
-    const [r] = await runCalls("c1", [call(0, "demo__list_events", { range: "x" })], tools, ac.signal);
+    const [r] = await runCalls(
+      "c1",
+      [call(0, "demo__list_events", { range: "x" })],
+      tools,
+      ac.signal
+    );
     expect(r!.status).toBe("skipped");
   });
 
   it("a slow tool times out as an error", async () => {
     delay = () => 1000;
-    const [r] = await runCalls("c1", [call(0, "demo__list_events", { range: "x" })], tools, new AbortController().signal);
+    const [r] = await runCalls(
+      "c1",
+      [call(0, "demo__list_events", { range: "x" })],
+      tools,
+      new AbortController().signal
+    );
     expect(r!.status).toBe("error");
     expect(r!.text).toMatch(/did not answer/);
   });
@@ -190,7 +237,12 @@ describe("runCalls", () => {
     backend.call = async () => {
       throw new Error("server went away");
     };
-    const [r] = await runCalls("c1", [call(0, "demo__list_events", { range: "x" })], tools, new AbortController().signal);
+    const [r] = await runCalls(
+      "c1",
+      [call(0, "demo__list_events", { range: "x" })],
+      tools,
+      new AbortController().signal
+    );
     expect(r!.status).toBe("error");
     expect(r!.text).toContain("server went away");
   });
@@ -205,7 +257,11 @@ describe("loadChatTools", () => {
   });
 
   it("says which connector is not signed in", async () => {
-    const c = await backend.add({ name: "Mail", kind: "http", url: "https://auth.example.com/mcp" });
+    const c = await backend.add({
+      name: "Mail",
+      kind: "http",
+      url: "https://auth.example.com/mcp"
+    });
     const { problems } = await loadChatTools([c.id]);
     expect(problems).toEqual(["Mail is not signed in"]);
   });

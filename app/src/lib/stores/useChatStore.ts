@@ -44,6 +44,13 @@ import {
   toolSystemPrompt
 } from "../chat/tools/protocol.ts";
 import { MAX_REPAIRS, MAX_STEPS, type ChatTool } from "../chat/tools/types.ts";
+import {
+  buildMessageStats,
+  parseToolCallRecords,
+  recordFromCall,
+  type ToolCallRecord,
+  type ToolParams
+} from "../chat/tools/records.ts";
 
 export type { Conversation, UiMessage, ContextWindow } from "../chat/types.ts";
 
@@ -183,8 +190,29 @@ function paramsOf(c: Conversation): Record<string, unknown> {
     temperature: c.temperature ?? 0.7,
     max_tokens: c.maxTokens ?? 0,
     flash: c.flash !== false,
-    windows: c.windows
+    windows: c.windows,
+    // connectors on in this chat and the tools allowed for the rest of it (docs/CHAT_TOOLS.md)
+    ...useChatToolsStore.getState().paramsFor(c.id)
   };
+}
+
+/** true while connector settings are being taken from the database (so they are not written straight back) */
+let applyingToolParams = false;
+
+/** Loads a stored chat's connector settings into useChatToolsStore; a choice only this browser had is written to the database. */
+function applyToolParams(id: string, params: Record<string, unknown> | null | undefined): void {
+  applyingToolParams = true;
+  let legacy = false;
+  try {
+    legacy = useChatToolsStore.getState().applyParams(id, params);
+  } finally {
+    applyingToolParams = false;
+  }
+  if (legacy) {
+    const c = findConv(id);
+    if (c?.persisted)
+      void enqueue(id, () => storeApi.patchConversation(id, { params: paramsOf(c) }));
+  }
 }
 
 function summaryToConversation(s: DbConversationSummary): Conversation {
@@ -209,6 +237,10 @@ function summaryToConversation(s: DbConversationSummary): Conversation {
 function dbMessageToUi(m: DbMessage): UiMessage {
   const raw = m.stats ?? undefined;
   const finish = m.finish_reason ?? undefined;
+  const toolCalls =
+    m.role === "assistant"
+      ? parseToolCallRecords((raw as { tool_calls?: unknown } | undefined)?.tool_calls)
+      : undefined;
   return {
     id: m.id,
     role: m.role,
@@ -226,6 +258,7 @@ function dbMessageToUi(m: DbMessage): UiMessage {
           ...(raw?.timings?.thinking_cut ? { reasoningCut: true } : {})
         }
       : {}),
+    ...(toolCalls ? { toolCalls } : {}),
     createdAt: m.created_at
   };
 }
@@ -243,9 +276,11 @@ function findConv(id: string): Conversation | undefined {
 function saveLocal(): void {
   if (useChatStore.getState().storeAvailable) return;
   try {
+    const tools = useChatToolsStore.getState();
     const light = useChatStore.getState().conversations.map((c) => ({
       ...c,
-      messages: c.messages.map((m) => ({ ...m, images: undefined }))
+      messages: c.messages.map((m) => ({ ...m, images: undefined })),
+      toolParams: tools.paramsFor(c.id)
     }));
     localStorage.setItem(LOCAL_KEY, JSON.stringify(light));
   } catch {
@@ -316,6 +351,7 @@ async function hydrate(id: string): Promise<void> {
     ? (detail.params.windows as ContextWindow[])
     : conv.windows;
   const kept = dropStaleWindows(windows, messages);
+  applyToolParams(id, detail.params);
   updateConv(id, (c) => ({
     ...c,
     messages,
@@ -416,11 +452,9 @@ function userFacingError(err: unknown): { message: string; code?: string | undef
 
 // ---- store ----------------------------------------------------------------------------------------------------------------------------------------
 
-/** The stats blob stored with a message: the engine's numbers plus the model's thinking (so it survives a restart). */
+/** The stats blob stored with a message: the engine's numbers, the model's thinking and its tool calls (so they survive a restart). */
 function withReasoning(m: UiMessage): Record<string, unknown> | null {
-  const base = (m.raw as Record<string, unknown> | undefined) ?? {};
-  if (!m.reasoning) return Object.keys(base).length ? base : null;
-  return { ...base, reasoning: m.reasoning };
+  return buildMessageStats(m.raw as Record<string, unknown> | undefined, m.reasoning, m.toolCalls);
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -456,6 +490,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const all = convs.length > 0 ? convs : [keepBlank ?? blank];
       const active = all[0]?.id ?? null;
       set({ conversations: all, activeConversationId: active });
+      for (const s of list.data) applyToolParams(s.id, s.params);
       if (active) void hydrate(active);
       return;
     } catch {
@@ -465,15 +500,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const stored = localStorage.getItem(LOCAL_KEY);
       if (stored) {
-        const parsed = JSON.parse(stored) as Conversation[];
+        const parsed = JSON.parse(stored) as Array<Conversation & { toolParams?: ToolParams }>;
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const convs = parsed.map((c) => ({
+          const convs = parsed.map(({ toolParams: _t, ...c }) => ({
             ...c,
             windows: c.windows ?? [],
             persisted: false,
             loaded: true
           }));
           set({ conversations: convs, activeConversationId: convs[0]?.id ?? null });
+          for (const c of parsed) {
+            if (c.toolParams)
+              applyToolParams(c.id, c.toolParams as unknown as Record<string, unknown>);
+          }
           return;
         }
       }
@@ -969,6 +1008,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
       saveLocal();
     };
 
+    /** Stores what happened to a step's calls with the assistant message that made them (after its own final patch). */
+    const saveToolCalls = (msgId: string, callIds: string[]): void => {
+      const live = useChatToolsStore.getState().calls;
+      const records: ToolCallRecord[] = [];
+      for (const cid of callIds) {
+        const c = live[cid];
+        if (c) records.push(recordFromCall(c));
+      }
+      if (records.length === 0) return;
+      updateConv(id, (c) => ({
+        ...c,
+        messages: c.messages.map((m) => (m.id === msgId ? { ...m, toolCalls: records } : m))
+      }));
+      const msg = findConv(id)?.messages.find((m) => m.id === msgId);
+      if (msg) void enqueue(id, () => storeApi.patchMessage(msgId, { stats: withReasoning(msg) }));
+      saveLocal();
+    };
+
     /** Adds a short note to the end of an assistant reply (shown and stored). */
     const noteOn = (msgId: string, note: string): void => {
       const cur = findConv(id)?.messages.find((m) => m.id === msgId);
@@ -1000,6 +1057,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             break;
           }
           const items = await runCalls(id, parsed.calls, tools, signal);
+          saveToolCalls(
+            stepMsgId,
+            parsed.calls.map((c) => c.id)
+          );
           const problemItems =
             parsed.problems.length > 0 ? parseResults(formatProblems(parsed.problems, tools)) : [];
           resultsText = formatResults([...items, ...problemItems]);
@@ -1105,3 +1166,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     void get().sendMessage(CONTINUE_TEXT, [], modelId);
   }
 }));
+
+// A chat's connector choice and "always allow" list are stored in its params: write them whenever they change.
+useChatToolsStore.subscribe((next, prev) => {
+  if (applyingToolParams) return;
+  if (next.enabled === prev.enabled && next.alwaysAllowed === prev.alwaysAllowed) return;
+  const changed = new Set<string>();
+  for (const k of new Set([...Object.keys(next.enabled), ...Object.keys(prev.enabled)]))
+    if (next.enabled[k] !== prev.enabled[k]) changed.add(k);
+  for (const k of new Set([...Object.keys(next.alwaysAllowed), ...Object.keys(prev.alwaysAllowed)]))
+    if (next.alwaysAllowed[k] !== prev.alwaysAllowed[k]) changed.add(k);
+  let any = false;
+  for (const id of changed) {
+    const c = findConv(id);
+    if (!c) continue;
+    any = true;
+    if (c.persisted && useChatStore.getState().storeAvailable)
+      void enqueue(id, () =>
+        storeApi.patchConversation(id, { params: paramsOf(findConv(id) ?? c) })
+      );
+  }
+  if (any) saveLocal();
+});

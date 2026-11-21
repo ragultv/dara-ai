@@ -12,6 +12,34 @@ const samplesDir = path.resolve(repoRoot, "docs", "ui", "samples");
 export interface MockServerOptions {
   port?: number;
   apiKey?: string;
+  /** keep the chats the app creates in memory (conversations, messages with their stats and params) instead of serving
+   *  the recorded samples; off by default so tests that expect the samples keep them */
+  keepChats?: boolean;
+}
+
+interface MockMessage {
+  id: string;
+  conversation_id: string;
+  position: number;
+  role: string;
+  content: string;
+  finish_reason: string | null;
+  error: string | null;
+  stats: Record<string, unknown> | null;
+  model: string | null;
+  created_at: number;
+  attachments: unknown[];
+}
+interface MockConversation {
+  id: string;
+  title: string;
+  model: string | null;
+  system_prompt: string;
+  params: Record<string, unknown>;
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
+  messages: MockMessage[];
 }
 
 interface MockArtifact {
@@ -30,6 +58,11 @@ export function createMockServer(options: MockServerOptions = {}): {
   stop: () => Promise<void>;
 } {
   const artifacts = new Map<string, MockArtifact>();
+  const chatsDb = new Map<string, MockConversation>();
+  const summaryOf = ({ messages, ...c }: MockConversation) => ({
+    ...c,
+    message_count: messages.length
+  });
   // version history (docs/ui/09-artifacts.md): the mock keeps a version only for an explicit `snapshot` label or a restore
   const versions = new Map<
     string,
@@ -70,7 +103,10 @@ export function createMockServer(options: MockServerOptions = {}): {
     // Enable CORS for testing & local webview dev
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Dara-Name");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization, Accept, X-Dara-Name"
+    );
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -158,6 +194,99 @@ export function createMockServer(options: MockServerOptions = {}): {
           log: ["Benchmark cancelled by user."]
         })
       );
+      return;
+    }
+
+    // Chats kept in memory (keepChats): the same routes and limits as src/serve/store.cpp, enough for a reload to show them.
+    if (
+      options.keepChats &&
+      (pathname.startsWith("/dara/conversations") || pathname.startsWith("/dara/messages/"))
+    ) {
+      const send = (status: number, body: unknown) => {
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      const parts: Buffer[] = [];
+      req.on("data", (c: Buffer) => parts.push(c));
+      req.on("end", () => {
+        const raw = Buffer.concat(parts).toString("utf-8");
+        const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
+        const tooBig = (v: unknown) => JSON.stringify(v ?? null).length > 64 * 1024;
+        if (tooBig(body["params"]) || tooBig(body["stats"]))
+          return send(400, { error: { message: "too large" } });
+        const now = Date.now();
+        const seg = pathname.split("/").filter(Boolean); // dara, conversations|messages, id?, messages?
+        if (seg[1] === "conversations" && seg.length === 2) {
+          if (req.method === "GET") {
+            const data = [...chatsDb.values()]
+              .sort((a, b) => b.updated_at - a.updated_at)
+              .map(summaryOf);
+            return send(200, { object: "list", data, total: data.length, limit: 200, offset: 0 });
+          }
+          const id = String(body["id"] ?? crypto.randomUUID());
+          const c: MockConversation = {
+            id,
+            title: String(body["title"] ?? "New Chat"),
+            model: (body["model"] as string | undefined) ?? null,
+            system_prompt: String(body["system_prompt"] ?? ""),
+            params: (body["params"] as Record<string, unknown> | undefined) ?? {},
+            pinned: body["pinned"] === true,
+            created_at: now,
+            updated_at: now,
+            messages: []
+          };
+          chatsDb.set(id, c);
+          return send(201, summaryOf(c));
+        }
+        if (seg[1] === "conversations") {
+          const c = chatsDb.get(seg[2] ?? "");
+          if (!c) return send(404, { error: { message: "no such conversation" } });
+          if (seg[3] === "messages") {
+            if (req.method === "DELETE") {
+              const from = Number(url.searchParams.get("from") ?? 0);
+              const before = c.messages.length;
+              c.messages = c.messages.filter((m) => m.position < from);
+              return send(200, { deleted: before - c.messages.length });
+            }
+            const m: MockMessage = {
+              id: String(body["id"] ?? crypto.randomUUID()),
+              conversation_id: c.id,
+              position: c.messages.length,
+              role: String(body["role"] ?? "user"),
+              content: String(body["content"] ?? ""),
+              finish_reason: (body["finish_reason"] as string | undefined) ?? null,
+              error: (body["error"] as string | undefined) ?? null,
+              stats: (body["stats"] as Record<string, unknown> | undefined) ?? null,
+              model: null,
+              created_at: Number(body["created_at"] ?? now),
+              attachments: []
+            };
+            c.messages.push(m);
+            c.updated_at = now;
+            return send(201, m);
+          }
+          if (req.method === "GET") return send(200, { ...summaryOf(c), messages: c.messages });
+          if (req.method === "DELETE") {
+            chatsDb.delete(c.id);
+            return send(200, { deleted: true });
+          }
+          for (const k of ["title", "model", "system_prompt", "params", "pinned"] as const)
+            if (k in body) (c as unknown as Record<string, unknown>)[k] = body[k];
+          c.updated_at = now;
+          return send(200, summaryOf(c));
+        }
+        // /dara/messages/{id}
+        const id = seg[2] ?? "";
+        for (const c of chatsDb.values()) {
+          const m = c.messages.find((x) => x.id === id);
+          if (!m) continue;
+          for (const k of ["content", "finish_reason", "error", "stats"] as const)
+            if (k in body) (m as unknown as Record<string, unknown>)[k] = body[k];
+          c.updated_at = now;
+          return send(200, m);
+        }
+        return send(404, { error: { message: "no such message" } });
+      });
       return;
     }
 
@@ -461,8 +590,8 @@ export function createMockServer(options: MockServerOptions = {}): {
             title: body.title ?? (a.title ? `${a.title} (copy)` : ""),
             created_at: now,
             updated_at: now
-          };+
-          artifacts.set(copy.id, copy);
+          };
+          +artifacts.set(copy.id, copy);
           return send(201, full(copy));
         }
         if (sub === "versions" && req.method === "GET") {

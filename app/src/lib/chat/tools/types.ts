@@ -52,7 +52,15 @@ export type CallStatus =
   | "denied" // blocked by the user's rule, or refused at the approval card
   | "skipped"; // stopped before it ran (Stop pressed, step limit)
 
-/** Live and finished state of one call, kept in useChatToolsStore (not persisted; the result text is in the message content). */
+/**
+ * Who let a call run, or why it did not:
+ * "auto" = allowed by its rule or by an earlier "always allow in this chat"; "approved_once" / "approved_always" = the user's
+ * answer to the approval; "denied_by_user" = refused there; "blocked" = the user's rule says deny; "skipped" = stopped.
+ */
+export type CallDecision =
+  "auto" | "approved_once" | "approved_always" | "denied_by_user" | "blocked" | "skipped";
+
+/** Live and finished state of one call, kept in useChatToolsStore; once the step ends it is stored with the message (records.ts). */
 export interface CallState {
   id: string;
   conversationId: string;
@@ -62,6 +70,7 @@ export interface CallState {
   tool: string;
   arguments: Record<string, unknown>;
   status: CallStatus;
+  decision?: CallDecision | undefined;
   /** result text as sent to the model (truncated), or the error */
   output?: string | undefined;
   startedAt?: number | undefined;
