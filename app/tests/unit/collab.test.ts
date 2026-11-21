@@ -338,3 +338,29 @@ describe("a 401 from the engine", () => {
     expect(collabMessage(new ApiError(401, "x"), "comments")).toMatch(/key/);
   });
 });
+
+describe("widget look and diagram guidance", () => {
+  it("teaches the page's colour variables, and how to draw, only for a diagram", async () => {
+    const { widgetGuide, wantsDiagram, WIDGET_GUIDE, DIAGRAM_GUIDE } =
+      await import("../../src/lib/artifacts/plan.ts");
+    expect(WIDGET_GUIDE).toContain("var(--surface)");
+    expect(WIDGET_GUIDE).toContain("Never write a colour");
+    expect(widgetGuide("add a tip calculator")).toBe(WIDGET_GUIDE);
+    expect(widgetGuide("draw an architecture diagram of the engine")).toContain(DIAGRAM_GUIDE);
+    expect(wantsDiagram("a flow chart")).toBe(true);
+    expect(wantsDiagram("a calculator")).toBe(false);
+  });
+  it("gives the frame the page's variables, a quiet default look and live theme updates", async () => {
+    const { widgetSrcDoc } = await import("../../src/lib/artifacts/extensions/widgets.ts");
+    const html = widgetSrcDoc(
+      "<b>x</b>",
+      { text: "white", primary: "purple", "on-primary": "white", scheme: "dark" },
+      "w9"
+    );
+    expect(html).toContain("--primary:purple");
+    expect(html).toContain("color-scheme:dark");
+    expect(html).toContain(":where(button)"); // low specificity: the widget's own CSS wins
+    expect(html).toContain("daraTheme");
+    expect(html).toContain("e.source!==parent");
+  });
+});
