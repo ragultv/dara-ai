@@ -18,7 +18,14 @@ export const MAX_SECTIONS = 8;
 
 /** The user asks for something interactive (a widget, calculator, chart, converter, quiz, timer...). */
 export function wantsWidget(instruction: string): boolean {
-  return /\b(widgets?|interactive|calculators?|converters?|simulators?|quiz(?:zes)?|timers?|sliders?|demos?|playgrounds?|visuali[sz]ers?|charts?|graphs?)\b/i.test(
+  return /\b(widgets?|interactive|calculators?|converters?|simulators?|quiz(?:zes)?|timers?|sliders?|demos?|playgrounds?|visuali[sz]ers?|charts?|graphs?|diagrams?|flow ?charts?|infographics?|schematics?|mind ?maps?)\b/i.test(
+    instruction
+  );
+}
+
+/** The user asks for a picture of how things fit together (a diagram, flow, chart) rather than a control. */
+export function wantsDiagram(instruction: string): boolean {
+  return /\b(diagrams?|flow ?charts?|architecture|infographics?|schematics?|mind ?maps?|charts?|graphs?)\b/i.test(
     instruction
   );
 }
@@ -30,13 +37,32 @@ export function wantsWidget(instruction: string): boolean {
 export const WIDGET_GUIDE = [
   "For something interactive, write a widget: a fenced code block whose language is widget, like this:",
   "```widget",
-  '<div id="app"><input id="a" type="number" value="10"> <button id="go">Calculate</button> <p id="out"></p></div>',
-  "<style>#app{display:grid;gap:8px;max-width:320px}</style>",
+  '<div id="app"><label for="a">Amount</label><input id="a" type="number" value="10"><button id="go">Calculate</button><p id="out"></p></div>',
+  "<style>#app{max-width:340px}#out{font-size:1.2em;font-weight:600}</style>",
   "<script>document.getElementById('go').onclick=()=>{document.getElementById('out').textContent=Number(document.getElementById('a').value)*2}</script>",
   "```",
-  "Rules for a widget: one block, under 60 lines, plain HTML, CSS in a <style> element and JavaScript in a <script> element, no external files, no frameworks, no network, no alert() or prompt().",
+  "Rules for a widget: one block, under 70 lines, plain HTML, CSS in a <style> element and JavaScript in a <script> element, no external files, no frameworks, no network, no alert() or prompt().",
+  "Colours ONLY from the page's variables, so it matches light and dark mode: var(--text), var(--muted), var(--bg), var(--surface), var(--border), var(--primary). Never write a colour like #fff or green. Buttons, inputs, labels, tables and links are already styled: do not restyle them.",
   "It must work on its own: connect every button and input with ids and event handlers in the script, and show results in the page."
 ].join("\n");
+
+/** How to draw a diagram or chart inside a widget: inline SVG in the page's own colours. */
+export const DIAGRAM_GUIDE = [
+  "For a diagram, flow or chart, draw it as inline SVG inside the widget, with a title line above it that states the finding:",
+  "```widget",
+  '<svg viewBox="0 0 640 140" width="100%"><defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>',
+  '<rect x="20" y="30" width="220" height="70" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="130" y="70" text-anchor="middle">Request</text>',
+  '<line x1="240" y1="65" x2="390" y2="65" stroke="var(--muted)" marker-end="url(#ar)"/>',
+  '<rect x="400" y="30" width="220" height="70" rx="10" fill="var(--surface)" stroke="var(--primary)" stroke-width="2"/><text x="510" y="70" text-anchor="middle">Engine</text></svg>',
+  "```",
+  "Boxes use fill var(--surface) and stroke var(--border); text uses the default fill (var(--text)) or var(--muted) for small notes; use var(--primary) as the ONE accent, on the part the title is about.",
+  "Keep every label short enough to fit inside its box, leave gaps between boxes, never let text overlap a line or another label, and draw arrows with marker-end."
+].join("\n");
+
+/** The guide for what the user asked: a widget always, plus how to draw when it is a diagram. */
+export function widgetGuide(instruction: string): string {
+  return wantsDiagram(instruction) ? `${WIDGET_GUIDE}\n\n${DIAGRAM_GUIDE}` : WIDGET_GUIDE;
+}
 
 export const PLAN_SYSTEM_PROMPT = [
   "You are Dara, the writing assistant inside a document editor.",
@@ -113,7 +139,7 @@ export function buildSectionMessages(
     wantsWidget(request) &&
     /widget|calculator|converter|interactive|demo|quiz|timer|simulator/i.test(sec.heading);
   const system = isWidgetSection
-    ? `${SECTION_SYSTEM_PROMPT}\n\nThis section is the interactive widget: write one short sentence introducing it, then the widget.\n${WIDGET_GUIDE}`
+    ? `${SECTION_SYSTEM_PROMPT}\n\nThis section is the interactive widget: write one short sentence introducing it, then the widget.\n${widgetGuide(request)}`
     : SECTION_SYSTEM_PROMPT;
   return [
     { role: "system", content: system },
@@ -164,7 +190,7 @@ export const OPS_SYSTEM_PROMPT = [
 
 export function buildOpsMessages(blocks: string[], instruction: string): ChatMessage[] {
   const widget = wantsWidget(instruction)
-    ? `\n\nThe user wants something interactive, so add it with @insert (a widget is ONE block).\n${WIDGET_GUIDE}`
+    ? `\n\nThe user wants something interactive, so add it with @insert (a widget is ONE block).\n${widgetGuide(instruction)}`
     : "";
   return [
     { role: "system", content: OPS_SYSTEM_PROMPT + widget },
