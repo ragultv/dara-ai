@@ -227,5 +227,6 @@ const emptyStatus: ConnectorStatus = {
   toolCount: 0,
   toolsChanged: false,
   resourceMetadata: null,
-  signedIn: false
+  signedIn: false,
+  neededScope: null
 };

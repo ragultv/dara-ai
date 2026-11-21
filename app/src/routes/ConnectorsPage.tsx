@@ -200,7 +200,7 @@ const ConnectorCard: React.FC<{ entry: ConnectorEntry }> = ({ entry }) => {
               void signIn(config.id);
             }}
           >
-            Sign in
+            {status.neededScope ? "Approve more access" : "Sign in"}
           </Button>
         ) : status.state === "ready" || status.state === "connecting" ? (
           <Button
@@ -297,7 +297,9 @@ const ConnectorCard: React.FC<{ entry: ConnectorEntry }> = ({ entry }) => {
             <p className="mt-2 rounded-lg border border-border bg-surface-raised px-3 py-2 text-xs text-text-muted">
               {signingIn
                 ? "Finish signing in in your browser. Dara is waiting."
-                : "This server asks you to sign in first. Sign in opens your browser; Dara keeps the sign-in on this computer and never sees your password."}
+                : status.neededScope
+                  ? `This server says a tool needs more access than you gave (${status.neededScope}). Nothing was changed. Approve more access opens your browser so you can decide.`
+                  : "This server asks you to sign in first. Sign in opens your browser; Dara keeps the sign-in on this computer and never sees your password."}
             </p>
           )}
           {status.state === "ready" && (

@@ -35,6 +35,8 @@ export interface ConnectorStatus {
   resourceMetadata: string | null;
   /** valid sign-in tokens are stored */
   signedIn: boolean;
+  /** the server answered that a tool needs more access than was granted; signing in again asks for it */
+  neededScope: string | null;
 }
 
 export interface ConnectorEntry {
