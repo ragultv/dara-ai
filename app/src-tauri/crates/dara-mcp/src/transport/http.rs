@@ -185,10 +185,20 @@ impl HttpTransport {
         }
         let www = resp.headers().get(WWW_AUTHENTICATE).and_then(|v| v.to_str().ok()).map(str::to_string);
         let body = resp.text().await.unwrap_or_default();
-        // enough of the answer to see why the server refused; a sign-in challenge header says it too (it holds no secret)
-        let snippet: String = body.chars().take(1500).collect();
-        let challenge = www.map(|w| format!(" [WWW-Authenticate: {w}]")).unwrap_or_default();
-        Err(McpError::Transport(format!("HTTP {}: {}{}", status.as_u16(), snippet.trim(), challenge)))
+        // Google answers a refused request with the normal result in the body (a tool list under a 403), which says nothing about
+        // the refusal; only an error object or non-JSON text is worth showing. The challenge header goes first: it holds no secret.
+        let says_why = match serde_json::from_str::<Value>(&body) {
+            Ok(v) => v.get("error").is_some().then(|| v["error"].to_string()),
+            Err(_) => Some(body.chars().take(1500).collect::<String>()),
+        };
+        let mut msg = format!("HTTP {}", status.as_u16());
+        if let Some(w) = www {
+            msg.push_str(&format!(" [WWW-Authenticate: {w}]"));
+        }
+        if let Some(t) = says_why.filter(|t| !t.trim().is_empty()) {
+            msg.push_str(&format!(": {}", t.trim()));
+        }
+        Err(McpError::Transport(msg))
     }
 
     async fn read_body(resp: Response) -> Result<Vec<u8>, McpError> {
