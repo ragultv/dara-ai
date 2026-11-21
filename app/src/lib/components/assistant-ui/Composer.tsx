@@ -12,6 +12,8 @@ import { ComposerAttachments } from "./ComposerAttachments.tsx";
 import { FlashToggle } from "./FlashToggle.tsx";
 import { ThinkingEffort } from "./ThinkingEffort.tsx";
 import { ContextBreakdown } from "./ContextBreakdown.tsx";
+import { ConnectorsMenu } from "./ConnectorsMenu.tsx";
+import { ToolActivity } from "./ToolActivity.tsx";
 import { useChatStore, getContextView } from "../../stores/useChatStore.ts";
 import { useModelsStore } from "../../stores/useModelsStore.ts";
 import { useServerStore } from "../../stores/useServerStore.ts";
@@ -215,6 +217,8 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
         </div>
       )}
 
+      {activeConv && <ToolActivity conversationId={activeConv.id} />}
+
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -247,8 +251,8 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
           style={{ outline: "none", boxShadow: "none", border: "none" }}
         />
 
-        <div className="flex items-center justify-between pt-2.5 mt-1 border-t border-border/40">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-2 pt-2.5 mt-1 border-t border-border/40">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5">
             <input
               type="file"
               multiple
@@ -354,6 +358,8 @@ export const Composer: React.FC<{ className?: string }> = ({ className = "" }) =
                 </div>
               )}
             </Popover>
+
+            <ConnectorsMenu conversationId={activeConv?.id ?? null} disabled={locked} />
 
             <span className="text-border" aria-hidden="true">
               |
