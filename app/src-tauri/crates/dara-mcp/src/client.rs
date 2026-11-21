@@ -45,6 +45,7 @@ impl RemoteTool {
     pub fn fingerprint(&self) -> String {
         let basis = json!({
             "name": self.name,
+            "title": self.title,
             "description": self.description,
             "inputSchema": self.input_schema,
             "annotations": self.annotations,

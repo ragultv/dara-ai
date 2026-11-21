@@ -99,10 +99,17 @@ References between steps use a small expression syntax (`steps.events.output[0].
 7. **Natural-language authoring** (validated against the schema, dry-run before saving) and the visual editor.
 8. **Export and import** with manifests.
 
-## Open questions
+## Open questions, with what is known
 
-- Which of Gmail, Outlook and Calendar have an MCP server we can rely on, and which need a built-in connector?
-- OAuth client registration: Google restricts Gmail scopes (verification, and short-lived tokens while an app is in testing); Microsoft allows a public client with PKCE.
+None of this has been verified against a live endpoint; it comes from search excerpts and must be checked before step 6.
+
+- **Which connectors have an MCP server?**
+  - **Google:** documents remote MCP servers for Workspace (Gmail, Drive, Calendar and others). You enable the APIs in your own Cloud project and sign in with OAuth 2.0. Check on the real endpoint that the tools return what the daily summary needs: events for a date range, and mail search that returns message bodies.
+  - **Canva:** `mcp.canva.com/mcp`, Streamable HTTP, OAuth.
+  - **Outlook mail and calendar:** nothing found that confirms a Microsoft-hosted server, so plan a built-in Microsoft Graph connector.
+- **Whose OAuth client IDs?** Dara's own, because Dara is the application: a Google Cloud project with the Gmail and Calendar APIs enabled, and a Microsoft Entra app registration with read-only Graph permissions (a public client with PKCE).
+  - **Beta:** a Google app in testing mode is limited to listed test users, and refresh tokens expire after about 7 days there.
+  - **Public release:** Gmail's restricted scopes need Google's verification, which can take a security assessment. Start it early.
 - Where the 9B authoring tier is unavailable (small GPUs), is "edit a template" enough?
 
 ## Status
@@ -120,6 +127,6 @@ Things found while building that the first plan did not say:
 - A child process must not inherit the app's environment (API keys, tokens). It gets PATH, SystemRoot, TEMP, TMP, USERPROFILE, APPDATA, LOCALAPPDATA and HOME, plus the variables the user gave it.
 - Streamable HTTP: a POST may be answered with JSON or with an SSE stream, with notifications and requests mixed in; a 404 on a known session means start a new session once. The older HTTP+SSE transport is deprecated and not supported.
 - A Windows credential holds about 2.5 KB, so a variable value over 2000 characters is refused.
-- If the tool list changed and a tool's definition changed with it, a call that was approved is **not** made: what the user approved is no longer what is there.
+- If the tool list changed and a tool's definition changed with it, a call that was approved is **not** made: what the user approved is no longer what is there. The reset itself is in the store (`Store::sync_tools`), so it holds for every connector kind; a test covers an HTTP connector, and the fingerprint includes the tool's title as well as its name, description, schema and annotations.
 
 Run the tests: `cd app/src-tauri && cargo test -p dara-mcp` (use `CARGO_TARGET_DIR` outside the repo while `tauri dev` is running) and `cd app && npm run test`.
