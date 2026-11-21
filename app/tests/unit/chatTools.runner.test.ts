@@ -10,7 +10,8 @@ import type { ConnectorsBackend } from "../../src/lib/connectors/types.ts";
 import { useConnectorsStore } from "../../src/lib/stores/useConnectorsStore.ts";
 import { allowKey, useChatToolsStore } from "../../src/lib/stores/useChatToolsStore.ts";
 import { loadChatTools, runCalls } from "../../src/lib/chat/tools/runner.ts";
-import type { ChatTool, ParsedCall } from "../../src/lib/chat/tools/types.ts";
+import { WAIT_TOOL, type ChatTool, type ParsedCall } from "../../src/lib/chat/tools/types.ts";
+import { waitTool } from "../../src/lib/chat/tools/protocol.ts";
 
 let backend: ConnectorsBackend;
 let delay: (tool: string, args: Record<string, unknown>) => number;
@@ -252,8 +253,11 @@ describe("loadChatTools", () => {
   it("connects the chosen connectors and lists their tools", async () => {
     const { tools: list, problems } = await loadChatTools([connectorId]);
     expect(problems).toEqual([]);
-    expect(list.map((t) => t.tool).sort()).toEqual(["create_event", "list_events"]);
-    expect(list.every((t) => t.connectorId === connectorId)).toBe(true);
+    const own = list.filter((t) => t.name !== WAIT_TOOL);
+    expect(own.map((t) => t.tool).sort()).toEqual(["create_event", "list_events"]);
+    expect(own.every((t) => t.connectorId === connectorId)).toBe(true);
+    // Dara's wait tool comes with them, so a started job can be checked again in the same reply
+    expect(list.some((t) => t.name === WAIT_TOOL && t.connectorId === "")).toBe(true);
   });
 
   it("says which connector is not signed in", async () => {
@@ -283,5 +287,68 @@ describe("the store", () => {
     useChatToolsStore.getState().adoptNew("c9");
     expect(useChatToolsStore.getState().enabledFor("c9")).toEqual(["b"]);
     expect(useChatToolsStore.getState().enabledFor(null)).toEqual([]);
+  });
+});
+
+describe("waiting for a job", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("runs the calls after a wait once it is over, and the ones before it at once", async () => {
+    vi.useFakeTimers();
+    const order: string[] = [];
+    const tool: ChatTool = {
+      name: "jobs__status",
+      connectorId: "c-jobs",
+      connectorName: "Jobs",
+      tool: "status",
+      title: null,
+      description: "",
+      inputSchema: { type: "object" },
+      permission: "allow"
+    };
+    useConnectorsStore.setState({
+      call: async (_id: string, _tool: string, args: Record<string, unknown>) => {
+        order.push(String(args["n"]));
+        return {
+          outcome: "ok",
+          content: [{ type: "text", text: `status ${String(args["n"])}` }],
+          structuredContent: null,
+          isError: false,
+          truncated: false
+        };
+      }
+    } as never);
+    const calls: ParsedCall[] = [
+      { id: "m:0", name: "jobs__status", arguments: { n: "before" } },
+      { id: "m:1", name: WAIT_TOOL, arguments: { seconds: 15 } },
+      { id: "m:2", name: "jobs__status", arguments: { n: "after" } }
+    ];
+    const run = runCalls("conv-w", calls, [tool, waitTool()], new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(order).toEqual(["before"]);
+    await vi.advanceTimersByTimeAsync(15000);
+    const items = await run;
+    expect(order).toEqual(["before", "after"]);
+    expect(items.map((i) => [i.id, i.status])).toEqual([
+      ["m:0", "ok"],
+      ["m:1", "ok"],
+      ["m:2", "ok"]
+    ]);
+    expect(items[1]!.text).toBe("Waited 15 seconds.");
+  });
+
+  it("caps the wait and stops it at once on Stop", async () => {
+    vi.useFakeTimers();
+    const ac = new AbortController();
+    const run = runCalls(
+      "conv-w2",
+      [{ id: "w:0", name: WAIT_TOOL, arguments: { seconds: 9999 } }],
+      [waitTool()],
+      ac.signal
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    ac.abort();
+    const [item] = await run;
+    expect(item!.status).toBe("skipped");
   });
 });

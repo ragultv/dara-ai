@@ -62,3 +62,7 @@ Which models can do this well is measured, not assumed: a small test set per mod
 
 - Which loaded models pass the tool test (needs a real run on the dev GPU).
 - Whether to store tool rows in the conversation database (needs a schema change in the engine's store, which only accepts `system`, `user` and `assistant` roles today) or keep them app-side.
+
+## Jobs that take time (wait tool)
+
+Some tools start a job and answer "pending, check again in 15 seconds" (Canva's design generation). Dara offers its own tool, `dara__wait` (1 to 60 seconds, no approval, Stop ends it), whenever connector tools are on. Calls in one reply run at the same time, except around a wait: calls written after a wait block run once it is over, so the model can write "wait 15 s, then check the job" in one step and keep going until the job is done. The prompt tells it not to end a reply promising to check back, and to give the user any links from the results. The step limit is 12 per message to leave room for a few checks.
