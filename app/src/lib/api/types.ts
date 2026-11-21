@@ -333,7 +333,8 @@ export interface Stats {
   uptime_seconds: number;
   pid: number;
   queued: number;
-  context: { capacity: number; held_tokens: number };
+  /** null when no model is loaded (so are engine, model and last_request) */
+  context: { capacity: number; held_tokens: number } | null;
   gpu?: {
     name: string;
     nvml: boolean;
@@ -351,7 +352,7 @@ export interface Stats {
     clock_sm_mhz?: number;
     clock_mem_mhz?: number;
     pstate?: number;
-  };
+  } | null;
   engine: {
     requests: number;
     errors: number;
@@ -364,7 +365,7 @@ export interface Stats {
     prompt_tokens_total: number;
     completion_tokens_total: number;
     cached_tokens_total: number;
-  };
+  } | null;
   model?: Record<string, unknown> & {
     id: string;
     kv_format: KvFormat;
@@ -373,7 +374,7 @@ export interface Stats {
     output_head: "gpu" | "cpu";
     load_seconds: number;
     vision: boolean;
-  };
+  } | null;
   disk: {
     models_dir: string;
     volume_free_gb: number;
