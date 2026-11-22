@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <numeric>
@@ -196,6 +197,19 @@ struct Engine::Impl {
     size_t flash_valid = 0;              // drafter positions known to match the held state
     bool flash_paused = false;           // Flash stood down in the conversation held now (cleared when a new conversation starts)
     bool spec_paused = false;            // all speculative decoding stood down in it (prompt lookup did not pay off either)
+    // Prompt cache for conversations other than the one on the GPU (Nano): when a request moves away from the held conversation its K/V is parked in
+    // system RAM (least recently used dropped first, within a RAM budget); a later request that continues one of them copies it back instead of
+    // prefilling it again. The bytes are exactly what was computed, so the text is identical to a recompute. Never touches VRAM.
+    // DARA_PROMPT_CACHE_MB=N sets the budget (0 = off); the default is a quarter of the RAM that is free (at most 4 GB).
+    struct SavedConv { std::vector<int32_t> tokens; dara::model::GemmaModel::KvSnapshot kv; uint64_t used = 0; };
+    std::vector<SavedConv> saved_convs;
+    struct SavedQ { std::vector<int32_t> tokens; dara::model::QwenModel::HostCheckpoint ck; uint64_t used = 0; };   // Qwen: tokens = the checkpoint's prompt
+    std::vector<SavedQ> saved_q;
+    size_t saved_bytes = 0;
+    size_t saved_budget = static_cast<size_t>(-1);   // -1: not decided yet
+    uint64_t saved_tick = 0;
+    static constexpr size_t kCacheMinTokens = 256;   // a shorter conversation re-prefills in well under a second
+    static constexpr size_t kCacheMinGain = 128;     // restore only when it saves at least this many tokens of prefill over what the GPU holds
     // special ids
     std::vector<int32_t> eog;
     int32_t img_pad = -1, img_open = -1, img_close = -1;
@@ -339,6 +353,100 @@ struct Engine::Impl {
         kv_images = false;
         held_imgs.clear();
         flash_valid = 0;
+    }
+    size_t cache_budget() {
+        if (saved_budget == static_cast<size_t>(-1)) {
+            size_t b = 0;
+            if (const char* e = std::getenv("DARA_PROMPT_CACHE_MB")) b = static_cast<size_t>(std::max<long long>(0, std::atoll(e))) << 20;
+            else {
+#ifdef _WIN32
+                MEMORYSTATUSEX ms;
+                ms.dwLength = sizeof ms;
+                if (GlobalMemoryStatusEx(&ms)) b = std::min<size_t>(static_cast<size_t>(ms.ullAvailPhys / 4), size_t{4} << 30);
+#else
+                b = size_t{1} << 30;
+#endif
+            }
+            saved_budget = b;
+        }
+        return saved_budget;
+    }
+    // Parks the conversation the GPU holds (Nano): the model's K/V of kv_tokens, unless an entry already covers it. An entry that is a prefix of it is replaced.
+    void save_live_to_cache() {
+        if (qwen || !gm || kv_images || cache_budget() == 0) return;
+        const size_t n = std::min(kv_tokens.size(), gm->position());
+        if (n < kCacheMinTokens) return;
+        for (auto it = saved_convs.begin(); it != saved_convs.end();) {
+            const size_t m = std::min(it->tokens.size(), n);
+            if (std::equal(it->tokens.begin(), it->tokens.begin() + static_cast<long>(m), kv_tokens.begin())) {
+                if (it->tokens.size() >= n) { it->used = ++saved_tick; return; }   // already parked
+                saved_bytes -= it->kv.bytes.size();                                  // shorter prefix of this conversation: superseded
+                it = saved_convs.erase(it);
+            } else ++it;
+        }
+        const size_t need = gm->kv_snapshot_bytes(n);
+        if (need == 0 || need > cache_budget()) return;
+        while (saved_bytes + need > cache_budget() && !saved_convs.empty()) {
+            auto lru = std::min_element(saved_convs.begin(), saved_convs.end(), [](const SavedConv& a, const SavedConv& b) { return a.used < b.used; });
+            saved_bytes -= lru->kv.bytes.size();
+            saved_convs.erase(lru);
+        }
+        SavedConv c;
+        c.tokens.assign(kv_tokens.begin(), kv_tokens.begin() + static_cast<long>(n));
+        if (!gm->kv_save(n, c.kv)) return;
+        c.used = ++saved_tick;
+        saved_bytes += c.kv.bytes.size();
+        saved_convs.push_back(std::move(c));
+    }
+    // The parked conversation that shares the longest prefix with `ids`, if it saves at least kCacheMinGain tokens over `live_reuse`; its shared length in l_out.
+    int find_saved(const std::vector<int32_t>& ids, size_t live_reuse, size_t& l_out) const {
+        int best = -1;
+        size_t best_l = 0;
+        for (size_t i = 0; i < saved_convs.size(); ++i) {
+            const std::vector<int32_t>& t = saved_convs[i].tokens;
+            const size_t lim = std::min(t.size(), ids.size());
+            size_t l = 0;
+            while (l < lim && t[l] == ids[l]) ++l;
+            if (l > best_l) { best_l = l; best = static_cast<int>(i); }
+        }
+        if (best < 0 || best_l <= live_reuse + kCacheMinGain) return -1;
+        l_out = best_l;
+        return best;
+    }
+    // Qwen: parks the checkpoint the GPU holds (recurrent states at qckpt.pos + the K/V before it), unless an entry already covers that prompt.
+    void save_qckpt_to_cache() {
+        if (!qwen || !qm || kv_images || cache_budget() == 0 || !qckpt.valid || qckpt_tokens.size() < kCacheMinTokens) return;
+        for (auto it = saved_q.begin(); it != saved_q.end();) {
+            const size_t m = std::min(it->tokens.size(), qckpt_tokens.size());
+            if (std::equal(it->tokens.begin(), it->tokens.begin() + static_cast<long>(m), qckpt_tokens.begin())) {
+                if (it->tokens.size() >= qckpt_tokens.size()) { it->used = ++saved_tick; return; }   // already parked
+                saved_bytes -= it->ck.bytes();                                                       // a shorter prompt of the same conversation: superseded
+                it = saved_q.erase(it);
+            } else ++it;
+        }
+        SavedQ c;
+        if (!qm->save_host(qckpt, c.ck)) return;
+        const size_t need = c.ck.bytes();
+        if (need > cache_budget()) return;
+        while (saved_bytes + need > cache_budget() && !saved_q.empty()) {
+            auto lru = std::min_element(saved_q.begin(), saved_q.end(), [](const SavedQ& a, const SavedQ& b) { return a.used < b.used; });
+            saved_bytes -= lru->ck.bytes();
+            saved_q.erase(lru);
+        }
+        c.tokens = qckpt_tokens;
+        c.used = ++saved_tick;
+        saved_bytes += need;
+        saved_q.push_back(std::move(c));
+    }
+    // Qwen: the parked checkpoint whose prompt is a prefix of `ids` and saves the most prefill, if it beats `live_reuse` by kCacheMinGain tokens.
+    int find_saved_q(const std::vector<int32_t>& ids, size_t live_reuse) const {
+        int best = -1;
+        size_t best_n = 0;
+        for (size_t i = 0; i < saved_q.size(); ++i) {
+            const std::vector<int32_t>& t = saved_q[i].tokens;
+            if (t.size() <= ids.size() && t.size() - 1 > best_n && std::equal(t.begin(), t.end(), ids.begin())) { best_n = t.size() - 1; best = static_cast<int>(i); }
+        }
+        return best >= 0 && best_n > live_reuse + kCacheMinGain ? best : -1;
     }
     void invalidate() {   // after a failed request: nothing held is trusted
         try { reset_state(); } catch (...) {}
@@ -501,6 +609,37 @@ struct Engine::Impl {
             }
             reuse = l > 0 ? l - 1 : 0;              // re-feed one token: the drafter and the next-token logits need it
         }
+        bool host_restored = false;   // Qwen: the state came from a parked conversation, not from the checkpoint on the GPU
+        if (allow_cache && qwen && !has_img && !kv_images && cache_budget() > 0) {
+            if (reuse == 0) save_qckpt_to_cache();   // this request does not continue the checkpoint the GPU holds: park it before it is replaced
+            const int bi = find_saved_q(ids, reuse);
+            if (bi >= 0) {
+                if (qm->restore_host(saved_q[static_cast<size_t>(bi)].ck)) {
+                    saved_q[static_cast<size_t>(bi)].used = ++saved_tick;
+                    reuse = saved_q[static_cast<size_t>(bi)].ck.pos;
+                    host_restored = true;
+                    flash_valid = 0;
+                } else {
+                    reuse = 0;
+                }
+            }
+        }
+        if (allow_cache && !qwen && !has_img && !kv_images && cache_budget() > 0) {
+            // The request moves away from most of what the GPU holds (another conversation, or an earlier point of this one): park the held conversation
+            // first (it is about to be overwritten), then bring back the parked conversation that shares the longest prefix with this prompt, if any.
+            if (kv_tokens.size() >= kCacheMinTokens && reuse + 64 < kv_tokens.size()) save_live_to_cache();
+            size_t bl = 0;
+            const int bi = find_saved(ids, reuse, bl);
+            if (bi >= 0) {
+                if (gm->kv_load(saved_convs[static_cast<size_t>(bi)].kv, bl - 1)) {
+                    saved_convs[static_cast<size_t>(bi)].used = ++saved_tick;
+                    reuse = bl - 1;
+                    flash_valid = 0;   // the drafter followed another conversation
+                } else {
+                    reuse = 0;         // the copy failed part way: nothing held is trusted (reset below)
+                }
+            }
+        }
         // speculative decoding (prompt lookup + the Flash drafter), for greedy and sampled requests alike; "flash": false turns it off
         if (reuse == 0) { flash_paused = false; spec_paused = false; }   // a new conversation: speculation gets a fresh chance
         const bool spec_on = opt.spec && sp.flash != 0 && !(spec_paused && sp.flash != 1);
@@ -521,7 +660,7 @@ struct Engine::Impl {
             // the checkpoint holds only the recurrent states: once the K/V it relied on is overwritten it must never be restored
             if (qwen) { qckpt.valid = false; qckpt_tokens.clear(); }
         }
-        else if (qwen) { qm->restore_device(qckpt); qm->clear_images(); }
+        else if (qwen) { if (!host_restored) qm->restore_device(qckpt); qm->clear_images(); }
         else { gm->rewind(reuse); gm->clear_soft_tokens(); }
         kv_tokens.assign(ids.begin(), ids.begin() + static_cast<long>(reuse));
         if (use_flash) flash->rewind(reuse);

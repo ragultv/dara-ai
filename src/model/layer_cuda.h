@@ -169,6 +169,14 @@ void kv_rewound(KvFormat fmt, const KvBuffers& b, int kv_width, size_t old_held,
 // Appends the device ranges of these K/V buffers that hold positions >= from (nothing needed while rom positions are held): borrowed as scratch
 // (DeviceArena) while an image is encoded. capacity = the buffers' position capacity.
 void kv_tail_regions(const KvBuffers& b, KvFormat fmt, size_t capacity, size_t from, std::vector<DeviceArena::Region>& out);
+// Host copies of the K/V of positions [0, n) of one attention layer, to park a conversation in system RAM and bring it back later (the prompt cache for
+// conversations that are not the one on the GPU). F32 and Q8 caches only: kv_used_bytes returns 0 for any other format (the caller then does not cache).
+// Bytes: F32: Kc, Vc;  Q8: Kq, Kn, Vq, Vn -- each array's first n positions, contiguous (every array is position-major, so a prefix is one memcpy).
+// kv_import takes the first n positions of a blob that holds blob_n (n <= blob_n); the arrays' offsets inside the blob depend on blob_n.
+// kv_width = kv_heads * head_dim of the layer. Plain cudaMemcpy: no architecture-specific code, no extra VRAM.
+size_t kv_used_bytes(KvFormat fmt, size_t kv_width, size_t n);
+bool kv_export(const KvBuffers& b, KvFormat fmt, size_t kv_width, size_t n, uint8_t* host);
+bool kv_import(const KvBuffers& b, KvFormat fmt, size_t kv_width, size_t blob_n, size_t n, const uint8_t* host);
 struct GpuLayerCheckpoint {
     std::vector<float> conv, S;  // DeltaNet state copy (empty for attention layers)
     size_t length = 0;           // tokens processed (attention: the KV length to truncate back to)

@@ -367,6 +367,50 @@ void kv_tail_regions(const KvBuffers& b, KvFormat fmt, size_t cap, size_t from, 
     add(b.Vn->p, b.Vn->n * sizeof(float), cap);
 }
 
+size_t kv_used_bytes(KvFormat fmt, size_t w, size_t n) {
+    switch (fmt) {
+        case KvFormat::F32: return 2 * n * w * sizeof(float);
+        case KvFormat::Q8: return 2 * (n * w + n * (w / 32) * sizeof(float));
+        default: return 0;
+    }
+}
+
+namespace {
+// The arrays of a layer's cache in blob order, with the bytes each position takes in each of them.
+struct KvSeg { void* dev; size_t per_pos; };
+int kv_segments(const KvBuffers& b, KvFormat fmt, size_t w, KvSeg (&s)[4]) {
+    if (fmt == KvFormat::F32) { s[0] = {b.Kc->p, w * 4}; s[1] = {b.Vc->p, w * 4}; return 2; }
+    if (fmt == KvFormat::Q8) { s[0] = {b.Kq->p, w}; s[1] = {b.Kn->p, w / 32 * 4}; s[2] = {b.Vq->p, w}; s[3] = {b.Vn->p, w / 32 * 4}; return 4; }
+    return 0;
+}
+}  // namespace
+
+bool kv_export(const KvBuffers& b, KvFormat fmt, size_t w, size_t n, uint8_t* host) {
+    KvSeg s[4];
+    const int k = kv_segments(b, fmt, w, s);
+    if (k == 0) return false;
+    size_t off = 0;
+    for (int i = 0; i < k; ++i) {
+        const size_t bytes = n * s[i].per_pos;
+        if (bytes && (!s[i].dev || cudaMemcpy(host + off, s[i].dev, bytes, cudaMemcpyDeviceToHost) != cudaSuccess)) return false;
+        off += bytes;
+    }
+    return true;
+}
+
+bool kv_import(const KvBuffers& b, KvFormat fmt, size_t w, size_t blob_n, size_t n, const uint8_t* host) {
+    KvSeg s[4];
+    const int k = kv_segments(b, fmt, w, s);
+    if (k == 0 || n > blob_n) return false;
+    size_t off = 0;
+    for (int i = 0; i < k; ++i) {
+        const size_t bytes = n * s[i].per_pos;
+        if (bytes && (!s[i].dev || cudaMemcpy(s[i].dev, host + off, bytes, cudaMemcpyHostToDevice) != cudaSuccess)) return false;
+        off += blob_n * s[i].per_pos;   // the next array starts after the blob's full copy of this one
+    }
+    return true;
+}
+
 void kv_rewound(KvFormat fmt, const KvBuffers& b, int kv_width, size_t old_held, size_t new_held, void* stream) {
     if (fmt != KvFormat::Q4 || new_held >= old_held) return;
     if (kv_width <= 0) kv_width = static_cast<int>(b.Krs->n * 32 / kKiviRing);   // from the ring's size
