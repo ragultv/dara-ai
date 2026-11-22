@@ -79,7 +79,7 @@ Flash (Dara's speculative decoding) needs one trained drafter file per model. Ev
 | File | Size | For |
 |---|---|---|
 | `C:\dara\bin\flash\drafter_4b_v2.dflash` | 83 MB | Core 4B |
-| `C:\dara\bin\flash\drafter_nano_v2.dflash` | 35 MB | Nano |
+| `C:\dara\bin\flash\drafter_nano_v3.dflash` | 35 MB | Nano |
 
 ## 5. Get llama.cpp (for the comparison)
 
@@ -126,7 +126,7 @@ The drafter is model-specific, so run each model on its own:
 
 ```powershell
 python -I bench\task_bench.py --models 4b   --out build\bench\tasks_flash_4b   --dara-args "--flash bin\flash\drafter_4b_v2.dflash --spec 4 --flash-min-p 0.6"
-python -I bench\task_bench.py --models nano --out build\bench\tasks_flash_nano --dara-args "--flash bin\flash\drafter_nano_v2.dflash --spec 4 --flash-min-p 0.6"
+python -I bench\task_bench.py --models nano --out build\bench\tasks_flash_nano --dara-args "--flash bin\flash\drafter_nano_v3.dflash --spec 4 --flash-min-p 0.6"
 ```
 
 ### 7.3 The 9B (optional)

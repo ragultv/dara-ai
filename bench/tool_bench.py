@@ -9,7 +9,7 @@ Cases without a tool (a plain question) must NOT produce a block; the follow-up 
 answer that uses the result and makes no new call. Speed: decode tokens/s and time to first token (the tool prompt is ~700 tokens), median of --reps.
 
 Usage: python -I bench/tool_bench.py --models nano 4b [--reps 3]
-           [--drafters nano:v2=build/flash/drafter_nano_v2.dflash nano:v3=build/flash/drafter_nano_v3.dflash 4b:v2=build/flash/drafter_4b_v2.dflash]
+           [--drafters nano:v3=build/flash/drafter_nano_v3.dflash 4b:v2=build/flash/drafter_4b_v2.dflash]
 """
 import argparse, json, math, os, re, statistics, sys, time
 
@@ -162,7 +162,7 @@ def main():
     ap.add_argument("--models", nargs="+", default=["nano", "4b"])
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--max-new", type=int, default=200)
-    ap.add_argument("--drafters", nargs="*", default=["nano:v2=build/flash/drafter_nano_v2.dflash", "nano:v3=build/flash/drafter_nano_v3.dflash", "4b:v2=build/flash/drafter_4b_v2.dflash"])
+    ap.add_argument("--drafters", nargs="*", default=["nano:v3=build/flash/drafter_nano_v3.dflash", "4b:v2=build/flash/drafter_4b_v2.dflash"])
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "bench", "tool"))
     benchenv.add_args(ap)
     a = ap.parse_args()

@@ -27,7 +27,7 @@ std::string hf(const char* repo, const char* rev, const char* file) {
 // Flash drafters: release assets of the Dara repository (override the base with DARA_FLASH_BASE_URL, e.g. a Hugging Face resolve URL).
 std::string flash_url(const char* file) {
     const char* base = std::getenv("DARA_FLASH_BASE_URL");
-    std::string b = base && *base ? base : "https://github.com/ragultv/dara-ai/releases/download/flash-drafters-v2";
+    std::string b = base && *base ? base : "https://github.com/ragultv/dara-ai/releases/download/flash-drafters-v3";
     if (!b.empty() && b.back() != '/') b += '/';
     return b + file;
 }
@@ -42,7 +42,7 @@ std::vector<CatalogEntry> build() {
         const char* repo = "unsloth/gemma-4-E2B-it-GGUF"; const char* rev = "0314792d7f1f7e229411f620751375812bb9faf2";
         e.files.push_back({"model", "gemma-4-E2B-it-Q4_K_M.gguf", hf(repo, rev, "gemma-4-E2B-it-Q4_K_M.gguf"), 3106738272ull, "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8"});
         e.files.push_back({"mmproj", "mmproj-F16.gguf", hf(repo, rev, "mmproj-F16.gguf"), 985654080ull, "140be8d7849741f88c50757d529b84373ee8e27052cc2236855b537f4a8215fa"});
-        e.files.push_back({"flash", "drafter_nano_v2.dflash", flash_url("drafter_nano_v2.dflash"), 36911148ull, "1829be4837aa564f02074c3282fe30fd87ac7f8fd9f73f1a2db8a720e52c6844"});
+        e.files.push_back({"flash", "drafter_nano_v3.dflash", flash_url("drafter_nano_v3.dflash"), 36911148ull, "5423c6ec09d0ec063eea32a4d6cf42d44b7027211614b876990d0b72b9b124ef"});
         v.push_back(e);
     }
     {
