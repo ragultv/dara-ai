@@ -9,7 +9,7 @@ and reports, per task: decode tokens/s, time to first token (prompt processing),
 cold prefill tokens/s on a ~950-token prompt; and the canary (does each Dara mode write the same text as Dara plain?).
 
 Usage: python -I bench/husky_bench.py --models nano 4b [--reps 3] [--max-new 256] [--allow-battery]
-           [--drafters nano:v2=build/flash/drafter_nano_v2.dflash nano:v3=build/flash/drafter_nano_v3.dflash 4b:v2=build/flash/drafter_4b_v2.dflash]
+           [--drafters nano:v3=build/flash/drafter_nano_v3.dflash 4b:v2=build/flash/drafter_4b_v2.dflash]
 """
 import argparse, json, math, os, statistics, sys, time
 
@@ -19,7 +19,7 @@ import task_bench as tb  # noqa: E402
 
 ROOT = benchenv.ROOT
 FLASH_ARGS = ["--spec", "4", "--flash-min-p", "0.6"]
-DEFAULT_DRAFTERS = ["nano:v2=build/flash/drafter_nano_v2.dflash", "nano:v3=build/flash/drafter_nano_v3.dflash", "4b:v2=build/flash/drafter_4b_v2.dflash"]
+DEFAULT_DRAFTERS = ["nano:v3=build/flash/drafter_nano_v3.dflash", "4b:v2=build/flash/drafter_4b_v2.dflash"]
 
 
 def med(xs):

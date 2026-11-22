@@ -1132,7 +1132,7 @@ Residency make_residency(const EngineOptions& o, const dara::io::GgufCheckpoint&
     if (o.flash == "auto") {
         flash_path.clear();
         std::string want;
-        if (!qwen) want = "drafter_nano_v2.dflash";
+        if (!qwen) want = "drafter_nano_v3.dflash";   // Nano: v3 (69% held-out next-token accuracy; v2 is no longer used)
         else if (qcfg && qcfg->hidden == 2560) want = "drafter_4b_v2.dflash";   // Core 4B (no drafter is shipped for Pro 9B)
         if (!want.empty()) {
             const std::string dirs[] = {exe_dir() + "/flash", exe_dir(), "build/flash", u8s(std::filesystem::u8path(o.gguf).parent_path())};
