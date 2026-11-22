@@ -197,6 +197,165 @@ partial_kernel(const float* __restrict__ q, const void* __restrict__ Kv, const f
     }
 }
 
+// Stage 1 for decode with grouped-query attention (G query heads share one K/V head: Nano 8:1, Qwen 4:1): grid (splits, kv_heads, tokens). partial_kernel runs one
+// block per QUERY head, so the G blocks of a group each stream the same K/V rows: at a 64K context Nano read ~8x the cache it holds and decode fell from 74 to 19
+// tok/s. Here one block scores and sums all G heads of a group, reading every K/V row ONCE. Every per-head operation and its order are exactly partial_kernel's
+// (same warp-per-position scores and shuffle trees, same softmax reductions, same sequential V sum), so the partials -- and the output -- are bitwise identical.
+// F32 and Q8 caches only (the default formats); G in {2, 4, 8}; HD (= hd) 256 or 512.
+// Memory-level parallelism matters here (decode is bandwidth-bound and a block has only 4 warps): a warp scores TWO positions per step with every load of both
+// rows issued before any arithmetic, and the V sum gives each thread HD / 128 contiguous elements so a whole V row is one coalesced load per step. Which thread
+// computes which element does not change any element's arithmetic (each element's sum over positions stays sequential), so the result is unchanged.
+template <AttnFmt FMT, int G, int HD>
+__global__ void __launch_bounds__(kThreads)
+partial_gqa_kernel(const float* __restrict__ q, const void* __restrict__ Kv, const float* __restrict__ Kn, const void* __restrict__ Vv, const float* __restrict__ Vn,
+                   const int64_t* __restrict__ pos, int heads, int kv_heads, int hd, int window, float scale, int splits, float* __restrict__ part) {
+    extern __shared__ float sq[];             // G * hd floats: the group's queries
+    __shared__ float sc[G][kSplitChunk];      // scores of this chunk, per head
+    __shared__ float red[8];
+    const int split = blockIdx.x, kvh = blockIdx.y, t = blockIdx.z;
+    const int p = static_cast<int>(pos[t]);
+    const int start = window > 0 ? max(0, p - window + 1) : 0;
+    const int lo = start + split * kSplitChunk;
+    if (lo > p) return;                       // beyond the current context (the grid is sized for the maximum)
+    const int hi = min(lo + kSplitChunk, p + 1), cnt = hi - lo;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    for (int g = 0; g < G; ++g) {
+        const size_t qbase = (static_cast<size_t>(t) * heads + static_cast<size_t>(kvh) * G + g) * hd;
+        for (int i = threadIdx.x; i < hd; i += blockDim.x) sq[g * hd + i] = q[qbase + i];
+    }
+    __syncthreads();
+
+    // scores: a warp takes positions j and j + 4 together (the K rows read once for all G heads)
+    constexpr int KI = HD / 128;   // 128-element steps per row: each lane owns elements 4 * lane + 128 * k .. +3
+    for (int j0 = warp; j0 < cnt; j0 += 2 * (kThreads / 32)) {
+        const int jb = j0 + kThreads / 32;
+        const bool hb = jb < cnt;
+        const size_t rowA = static_cast<size_t>(lo + j0) * kv_heads + kvh;
+        const size_t rowB = static_cast<size_t>(lo + (hb ? jb : j0)) * kv_heads + kvh;
+        float acc[2][G];
+#pragma unroll
+        for (int r = 0; r < 2; ++r)
+#pragma unroll
+            for (int g = 0; g < G; ++g) acc[r][g] = 0.0f;
+        if (FMT == AttnFmt::F32) {
+            float4 kk[2][KI];
+#pragma unroll
+            for (int k = 0; k < KI; ++k) {
+                kk[0][k] = *reinterpret_cast<const float4*>(static_cast<const float*>(Kv) + rowA * HD + lane * 4 + 128 * k);
+                kk[1][k] = *reinterpret_cast<const float4*>(static_cast<const float*>(Kv) + rowB * HD + lane * 4 + 128 * k);
+            }
+#pragma unroll
+            for (int k = 0; k < KI; ++k)
+#pragma unroll
+                for (int r = 0; r < 2; ++r)
+#pragma unroll
+                    for (int g = 0; g < G; ++g) {
+                        const float4 qq = *reinterpret_cast<const float4*>(sq + g * HD + lane * 4 + 128 * k);
+                        acc[r][g] = fmaf(qq.x, kk[r][k].x, acc[r][g]); acc[r][g] = fmaf(qq.y, kk[r][k].y, acc[r][g]);
+                        acc[r][g] = fmaf(qq.z, kk[r][k].z, acc[r][g]); acc[r][g] = fmaf(qq.w, kk[r][k].w, acc[r][g]);
+                    }
+        } else {
+            char4 kk[2][KI];
+            float ksc[2][KI];
+#pragma unroll
+            for (int k = 0; k < KI; ++k) {
+                kk[0][k] = *reinterpret_cast<const char4*>(static_cast<const int8_t*>(Kv) + rowA * HD + lane * 4 + 128 * k);
+                kk[1][k] = *reinterpret_cast<const char4*>(static_cast<const int8_t*>(Kv) + rowB * HD + lane * 4 + 128 * k);
+                ksc[0][k] = Kn[rowA * (HD / 32) + ((lane * 4 + 128 * k) >> 5)];
+                ksc[1][k] = Kn[rowB * (HD / 32) + ((lane * 4 + 128 * k) >> 5)];
+            }
+#pragma unroll
+            for (int k = 0; k < KI; ++k)
+#pragma unroll
+                for (int r = 0; r < 2; ++r)
+#pragma unroll
+                    for (int g = 0; g < G; ++g) {
+                        const float4 qq = *reinterpret_cast<const float4*>(sq + g * HD + lane * 4 + 128 * k);
+                        float d = qq.x * static_cast<float>(kk[r][k].x);
+                        d = fmaf(qq.y, static_cast<float>(kk[r][k].y), d); d = fmaf(qq.z, static_cast<float>(kk[r][k].z), d); d = fmaf(qq.w, static_cast<float>(kk[r][k].w), d);
+                        acc[r][g] = fmaf(ksc[r][k], d, acc[r][g]);
+                    }
+        }
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            if (r == 1 && !hb) break;
+#pragma unroll
+            for (int g = 0; g < G; ++g) {
+                float a = acc[r][g];
+                for (int off = 16; off > 0; off >>= 1) a += __shfl_down_sync(0xffffffffu, a, off);
+                if (lane == 0) sc[g][r == 0 ? j0 : jb] = a * scale;
+            }
+        }
+    }
+    __syncthreads();
+
+    // local softmax statistics per head (the same reductions as partial_kernel, one head after another)
+    float mloc[G], lloc[G];
+    for (int g = 0; g < G; ++g) {
+        float m = -3.402823466e38f;
+        for (int j = threadIdx.x; j < cnt; j += blockDim.x) m = fmaxf(m, sc[g][j]);
+        for (int off = 16; off > 0; off >>= 1) m = fmaxf(m, __shfl_down_sync(0xffffffffu, m, off));
+        if (lane == 0) red[warp] = m;
+        __syncthreads();
+        const float mg = fmaxf(fmaxf(red[0], red[1]), fmaxf(red[2], red[3]));
+        __syncthreads();
+        float sum = 0.0f;
+        for (int j = threadIdx.x; j < cnt; j += blockDim.x) { const float e = expf(sc[g][j] - mg); sc[g][j] = e; sum += e; }
+        for (int off = 16; off > 0; off >>= 1) sum += __shfl_down_sync(0xffffffffu, sum, off);
+        if (lane == 0) red[warp] = sum;
+        __syncthreads();
+        mloc[g] = mg; lloc[g] = red[0] + red[1] + red[2] + red[3];
+        __syncthreads();
+    }
+
+    // local unnormalised outputs: the V row read once for all G heads
+    float* pr0 = part + ((static_cast<size_t>(t) * heads + static_cast<size_t>(kvh) * G) * splits + split) * (hd + 2);
+    const size_t head_stride = static_cast<size_t>(splits) * (hd + 2);
+    if (threadIdx.x == 0) {
+#pragma unroll
+        for (int g = 0; g < G; ++g) { pr0[g * head_stride] = mloc[g]; pr0[g * head_stride + 1] = lloc[g]; }
+    }
+    constexpr int EPT = HD / 128;   // contiguous elements per thread (HD 512: 4, 256: 2)
+    const int i0 = threadIdx.x * EPT;
+    float acc[EPT][G];
+#pragma unroll
+    for (int e = 0; e < EPT; ++e)
+#pragma unroll
+        for (int g = 0; g < G; ++g) acc[e][g] = 0.0f;
+    if (FMT == AttnFmt::F32) {
+        const float* vc = static_cast<const float*>(Vv) + static_cast<size_t>(kvh) * HD + i0;
+#pragma unroll 4
+        for (int j = 0; j < cnt; ++j) {
+            const float* vp = vc + static_cast<size_t>(lo + j) * kv_heads * HD;
+            float v[EPT];
+            if constexpr (EPT == 4) { const float4 t4 = *reinterpret_cast<const float4*>(vp); v[0] = t4.x; v[1] = t4.y; v[2] = t4.z; v[3] = t4.w; }
+            else { const float2 t2 = *reinterpret_cast<const float2*>(vp); v[0] = t2.x; v[1] = EPT > 1 ? t2.y : 0.0f; }
+#pragma unroll
+            for (int e = 0; e < EPT; ++e)
+#pragma unroll
+                for (int g = 0; g < G; ++g) acc[e][g] = fmaf(sc[g][j], v[e], acc[e][g]);
+        }
+    } else {
+        const int8_t* vc = static_cast<const int8_t*>(Vv);
+#pragma unroll 4
+        for (int j = 0; j < cnt; ++j) {
+            const size_t row = static_cast<size_t>(lo + j) * kv_heads + kvh;
+            float v[EPT];
+            if constexpr (EPT == 4) { const char4 c4 = *reinterpret_cast<const char4*>(vc + row * HD + i0); v[0] = c4.x; v[1] = c4.y; v[2] = c4.z; v[3] = c4.w; }
+            else { const char2 c2 = *reinterpret_cast<const char2*>(vc + row * HD + i0); v[0] = c2.x; v[1] = EPT > 1 ? c2.y : 0; }
+            const float vs = Vn[row * (HD / 32) + (i0 >> 5)];
+#pragma unroll
+            for (int e = 0; e < EPT; ++e)
+#pragma unroll
+                for (int g = 0; g < G; ++g) acc[e][g] = fmaf(sc[g][j] * vs, v[e], acc[e][g]);
+        }
+    }
+#pragma unroll
+    for (int g = 0; g < G; ++g)
+#pragma unroll
+        for (int e = 0; e < EPT; ++e) pr0[g * head_stride + 2 + i0 + e] = acc[e][g];
+}
+
 // Stage 1 for verification steps (2..kMultiTokens tokens at consecutive positions, full attention): grid (splits, heads). One block reads each
 // K / V entry of its chunk ONCE and applies it to every token, instead of one block per token re-reading the chunk (with many draft tokens at a long
 // context the K / V reads dominated the step). Per token, every operation and its order are those of partial_kernel, so the partials -- and the
@@ -433,6 +592,15 @@ int attn_splitkv_init() {
 
 static int splits_for(int max_positions) { return std::max(1, (max_positions + kSplitChunk - 1) / kSplitChunk); }
 
+// Grouped-query decode kernel on/off: DARA_GQA_ATTN=0 (or attn_splitkv_set_gqa(0)) selects the per-head kernels, which give bitwise identical output.
+static int g_gqa_mode = -1;   // -1: environment (default on), 0: off, 1: on
+void attn_splitkv_set_gqa(int mode) { g_gqa_mode = mode; }
+static bool gqa_enabled() {
+    if (g_gqa_mode >= 0) return g_gqa_mode == 1;
+    static const bool on = [] { const char* e = std::getenv("DARA_GQA_ATTN"); return !(e && e[0] == '0'); }();
+    return on;
+}
+
 size_t attn_splitkv_scratch_floats_per_token(AttnFmt fmt, int heads, int hd, int max_positions) {
     const size_t partials = static_cast<size_t>(heads) * splits_for(max_positions) * (hd + 2);
     return partials + (fmt == AttnFmt::TQ4 ? static_cast<size_t>(heads) * hd : 0);
@@ -485,6 +653,25 @@ int attn_splitkv_cuda(AttnFmt fmt, const float* q, const float* gate, const void
             const cudaError_t e = cudaGetLastError();
             if (e != cudaSuccess) return static_cast<int>(e);
             continue;
+        }
+        // Only full-attention layers: a sliding-window layer reads at most `window` positions (4-5 chunks), so the per-head kernels' G-times-more blocks run it faster.
+        if (gqa_enabled() && window == 0 && (fmt == AttnFmt::F32 || fmt == AttnFmt::Q8) && (hd == 256 || hd == 512)) {
+            const int G = heads / kv_heads;
+            if (G == 2 || G == 4 || G == 8) {
+                // grouped-query decode: one block per (chunk, kv head, token) serves all G query heads of the group (K/V read once; bitwise identical partials)
+                const dim3 gq(splits, kv_heads, n);
+                const size_t sg = static_cast<size_t>(G) * hd * sizeof(float);
+#define DARA_GQA_LAUNCH(F, GG, HH) partial_gqa_kernel<F, GG, HH><<<gq, kThreads, sg, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials)
+#define DARA_GQA_BY_G(F, HH) { if (G == 2) DARA_GQA_LAUNCH(F, 2, HH); else if (G == 4) DARA_GQA_LAUNCH(F, 4, HH); else DARA_GQA_LAUNCH(F, 8, HH); }
+                if (fmt == AttnFmt::F32) { if (hd == 512) DARA_GQA_BY_G(AttnFmt::F32, 512) else DARA_GQA_BY_G(AttnFmt::F32, 256) }
+                else { if (hd == 512) DARA_GQA_BY_G(AttnFmt::Q8, 512) else DARA_GQA_BY_G(AttnFmt::Q8, 256) }
+#undef DARA_GQA_BY_G
+#undef DARA_GQA_LAUNCH
+                combine_kernel<AttnFmt::F32><<<dim3(heads, n), 256, smem, s>>>(partials, gg, pg, heads, hd, window, splits, og);
+                const cudaError_t e = cudaGetLastError();
+                if (e != cudaSuccess) return static_cast<int>(e);
+                continue;
+            }
         }
         switch (fmt) {
             case AttnFmt::F32: partial_kernel<AttnFmt::F32><<<grid, kThreads, smem, s>>>(qsrc, K, Kn, V, Vn, pg, heads, kv_heads, hd, window, scale, splits, partials, aux); break;
