@@ -174,6 +174,35 @@ python -I bench\decode_quick.py --models 4b nano --out build\bench\decode_quick
 It prints, per model and prompt: llama.cpp and Dara tokens/s, the bytes read per token, and the share of the measured bandwidth each runtime
 achieves. It also saves a per-operation GPU profile of one Dara run (`*_profile.txt`). Send the whole `build\bench\decode_quick` folder.
 
+### 7.7 Long context, the prompt cache, and the check for a new GPU
+
+These need `dara.exe` and the model files only (plus `llama.cpp` for the first two). For a step-by-step guide to building `dara.exe` on another laptop and running the check below, see [RTX_LAPTOP_CHECK.md](RTX_LAPTOP_CHECK.md).
+
+```powershell
+# Husky-style matrix: 16 tasks, median of 3 runs, llama.cpp vs Dara plain vs Dara + Flash, with cold prefill (about 40 minutes per model)
+python -I bench\husky_bench.py --models nano --drafters nano:v3=bin\flash\drafter_nano_v3.dflash
+python -I bench\husky_bench.py --models 4b   --drafters 4b:v2=bin\flash\drafter_4b_v2.dflash
+# tool calls in the app's own format: correct calls, strict JSON, speed
+python -I bench\tool_bench.py --models nano --drafters nano:v3=bin\flash\drafter_nano_v3.dflash
+# first token of a continued chat, Dara server vs llama-server
+python -I bench\chat_ttft_bench.py --models nano
+# switching between long conversations: first-token time with the prompt cache on and off (answers must be identical)
+python -I bench\multi_conv_test.py --model nano
+# decode and prefill against context length through the server (0 .. 131K tokens; the long levels take hours, use --levels to pick)
+python -I bench\context_sweep.py --levels 0 4096 16384 32768
+```
+
+**Check a new GPU (about 15 minutes).** The long-context attention work (grouped-query decode attention, grouped prefill attention, int8 attention scores
+on GPUs without tensor-core attention) was measured on a GTX 1650 only. On any other GPU run
+
+```powershell
+python -I bench\prefill_ab.py --models nano 4b --sizes 1 4 16
+```
+
+It runs the same binary with the new paths off ("before") and on ("after") and ends with a `VERDICT:` line: "not slower anywhere" or the list of cases where the
+new paths were more than 3% slower. Send that output back. The paths can be turned off with `DARA_GQA_ATTN=0`, `DARA_ATTN_GROUP_PREFILL=0` and
+`DARA_ATTN_QK_INT8=0`; the parked-conversation cache with `DARA_PROMPT_CACHE_MB=0`.
+
 ## 8. What to send back
 
 Zip the `build\bench` folder and send it. The important files are:
