@@ -1,9 +1,15 @@
 @echo off
-rem Builds the grouped-query decode attention test (bitwise A/B against the per-head kernels + speed). DARA_ARCH=all for every consumer architecture.
+rem Builds the grouped-query decode attention test (bitwise A/B against the per-head kernels + speed) -> build\cuda\attn_gqa_test.exe
+rem   DARA_CUDA  CUDA toolkit folder (default D:\tools\cuda\13.1.1; tools\install_cuda_redist.py installs one without admin rights)
+rem   DARA_ARCH  75 = GTX 16xx / RTX 20xx, 86 = RTX 30xx, 89 = RTX 40xx, 120 = RTX 50xx (default 75 here; "all" builds every consumer architecture)
 setlocal
-set CUDA=D:\tools\cuda\13.1.1
-set "PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%"
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
+if not defined DARA_CUDA set DARA_CUDA=D:\tools\cuda\13.1.1
+set "CUDA=%DARA_CUDA%"
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+set VSDIR=
+for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
+if not defined VSDIR (echo Visual Studio with the C++ x64 tools was not found & exit /b 1)
+call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 1
 cd /d %~dp0..
 if not exist build\cuda mkdir build\cuda
