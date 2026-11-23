@@ -8,6 +8,7 @@ import { Skeleton } from "../lib/ui/Skeleton.tsx";
 import { EmptyState } from "../lib/ui/EmptyState.tsx";
 import { ErrorState } from "../lib/ui/ErrorState.tsx";
 import { toast } from "../lib/ui/Toast.tsx";
+import { StartupCheck } from "../lib/features/models/StartupCheck.tsx";
 import { ModelCard } from "../lib/features/models/ModelCard.tsx";
 import { installedFiles, installedSizeMb } from "../lib/features/models/modelHelpers.ts";
 import { formatGb, formatMb } from "../lib/utils/format.ts";
@@ -81,6 +82,9 @@ export const ModelsPage: React.FC = () => {
           </div>
         )}
       </header>
+
+      {/* says plainly when the engine did not start or the graphics card cannot run models; nothing when all is well */}
+      <StartupCheck />
 
       {notice && (
         <div
