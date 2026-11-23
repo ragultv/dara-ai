@@ -131,7 +131,9 @@ jobs:
         run: |
           $tag = "${{ steps.pkg.outputs.tag }}"
           $name = "${{ steps.pkg.outputs.name }}"
-          $notes = "Automated build of $env:GITHUB_SHA.`n`nDownload **$name.zip** (dara.exe + Flash drafters for Core 4B and Nano), unzip, and follow BENCHMARKING.md inside it. Requires an NVIDIA GPU (GTX 16xx / RTX 20xx or newer) and an NVIDIA driver with CUDA 13 support (R580+)."
+          # The notes people read come from .github/release-notes.md (edit it before each release); the build details are appended.
+          $intro = if (Test-Path .github/release-notes.md) { (Get-Content .github/release-notes.md -Raw).TrimEnd() } else { "" }
+          $notes = "$intro`n`n---`n`n**Files.** ``Dara_*_x64-setup.exe`` is the Windows installer (the app, the engine and the Flash drafters). **$name.zip** is the engine alone (dara.exe + Flash drafters for Core 4B and Nano) for the command line: unzip it and follow BENCHMARKING.md inside. Each file has a ``.sha256`` next to it.`n`nBuilt from commit $env:GITHUB_SHA."
           gh release create $tag "release/$name.zip" "release/$name.zip.sha256" --target $env:GITHUB_SHA --title "Dara $tag" --notes $notes
 
   # The desktop app's installer. Needs the engine from the job above; the app itself is built here (Node + Rust).
