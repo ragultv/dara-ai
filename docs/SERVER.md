@@ -17,7 +17,7 @@ dara serve --model dara-core-4b
 | `dara-pro-9b` | Qwen3.5 9B, Q4_K_M | 5.3 GB / 0.9 GB / - | no drafter yet |
 
 Model and mmproj files come from pinned Hugging Face revisions (unsloth GGUF repositories); drafters from the Dara release
-`flash-drafters-v2` (set `DARA_FLASH_BASE_URL` to download them from elsewhere). Short names work everywhere: `nano`, `4b`, `9b`.
+`flash-drafters-v3` (set `DARA_FLASH_BASE_URL` to download them from elsewhere). Short names work everywhere: `nano`, `4b`, `9b`.
 
 Models live in `%LOCALAPPDATA%\Dara\models\<id>\` (`--models-dir DIR` or `DARA_MODELS` to change). The older layout
 (`models\qwen3.5-4b-gguf\...`, from `bench\get_models.py`) is recognised too.

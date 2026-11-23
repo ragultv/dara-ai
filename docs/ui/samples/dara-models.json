@@ -38,9 +38,9 @@
           {
             "installed": true,
             "kind": "flash",
-            "name": "drafter_nano_v2.dflash",
+            "name": "drafter_nano_v3.dflash",
             "size_mb": 35.2,
-            "url": "https://github.com/ragultv/dara-ai/releases/download/flash-drafters-v2/drafter_nano_v2.dflash"
+            "url": "https://github.com/ragultv/dara-ai/releases/download/flash-drafters-v3/drafter_nano_v3.dflash"
           }
         ],
         "fits_gpu": "full",

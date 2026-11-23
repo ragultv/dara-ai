@@ -146,6 +146,23 @@ public:
     };
     void save_device(DeviceCheckpoint& c);
     void restore_device(const DeviceCheckpoint& c);
+    // A conversation parked in system RAM (prompt cache for conversations other than the one on the GPU): the recurrent states of a DeviceCheckpoint taken
+    // at c.pos plus the K/V of the attention layers' positions [0, c.pos), which must still be in place when this is called. Restoring puts the model at
+    // exactly c.pos with those bytes (the same state restore_device gives). F32 and Q8 caches on a model with every layer VRAM-resident only: otherwise
+    // save_host returns false and the caller does not cache.
+    struct HostCheckpoint {
+        size_t pos = 0;
+        std::vector<size_t> layer_pos;
+        std::vector<std::vector<float>> conv, S;   // per layer (empty for attention layers)
+        std::vector<uint8_t> kv;                   // K/V of the attention layers' first `pos` positions, layer after layer
+        size_t bytes() const {
+            size_t b = kv.size();
+            for (size_t i = 0; i < conv.size(); ++i) b += (conv[i].size() + S[i].size()) * sizeof(float);
+            return b;
+        }
+    };
+    bool save_host(const DeviceCheckpoint& c, HostCheckpoint& out);
+    bool restore_host(const HostCheckpoint& h);
     void reset();   // back to an empty sequence (position 0, zero recurrent states, no images)
     // Device ranges of the K/V caches holding positions >= from (unused while `from` positions are held): scratch to borrow (DeviceArena).
     void kv_tail_regions(size_t from, std::vector<DeviceArena::Region>& out) {

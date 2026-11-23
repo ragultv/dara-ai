@@ -18,7 +18,6 @@ import { ModelsPage } from "./routes/ModelsPage.tsx";
 import { MonitorPage } from "./routes/MonitorPage.tsx";
 import { OptionsPage } from "./routes/OptionsPage.tsx";
 import { SettingsPage } from "./routes/SettingsPage.tsx";
-import { Onboarding } from "./routes/Onboarding.tsx";
 import { KitPage } from "./routes/KitPage.tsx";
 import { ArtifactsPage } from "./routes/ArtifactsPage.tsx";
 import { ArtifactEditorPage } from "./routes/ArtifactEditorPage.tsx";
@@ -34,11 +33,6 @@ export const App: React.FC = () => {
   const fetchModels = useModelsStore((s) => s.fetchModels);
   const initSettings = useSettingsStore((s) => s.init);
   const loadConversations = useChatStore((s) => s.loadConversations);
-
-  const models = useModelsStore((s) => s.models);
-  const hasInstalledModels = models.some((m) => m.dara.status === "installed");
-  // first-run setup (download, image support, Flash, load) keeps the onboarding screen up until it finishes
-  const setupModelId = useModelsStore((s) => s.setupModelId);
 
   useEffect(() => {
     initTheme();
@@ -57,17 +51,6 @@ export const App: React.FC = () => {
   );
 
   const renderRoute = () => {
-    // If no models are installed and not on kit or settings, show onboarding
-    if (
-      (models.length > 0 &&
-        !hasInstalledModels &&
-        currentRoute !== "settings" &&
-        currentRoute !== "kit") ||
-      setupModelId !== null
-    ) {
-      return <Onboarding />;
-    }
-
     switch (currentRoute) {
       case "models":
         return scrollable(<ModelsPage />);

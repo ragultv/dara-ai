@@ -9,6 +9,7 @@
 // scratch stays bounded at long contexts. Results differ from the split-KV path only by summation order.
 #include "model/attn_prefill.h"
 #include "model/layer_cuda.h"
+#include "kernels/quant.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -193,6 +194,170 @@ attn_gemm_kernel(const void* __restrict__ W, const float* __restrict__ Sc, size_
     }
 }
 
+// ---- int8 query x int8 key scores (dp4a) ---------------------------------------------------------------------------------------------------------
+// The Q8 cache already holds the keys as int8 codes with one scale per 32 values. Quantising the queries the same way (what the weight GEMMs do to their
+// activations) turns the scores GEMM -- half of attention's FLOPs -- into dp4a (4 multiply-adds per instruction) with one float combine per 32 values:
+//     S[r][j] = sum_g dq[r][g] * dk[j][g] * sum_{d in g} q8[r][d] * k8[j][d]
+// LOSSY (8-bit queries) but within the quality gate (bench/quality_gate.py, variant int8_q8kv_qk8: Nano and Core 4B, English / code / JSON / 1500 / 8K tokens, top-1
+// 126-128 of 128 and KL no worse than the int8 default). On by default, and only where the tensor-core attention is not used (attn_use_mma() false: GTX 16xx and
+// RTX 20xx, whose attention was FP32 GEMMs); DARA_ATTN_QK_INT8=0 turns it off. GPUs of compute capability 8.0+ keep their tensor-core path whatever the setting. Same tile shape as the weight GEMM (128 keys x 64 query rows, 8 x 4 per thread),
+// the d dimension advanced 64 values (two scale groups) per step with the next step's loads in flight.
+int g_qk8_mode = -1;   // -1: environment (default on), 0: off, 1: on (tests)
+bool attn_qk_int8() {
+    if (g_qk8_mode >= 0) return g_qk8_mode == 1 && !attn_use_mma();
+    static const bool on = [] {
+        const char* e = std::getenv("DARA_ATTN_QK_INT8");
+        return !(e && e[0] == '0');
+    }();
+    return on && !attn_use_mma();
+}
+
+void* qk_scratch(size_t bytes) {   // quantised queries: a few hundred KB, grown when needed (prefill is never inside a CUDA-graph capture)
+    static void* p = nullptr;
+    static size_t cap = 0;
+    if (bytes > cap) {
+        if (p) cudaFree(p);
+        p = nullptr;
+        cap = 0;
+        if (cudaMalloc(&p, bytes) != cudaSuccess) { cudaGetLastError(); return nullptr; }
+        cap = bytes;
+    }
+    return p;
+}
+
+constexpr int QWSI = BM + 4, QXSI = BN + 4;   // padded int rows (16-byte aligned vector loads)
+
+__global__ void __launch_bounds__(kThreads, 2)
+attn_qk_i8_kernel(const int8_t* __restrict__ K, const float* __restrict__ Ksc, size_t ldk, const int8_t* __restrict__ Qq, const float* __restrict__ Qd,
+                  int hd, float* __restrict__ S, size_t ldS, int P, int R, int rpt, int qoff) {
+    // causal bound as in attn_gemm_kernel: a tile of keys entirely above its last query is masked by the softmax, so it is never computed
+    const int last_key = qoff + min(R - 1, static_cast<int>(blockIdx.y) * BN + BN - 1) / rpt;
+    if (static_cast<int>(blockIdx.x) * BM > last_key) return;
+    __shared__ __align__(16) int Ws[16][QWSI];   // keys of the 64-value step: [d/4][key], d 0..31 = scale group 2s, 32..63 = 2s+1
+    __shared__ __align__(16) int Xs[16][QXSI];   // queries:                    [d/4][row]
+    __shared__ float Wd[2][BM], Xd[2][BN];
+    const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+    const int row0 = blockIdx.x * BM, tok0 = blockIdx.y * BN;
+    const int lrow = tid >> 1, half = tid & 1;        // key loading: key row and which scale group of the step
+    const bool wv = row0 + lrow < P;
+    const size_t krow_i = wv ? static_cast<size_t>(row0 + lrow) : 0;
+    const int8_t* krow = K + krow_i * ldk;
+    const float* ksr = Ksc + krow_i * (ldk / 32);
+    const int ltok = tid >> 2, part = tid & 3;        // query loading: row and which 16 of the step's 64 values
+    const bool xv = tok0 + ltok < R;
+    const size_t ql = xv ? static_cast<size_t>(tok0 + ltok) : 0;
+    const int8_t* qrow = Qq + ql * hd;
+    const float* qdr = Qd + ql * (hd / 32);
+
+    float acc[TM][TN];
+#pragma unroll
+    for (int i = 0; i < TM; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
+
+    const int steps = hd / 64;
+    uint4 w0, w1, xa;
+    float wdv, xdv;
+    auto load = [&](int st) {
+        w0 = *reinterpret_cast<const uint4*>(krow + 64 * st + 32 * half);
+        w1 = *reinterpret_cast<const uint4*>(krow + 64 * st + 32 * half + 16);
+        wdv = wv ? ksr[2 * st + half] : 0.0f;
+        xa = xv ? *reinterpret_cast<const uint4*>(qrow + 64 * st + 16 * part) : make_uint4(0, 0, 0, 0);
+        xdv = (part < 2 && xv) ? qdr[2 * st + part] : 0.0f;
+    };
+    load(0);
+    for (int st = 0; st < steps; ++st) {
+        Ws[8 * half + 0][lrow] = static_cast<int>(w0.x); Ws[8 * half + 1][lrow] = static_cast<int>(w0.y);
+        Ws[8 * half + 2][lrow] = static_cast<int>(w0.z); Ws[8 * half + 3][lrow] = static_cast<int>(w0.w);
+        Ws[8 * half + 4][lrow] = static_cast<int>(w1.x); Ws[8 * half + 5][lrow] = static_cast<int>(w1.y);
+        Ws[8 * half + 6][lrow] = static_cast<int>(w1.z); Ws[8 * half + 7][lrow] = static_cast<int>(w1.w);
+        Wd[half][lrow] = wdv;
+        Xs[4 * part + 0][ltok] = static_cast<int>(xa.x); Xs[4 * part + 1][ltok] = static_cast<int>(xa.y);
+        Xs[4 * part + 2][ltok] = static_cast<int>(xa.z); Xs[4 * part + 3][ltok] = static_cast<int>(xa.w);
+        if (part < 2) Xd[part][ltok] = xdv;
+        __syncthreads();
+        if (st + 1 < steps) load(st + 1);
+#pragma unroll
+        for (int sb = 0; sb < 2; ++sb) {
+            int isum[TM][TN];
+#pragma unroll
+            for (int i = 0; i < TM; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j) isum[i][j] = 0;
+#pragma unroll
+            for (int kk = 0; kk < 8; ++kk) {
+                const int4 a0 = *reinterpret_cast<const int4*>(&Ws[8 * sb + kk][ty * 8]);
+                const int4 a1 = *reinterpret_cast<const int4*>(&Ws[8 * sb + kk][ty * 8 + 4]);
+                const int4 bv = *reinterpret_cast<const int4*>(&Xs[8 * sb + kk][tx * 4]);
+                const int a[8] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
+                const int bb[4] = {bv.x, bv.y, bv.z, bv.w};
+#pragma unroll
+                for (int i = 0; i < TM; ++i)
+#pragma unroll
+                    for (int j = 0; j < TN; ++j) isum[i][j] = __dp4a(a[i], bb[j], isum[i][j]);
+            }
+            float wd[TM], xd[TN];
+#pragma unroll
+            for (int i = 0; i < TM; ++i) wd[i] = Wd[sb][ty * 8 + i];
+#pragma unroll
+            for (int j = 0; j < TN; ++j) xd[j] = Xd[sb][tx * 4 + j];
+#pragma unroll
+            for (int i = 0; i < TM; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j) acc[i][j] = fmaf(wd[i] * xd[j], static_cast<float>(isum[i][j]), acc[i][j]);
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int j = 0; j < TN; ++j) {
+        const int t = tok0 + tx * 4 + j;
+        if (t >= R) continue;
+        float* yr = S + static_cast<size_t>(t) * ldS;
+        const int r0 = row0 + ty * 8;
+        if (r0 + 7 < P && (ldS % 4 == 0)) {
+            *reinterpret_cast<float4*>(yr + r0) = make_float4(acc[0][j], acc[1][j], acc[2][j], acc[3][j]);
+            *reinterpret_cast<float4*>(yr + r0 + 4) = make_float4(acc[4][j], acc[5][j], acc[6][j], acc[7][j]);
+        } else {
+#pragma unroll
+            for (int i = 0; i < TM; ++i) if (r0 + i < P) yr[r0 + i] = acc[i][j];
+        }
+    }
+}
+
+// ---- grouped-query prefill: the G query heads that share a K/V head become G rows per token of ONE GEMM pair -------------------------------------------
+// Without it a model with several K/V heads (Qwen: 16 query heads over 4) ran one GEMM pair per QUERY head over only m rows: 4x the K/V tile reads, 4x the launches
+// and mostly empty tiles at short contexts. Rows are reordered to (kv head, token, head-in-group) so a K/V head's rows are one contiguous [m * G][hd] block (the layout
+// Nano's single K/V head already has), then scattered back. Every output element keeps its own accumulation order, so the result is bitwise identical.
+int g_group_mode = -1;   // -1: environment (default on), 0: off, 1: on (tests)
+bool attn_group_prefill() {
+    if (g_group_mode >= 0) return g_group_mode == 1;
+    static const bool on = [] {
+        const char* e = std::getenv("DARA_ATTN_GROUP_PREFILL");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+
+void* grow_buf(void*& p, size_t& cap, size_t bytes) {
+    if (bytes > cap) {
+        if (p) cudaFree(p);
+        p = nullptr;
+        cap = 0;
+        if (cudaMalloc(&p, bytes) != cudaSuccess) { cudaGetLastError(); return nullptr; }
+        cap = bytes;
+    }
+    return p;
+}
+
+// token-major rows (t, h) <-> grouped rows (h / G, t, h % G); one block per row, hd % 4 == 0
+__global__ void reorder_heads_kernel(const float* __restrict__ src, float* __restrict__ dst, int m, int heads, int G, int hd, int to_group) {
+    const int rt = blockIdx.x, t = rt / heads, h = rt % heads;
+    const int rg = (h / G) * (m * G) + t * G + (h % G);
+    const float4* s = reinterpret_cast<const float4*>(src + static_cast<size_t>(to_group ? rt : rg) * hd);
+    float4* d = reinterpret_cast<float4*>(dst + static_cast<size_t>(to_group ? rg : rt) * hd);
+    for (int i = threadIdx.x; i < hd / 4; i += blockDim.x) d[i] = s[i];
+}
+
 // Row blockIdx.x of S = (token t, head) with t = blockIdx.x / rows_per_token, query at absolute position pos0 + t, over keys kstart + j, j < ldS:
 // masked, scaled softmax in place; masked and padding entries become 0.
 __global__ void masked_softmax_kernel(float* __restrict__ S, size_t ldS, int P, int kstart, int pos0, int window, float scale, int rows_per_token) {
@@ -248,9 +413,11 @@ size_t round_up(size_t v, size_t m) { return (v + m - 1) / m * m; }
 
 template <int KF, int VF>
 void launch_pair(const void* Kh, const float* Ksc, const void* Vh, const float* Vsc, size_t kvw, const float* qrows, size_t ldq, float* S, size_t ldS, int P, int R,
-                 int hd, int kstart, int pos0, int window, float scale, int rows_per_token, float* out, size_t ldo, cudaStream_t s, const KvAux& aux) {
+                 int hd, int kstart, int pos0, int window, float scale, int rows_per_token, float* out, size_t ldo, cudaStream_t s, const KvAux& aux,
+                 const int8_t* qq = nullptr, const float* qd = nullptr) {
     const dim3 g1(static_cast<unsigned>((P + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN));
-    if (attn_use_mma()) attn_gemm_kernel<false, KF, true><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart, aux);
+    if (qq) attn_qk_i8_kernel<<<g1, kThreads, 0, s>>>(static_cast<const int8_t*>(Kh), Ksc, kvw, qq, qd, hd, S, ldS, P, R, rows_per_token, pos0 - kstart);
+    else if (attn_use_mma()) attn_gemm_kernel<false, KF, true><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart, aux);
     else attn_gemm_kernel<false, KF, false><<<g1, kThreads, 0, s>>>(Kh, Ksc, kvw, qrows, ldq, S, ldS, P, R, hd, hd, rows_per_token, pos0 - kstart, aux);
     masked_softmax_kernel<<<R, 256, 0, s>>>(S, ldS, P, kstart, pos0, window, scale, rows_per_token);
     const dim3 g2(static_cast<unsigned>((hd + BM - 1) / BM), static_cast<unsigned>((R + BN - 1) / BN));
@@ -260,11 +427,14 @@ void launch_pair(const void* Kh, const float* Ksc, const void* Vh, const float* 
 
 }  // namespace
 
+void attn_prefill_set_qk_int8(int mode) { g_qk8_mode = mode; }
+void attn_prefill_set_group(int mode) { g_group_mode = mode; }
+
 size_t attn_prefill_scratch_floats(int n, int pos0, int window, int heads, int kv_heads) {
     const int kstart = window > 0 ? std::max(0, pos0 - window + 1) : 0;
     const int P = pos0 + n - kstart;   // the widest key range of any sub-chunk
-    // score rows per query token: all heads at once with one K/V head, else one head at a time (the per-head GEMM pairs reuse the scratch)
-    const size_t per_token = static_cast<size_t>(kv_heads == 1 ? heads : 1) * round_up(static_cast<size_t>(P), BK);
+    // score rows per query token: the heads that share a K/V head go through one GEMM pair together (sized for that whatever the grouping switch says)
+    const size_t per_token = static_cast<size_t>(heads / kv_heads) * round_up(static_cast<size_t>(P), BK);
     const size_t full = static_cast<size_t>(std::min(n, kSub)) * per_token;
     return std::max(per_token, std::min(full, kScratchBudgetFloats));
 }
@@ -279,6 +449,9 @@ int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void
     const int vf = fmt == AttnFmt::F32 ? 0 : (fmt == AttnFmt::K8V4 || fmt == AttnFmt::Q4) ? 3 : 1;
     if ((kf != 0 && kf != 2 && !Ksc) || (vf != 0 && !Vsc)) return static_cast<int>(cudaErrorInvalidValue);
     if (kf == 4 && (!aux_in.ring || !aux_in.ring_sc)) return static_cast<int>(cudaErrorInvalidValue);
+    cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
+    cudaStreamIsCapturing(static_cast<cudaStream_t>(stream), &cap_status);
+    const bool qk8 = attn_qk_int8() && cap_status == cudaStreamCaptureStatusNone;
     KvAux aux = aux_in;
     aux.kv_width = kv_heads * hd;
     aux.held = pos0 + n;   // the whole chunk is appended before attention
@@ -296,13 +469,23 @@ int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void
                     float* o, size_t ldo, size_t ldS) {
         KvAux a = aux;
         a.base = koff;
+        const int8_t* qq = nullptr;
+        const float* qd = nullptr;
+        if (kf == 1 && qk8 && hd % 256 == 0) {   // int8 codes for the keys: score them against int8 queries with dp4a (opt-in, see attn_qk_int8)
+            void* qb = qk_scratch(dara::kernels::q8act_bytes(static_cast<size_t>(hd), R));
+            if (qb && dara::kernels::quantize_activations_cuda(qrows, ldq, static_cast<size_t>(hd), R, qb, s) == 0) {
+                qq = static_cast<const int8_t*>(qb);
+                qd = reinterpret_cast<const float*>(static_cast<const uint8_t*>(qb) + static_cast<size_t>(R) * hd);
+            }
+        }
         if (kf == 0) launch_pair<0, 0>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
         else if (kf == 2) launch_pair<2, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
         else if (kf == 4) launch_pair<4, 3>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
-        else if (vf == 3) launch_pair<1, 3>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
-        else launch_pair<1, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a);
+        else if (vf == 3) launch_pair<1, 3>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a, qq, qd);
+        else launch_pair<1, 1>(Kh, Ks, Vh, Vs, kvw, qrows, ldq, scratch, ldS, P, R, hd, kstart, p0, window, scale, rpt, o, ldo, s, a, qq, qd);
     };
-    const size_t rows_per_token = kv_heads == 1 ? static_cast<size_t>(heads) : 1;
+    const bool grouped = kv_heads > 1 && group > 1 && attn_group_prefill();
+    const size_t rows_per_token = kv_heads == 1 ? static_cast<size_t>(heads) : (grouped ? static_cast<size_t>(group) : 1);
     for (int t0 = 0, m = 0; t0 < n; t0 += m) {
         const int p0 = pos0 + t0;
         const int kstart = window > 0 ? std::max(0, p0 - window + 1) : 0;
@@ -318,6 +501,23 @@ int attn_prefill_cuda(AttnFmt fmt, const float* q, const float* gate, const void
             const void* Kh = static_cast<const uint8_t*>(K) + kbytes(off);
             const void* Vh = static_cast<const uint8_t*>(V) + vbytes(off);
             pair(off, Kh, kscales(off), Vh, vscales(off), qs, static_cast<size_t>(hd), P, m * heads, kstart, p0, heads, os, hd, ldS);
+        } else if (grouped) {   // several K/V heads: each K/V head's `group` query heads are rows of one GEMM pair
+            static void* gq = nullptr; static size_t gq_cap = 0;
+            static void* go = nullptr; static size_t go_cap = 0;
+            const size_t bytes = static_cast<size_t>(m) * heads * hd * sizeof(float);
+            float* qg = static_cast<float*>(grow_buf(gq, gq_cap, bytes));
+            float* og = static_cast<float*>(grow_buf(go, go_cap, bytes));
+            if (!qg || !og) return static_cast<int>(cudaErrorMemoryAllocation);
+            reorder_heads_kernel<<<static_cast<unsigned>(m) * heads, 128, 0, s>>>(qs, qg, m, heads, group, hd, 1);
+            const size_t rows = static_cast<size_t>(m) * group;
+            for (int g = 0; g < kv_heads; ++g) {
+                const size_t off = static_cast<size_t>(kstart) * kvw + static_cast<size_t>(g) * hd;
+                const void* Kh = static_cast<const uint8_t*>(K) + kbytes(off);
+                const void* Vh = static_cast<const uint8_t*>(V) + vbytes(off);
+                pair(off, Kh, kscales(off), Vh, vscales(off), qg + static_cast<size_t>(g) * rows * hd, static_cast<size_t>(hd), P, static_cast<int>(rows), kstart, p0, group,
+                     og + static_cast<size_t>(g) * rows * hd, static_cast<size_t>(hd), ldS);
+            }
+            reorder_heads_kernel<<<static_cast<unsigned>(m) * heads, 128, 0, s>>>(og, os, m, heads, group, hd, 0);
         } else {
             for (int h = 0; h < heads; ++h) {
                 const size_t off = static_cast<size_t>(kstart) * kvw + static_cast<size_t>(h / group) * hd;

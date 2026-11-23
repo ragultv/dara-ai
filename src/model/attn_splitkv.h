@@ -26,6 +26,10 @@ enum class AttnFmt { F32, TQ4, Q8, K16V8, K8V4, Q4 };   // K8V4 / Q4: kv4.h
 int f16kv_append_cuda(const float* d_x, const int64_t* d_pos, int T, int kv_heads, int hd, uint8_t* d_half, void* stream = nullptr);
 int q8kv_append_cuda(const float* d_x, const int64_t* d_pos, int T, int kv_heads, int hd, uint8_t* d_codes, float* d_scales, void* stream = nullptr);
 
+// Grouped-query decode kernel (one block serves all the query heads that share a K/V head: K/V read once instead of once per head). On by default for F32 and
+// Q8 caches with 2, 4 or 8 query heads per K/V head; output is bitwise identical to the per-head kernels. mode: -1 = DARA_GQA_ATTN (default on), 0 = off, 1 = on.
+void attn_splitkv_set_gqa(int mode);
+
 // Uploads the TurboQuant codebook this file's kernels read. Idempotent; call outside CUDA-graph capture (the model constructors do).
 int attn_splitkv_init();
 

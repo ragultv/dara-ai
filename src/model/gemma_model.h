@@ -82,6 +82,14 @@ public:
         for (int l = 0; l < cfg_.layers; ++l)
             if (cfg_.owns_kv(l)) dara::model::kv_tail_regions(kv_[l].bufs(), opt_.kv_format, capacity_, from, out);
     }
+    // Park a conversation in system RAM and bring it back (prompt cache for conversations that are not the one held now). A snapshot holds the K/V of
+    // positions [0, n) of every layer that owns K/V (F32 and Q8 caches; kv_snapshot_bytes is 0 for the other formats and kv_save then refuses).
+    // kv_load copies the first n positions (n <= snapshot.n) back and sets the position to n: the model then continues exactly as if it had just
+    // prefilled those n tokens (bitwise: the same bytes). Text-only: the caller clears soft tokens. Both call cudaDeviceSynchronize first.
+    struct KvSnapshot { size_t n = 0; std::vector<uint8_t> bytes; };
+    size_t kv_snapshot_bytes(size_t n) const;
+    bool kv_save(size_t n, KvSnapshot& out);
+    bool kv_load(const KvSnapshot& s, size_t n);
     size_t kv_capacity() const { return capacity_; }   // positions the caches hold (the auto choice when constructed with 0)
     // long forward calls run in pieces of this many tokens (multiple of the prefill chunk): bounds the per-call device buffers
     int forward_piece_tokens() const { const int c = opt_.max_chunk_tokens > 0 ? opt_.max_chunk_tokens : 1; return c * (256 / c > 0 ? 256 / c : 1); }

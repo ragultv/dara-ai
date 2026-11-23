@@ -489,6 +489,48 @@ void GemmaModel::rewind(size_t pos) {
     pos_ = pos;
 }
 
+size_t GemmaModel::kv_snapshot_bytes(size_t n) const {
+    size_t total = 0;
+    for (int l = 0; l < cfg_.layers; ++l) {
+        if (!cfg_.owns_kv(l)) continue;
+        const size_t b = kv_used_bytes(opt_.kv_format, static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim(l), n);
+        if (b == 0 && n > 0) return 0;   // a format that cannot be snapshotted
+        total += b;
+    }
+    return total;
+}
+
+bool GemmaModel::kv_save(size_t n, KvSnapshot& out) {
+    if (n > pos_ || n > capacity_) return false;
+    const size_t total = kv_snapshot_bytes(n);
+    if (total == 0) return false;
+    cudaDeviceSynchronize();
+    out.n = n;
+    out.bytes.resize(total);
+    size_t off = 0;
+    for (int l = 0; l < cfg_.layers; ++l) {
+        if (!cfg_.owns_kv(l)) continue;
+        const size_t w = static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim(l);
+        if (!kv_export(kv_[l].bufs(), opt_.kv_format, w, n, out.bytes.data() + off)) { out.n = 0; out.bytes.clear(); return false; }
+        off += kv_used_bytes(opt_.kv_format, w, n);
+    }
+    return true;
+}
+
+bool GemmaModel::kv_load(const KvSnapshot& s, size_t n) {
+    if (n > s.n || n > capacity_ || s.bytes.size() != kv_snapshot_bytes(s.n)) return false;
+    cudaDeviceSynchronize();
+    size_t off = 0;
+    for (int l = 0; l < cfg_.layers; ++l) {
+        if (!cfg_.owns_kv(l)) continue;
+        const size_t w = static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim(l);
+        if (!kv_import(kv_[l].bufs(), opt_.kv_format, w, s.n, n, s.bytes.data() + off)) return false;
+        off += kv_used_bytes(opt_.kv_format, w, s.n);
+    }
+    pos_ = n;
+    return true;
+}
+
 void GemmaModel::start_copy(int layer) {
     const int slot = (layer - resident_) % 2;
     PackedLayer& p = layers_[layer];

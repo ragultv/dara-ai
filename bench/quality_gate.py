@@ -25,7 +25,9 @@ MODELS = {
 }
 WORKLOADS = ["english", "code", "structured", "long1500", "long8k"]   # also available: tamil (multilingual; not in Dara's target usage)
 ALL_VARIANTS = {"int8_f32kv": ("1", "f32"), "fp32_q8kv": ("0", "q8"), "int8_q8kv": ("1", "q8"), "int8_k16v8kv": ("1", "k16v8"), "fp32_tq4kv": ("0", "tq4"), "int8_tq4kv": ("1", "tq4"),
-                "int8_k8v4kv": ("1", "k8v4"), "int8_q4kv": ("1", "q4")}
+                "int8_k8v4kv": ("1", "k8v4"), "int8_q4kv": ("1", "q4"),
+                # int8 queries x int8 keys for the prefill attention scores (dp4a; only where tensor-core attention is not used, i.e. GTX 16xx)
+                "int8_q8kv_qk8": ("1", "q8", {"DARA_ATTN_QK_INT8": "1"})}
 
 
 def label(res):
@@ -38,7 +40,7 @@ def label(res):
     return "lower"
 
 
-def run(model, workload, tag, int8, kv_mode, n_new, teacher=None):
+def run(model, workload, tag, int8, kv_mode, n_new, teacher=None, extra_env=None):
     m = MODELS[model]
     out = os.path.join(Q, f"{model}_{workload}_{tag}")
     src = ["--tokens", m["long"]] if workload == "long1500" else ["--prompt-file", os.path.join(Q, workload + ".txt")]
@@ -47,7 +49,7 @@ def run(model, workload, tag, int8, kv_mode, n_new, teacher=None):
            "--logits-last", "1", "--out", out]
     if teacher: cmd += ["--teacher", teacher]
     # the FP32 reference must not use the CPU decode path (its kernels are int8 by design): DARA_CPU_DECODE=0 keeps hosted layers on the GPU path
-    env = dict(os.environ, DARA_INT8=int8, DARA_CPU_DECODE="1" if int8 == "1" else "0")
+    env = dict(os.environ, DARA_INT8=int8, DARA_CPU_DECODE="1" if int8 == "1" else "0", **(extra_env or {}))
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=3600)
     if p.returncode != 0:
         raise RuntimeError(f"{model} {workload} {tag} failed:\n{(p.stdout + p.stderr)[-1500:]}")
@@ -93,9 +95,9 @@ def main():
                 results[f"{model}/{w}/ref"] = {"error": str(e)[-500:]}
                 continue
             for tag in a.variants:
-                int8, kv = ALL_VARIANTS[tag]
+                int8, kv, *vx = ALL_VARIANTS[tag]
                 try:
-                    test = run(model, w, tag, int8, kv, a.new, teacher=ref + ".tokens.txt")
+                    test = run(model, w, tag, int8, kv, a.new, teacher=ref + ".tokens.txt", extra_env=vx[0] if vx else None)
                 except Exception as e:  # noqa: BLE001
                     print(f"{model:4s} {w:10s} {tag:11s} FAILED: {str(e).splitlines()[0]}", flush=True)
                     results[f"{model}/{w}/{tag}"] = {"error": str(e)[-500:]}
