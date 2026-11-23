@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What SignPath signs in the artifact the release workflow uploads (.github/workflows/build-release.yml, step "Upload the unsigned
+  installer"). Paste this into the project's artifact configuration in SignPath (see docs/CODE_SIGNING.md); SignPath does not read it from
+  the repository, this copy is the reviewed source of truth.
+
+  actions/upload-artifact wraps the installer in a ZIP, so the root is a zip-file. Only the installer is signed: the files the installer
+  unpacks are built from this repository too, but Tauri builds the installer in one step, so they are not signed separately.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="Dara_*_x64-setup.exe">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

@@ -41,7 +41,8 @@ function entry(
       url: "https://example.com/mcp",
       enabled,
       createdAt: 0,
-      oauth: { clientId: null, scope: null, hasSecret: false }
+      oauth: { clientId: null, scope: null, hasSecret: false },
+      apiKey: { hasKey: false, header: null }
     },
     status: {
       state,

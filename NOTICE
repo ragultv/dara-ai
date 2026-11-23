@@ -1,0 +1,6 @@
+Dara
+Copyright (c) 2026 Dara contributors, released under the MIT License (see LICENSE).
+
+Third-party code in third_party/ keeps its own license (see third_party/README.md).
+Model files downloaded by the app (Gemma, Qwen) are not part of this repository and are
+covered by their own licenses.

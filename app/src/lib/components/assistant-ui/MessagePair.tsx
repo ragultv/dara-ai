@@ -171,7 +171,9 @@ export const MessagePair: React.FC<MessagePairProps> = ({
         className={`w-7 h-7 object-contain shrink-0 ${isStreaming ? "animate-pulse" : ""}`}
       />
       <div className="flex-1 min-w-0 space-y-1">
-        {toolSteps.length > 0 && <ToolGroup steps={toolSteps} streaming={isStreaming} />}
+        {toolSteps.length > 0 && (
+          <ToolGroup steps={toolSteps} streaming={isStreaming} skipReasoningOf={message.id} />
+        )}
 
         {hasReasoning && (
           <Reasoning

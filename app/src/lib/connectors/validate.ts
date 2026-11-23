@@ -4,6 +4,24 @@ import type { AddConnectorInput } from "./types.ts";
 
 export const MAX_CONNECTORS = 32;
 
+/** Headers a key must not be sent in: they belong to the protocol or to the connection (the same list as the desktop layer's). */
+const RESERVED_HEADERS =
+  /^(host|content-type|content-length|accept|mcp-session-id|mcp-protocol-version|cookie|transfer-encoding|connection|user-agent|origin|upgrade)$/i;
+
+/** The rules for an API key and its header, the same as the desktop layer's. Returns an error message, or null. */
+export function checkApiKey(key: string, header?: string): string | null {
+  const k = key.trim().replace(/^bearer\s+/i, "");
+  if (!k) return "Paste the API key.";
+  if (k.length > 1500) return "The API key is longer than 1500 characters.";
+  if (!/^[\x21-\x7e]+$/.test(k))
+    return "Paste just the key: it has a space or a character that cannot go in a header.";
+  const h = (header ?? "").trim();
+  if (h && !/^[A-Za-z0-9_-]{1,64}$/.test(h))
+    return "The header name may only have letters, digits, - and _.";
+  if (RESERVED_HEADERS.test(h)) return `${h} is used by the connection itself; choose another header.`;
+  return null;
+}
+
 /** A server address is acceptable when it is https, or when it points at this computer. */
 export function checkServerUrl(raw: string): string | null {
   let u: URL;
@@ -59,6 +77,8 @@ export function validateNewConnector(input: AddConnectorInput, existing: number)
   const o = input.oauth;
   if (o?.clientSecret && !o.clientId?.trim()) return "A client secret needs a client ID.";
   if (o?.scope && /[\r\n\u0000]/.test(o.scope)) return "The scope must be on one line.";
+  const k = input.apiKey;
+  if (k && (k.value?.trim() || k.header?.trim())) return checkApiKey(k.value ?? "", k.header);
   return null;
 }
 

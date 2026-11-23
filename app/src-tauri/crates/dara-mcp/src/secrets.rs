@@ -80,6 +80,11 @@ impl SecretStore for KeyringSecrets {
     }
 }
 
+/// The key of the API key a user pasted for an http connector (a server that wants a key instead of a sign-in).
+pub fn api_key_key(connector_id: &str) -> String {
+    format!("connector/{connector_id}/api_key")
+}
+
 /// The key of a connector's OAuth token record (kept in pieces, see [`put_chunked`]).
 pub fn token_key(connector_id: &str) -> String {
     format!("connector/{connector_id}/oauth/token")

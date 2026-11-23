@@ -36,11 +36,13 @@ import { useSettingsStore } from "./useSettingsStore.ts";
 import { useChatToolsStore } from "./useChatToolsStore.ts";
 import { loadChatTools, runCalls } from "../chat/tools/runner.ts";
 import {
+  describeTool,
   formatProblems,
   formatResults,
   isToolResultsContent,
   parseResults,
   parseToolCalls,
+  shouldUseCompactList,
   toolSystemPrompt
 } from "../chat/tools/protocol.ts";
 import { MAX_REPAIRS, MAX_STEPS, type ChatTool, type ToolResultItem } from "../chat/tools/types.ts";
@@ -770,7 +772,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         chatTools.setStatus(id, undefined);
       }
     }
-    const toolPrompt = tools.length > 0 ? toolSystemPrompt(tools) : "";
+    // a long tool list is shortened to one line per tool, with a lookup tool for the arguments (protocol.ts: shouldUseCompactList)
+    const compactTools = tools.length > 0 && shouldUseCompactList(tools, contextCapacity(findConv(id) ?? conv));
+    if (compactTools) tools = [...tools, describeTool()];
+    const toolPrompt = tools.length > 0 ? toolSystemPrompt(tools, new Date(), compactTools) : "";
 
     // ---- build the request from the current window ----
     const latest = findConv(id) ?? conv;

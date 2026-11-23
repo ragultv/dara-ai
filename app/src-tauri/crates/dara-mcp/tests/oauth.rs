@@ -36,6 +36,7 @@ async fn rig(configure: impl FnOnce(&mut Knobs), oauth: Option<OAuthInput>) -> R
             env: BTreeMap::new(),
             url: Some(auth.mcp_url()),
             oauth,
+            api_key: None,
         })
         .unwrap();
     m.set_sign_in_timeout(Duration::from_secs(10));
@@ -463,7 +464,7 @@ async fn changing_the_client_id_signs_the_connector_out() {
     // sign-in settings belong to a server address only
     let dir = tempfile::tempdir().unwrap();
     let m = Manager::new(&dir.path().join("x.db"), Arc::new(MemorySecrets::new()), dir.path()).unwrap();
-    let stdio = NewConnector { name: "p".into(), kind: Kind::Stdio, command: Some("x".into()), args: vec![], env: BTreeMap::new(), url: None, oauth: Some(OAuthInput { client_id: Some("c".into()), ..Default::default() }) };
+    let stdio = NewConnector { name: "p".into(), kind: Kind::Stdio, command: Some("x".into()), args: vec![], env: BTreeMap::new(), url: None, oauth: Some(OAuthInput { client_id: Some("c".into()), ..Default::default() }), api_key: None };
     assert!(m.add(stdio).is_err());
 }
 

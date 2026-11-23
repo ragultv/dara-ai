@@ -4,6 +4,7 @@
 #   pull requests       -> build only (the zip and the installer are attached to the workflow run as artifacts)
 #   push to main        -> build + release tagged b<run number>
 #   manual (Actions tab) -> build, and release when "release" is ticked
+# A published installer is code-signed through SignPath Foundation once the project is set up there (docs/CODE_SIGNING.md).
 name: build-release
 
 on:
@@ -18,9 +19,14 @@ on:
         description: "Publish a release (tag b<run number>)"
         type: boolean
         default: false
+      sign:
+        description: "Sign the installer without publishing (SignPath test-signing policy, to try the setup)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # creating releases
+  actions: read     # SignPath reads the workflow run that built the installer
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -140,7 +146,13 @@ jobs:
   installer:
     needs: windows-cuda
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      # a build that is published: a push to main, or a manual run with "release" ticked
+      PUBLISH: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.release)) && 'true' || 'false' }}
+      # signed when published (or when a manual run asks for "sign"), and only once SignPath is set up (repository variable
+      # SIGNPATH_ORGANIZATION_ID). Pull requests never sign: they have no access to the secret and could not be trusted with it.
+      SIGN: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && (inputs.release || inputs.sign))) && vars.SIGNPATH_ORGANIZATION_ID != '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -182,12 +194,57 @@ jobs:
           pnpm exec vitest run
           pnpm run tauri build
 
-      - name: Name the installer and hash it
-        id: setup
+      - name: Find the installer
+        id: find
         shell: pwsh
         run: |
           $exe = Get-ChildItem app\src-tauri\target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
           if (-not $exe) { throw "No installer was built" }
+          "{0:N1} MB  {1}" -f ($exe.Length / 1MB), $exe.Name
+          "exe=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+
+      # Code signing with SignPath Foundation's free programme for open-source projects (docs/CODE_SIGNING.md). It runs only for a build that
+      # is going to be published and only once the repository variable SIGNPATH_ORGANIZATION_ID is set, so everything works before
+      # SignPath has accepted the project. SignPath takes the installer from a workflow artifact, so it is uploaded first.
+      - name: Upload the unsigned installer (for SignPath)
+        id: unsigned
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dara-installer-unsigned
+          path: ${{ steps.find.outputs.exe }}
+          if-no-files-found: error
+
+      - name: Sign the installer (SignPath)
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'dara' }}
+          # a published build uses the release policy (a person approves it); a trial run uses the test policy
+          signing-policy-slug: ${{ env.PUBLISH == 'true' && (vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing') || 'test-signing' }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG || 'initial' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600   # a release is approved by a person, who may take a while
+          output-artifact-directory: signed
+
+      # The file that is hashed, uploaded and released: the signed one when signing ran. A signed build is checked, not trusted.
+      - name: Choose the installer to publish and hash it
+        id: setup
+        shell: pwsh
+        run: |
+          if ($env:SIGN -eq 'true') {
+            $exe = Get-ChildItem signed -Recurse -Filter "*-setup.exe" | Select-Object -First 1
+            if (-not $exe) { throw "SignPath returned no installer" }
+            $sig = Get-AuthenticodeSignature $exe.FullName
+            "Signature: $($sig.Status); signed by: $($sig.SignerCertificate.Subject)"
+            if ($sig.Status -in "NotSigned", "HashMismatch") { throw "The installer is not properly signed ($($sig.Status))" }
+          } else {
+            $exe = Get-Item "${{ steps.find.outputs.exe }}"
+            if ($env:PUBLISH -eq 'true') { Write-Output "::warning::This installer is not code-signed (set the SIGNPATH_ORGANIZATION_ID variable to sign it): Windows SmartScreen will warn." }
+          }
           "{0:N1} MB  {1}" -f ($exe.Length / 1MB), $exe.Name
           $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
           [IO.File]::WriteAllText("$($exe.FullName).sha256", "$hash  $($exe.Name)`n")
@@ -201,7 +258,7 @@ jobs:
             ${{ steps.setup.outputs.exe }}.sha256
 
       - name: Add the installer to the release
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.release)
+        if: env.PUBLISH == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

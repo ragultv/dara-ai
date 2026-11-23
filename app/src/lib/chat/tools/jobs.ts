@@ -1,4 +1,4 @@
-import { MAX_WAIT_SECONDS, WAIT_TOOL, type ToolResultItem } from "./types.ts";
+import { DESCRIBE_TOOL, MAX_WAIT_SECONDS, WAIT_TOOL, type ToolResultItem } from "./types.ts";
 
 // Work that is not done when the tool call returns, for ANY connector (nothing here knows a particular server): a tool starts a
 // job and says "pending, check again in 15 seconds", or hands back something that needs one more call to become the answer.
@@ -30,7 +30,7 @@ export function unfinishedWork(items: ToolResultItem[]): Unfinished | null {
   let found = false;
   let seconds: number | null = null;
   for (const it of items) {
-    if (it.status !== "ok" || it.name === WAIT_TOOL) continue;
+    if (it.status !== "ok" || it.name === WAIT_TOOL || it.name === DESCRIBE_TOOL) continue;
     const t = it.text;
     if (!(STATUS_VALUE.test(t) || STILL_WORKING.test(t) || NOT_READY.test(t) || NEXT_STEP.test(t)))
       continue;

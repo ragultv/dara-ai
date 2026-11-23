@@ -68,7 +68,7 @@ export type Speed =
   | { source: "measured"; decode_tps_start: number; decode_tps_full_estimate?: number; prefill_tps?: number; measured_at?: string; power?: "ac" | "battery" | "unknown" };
 export interface Placement {
   context: number; requested_context?: number; layers: number; layers_gpu: number; head: "gpu" | "cpu";
-  fully_on_gpu: boolean; all_layers_on_gpu: boolean; flash_active: boolean; kv_cache_mb: number; ok: boolean; speed: Speed;
+  fully_on_gpu: boolean; all_layers_on_gpu: boolean; flash_active: boolean; kv_cache_mb: number; ok: boolean; speed?: Speed;  // a setup that does not fit (ok: false) has no speed
 }
 export interface OptionEntry { kv: KvFormat; flash: boolean; fast: Placement; points: Placement[] }
 export interface OptionsResponse {

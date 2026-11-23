@@ -188,10 +188,50 @@ export const OPS_SYSTEM_PROMPT = [
   "A list or a table is ONE block: replace it as a whole. No greeting, no explanation, no code fence around the answer."
 ].join("\n");
 
-export function buildOpsMessages(blocks: string[], instruction: string): ChatMessage[] {
-  const widget = wantsWidget(instruction)
-    ? `\n\nThe user wants something interactive, so add it with @insert (a widget is ONE block).\n${widgetGuide(instruction)}`
-    : "";
+/**
+ * Editing a deck. The numbered units are whole SLIDES, not paragraphs: a small model counts slides reliably, and it does not have to
+ * keep or place the --- lines (the deck is written back with them). The same operations as a document, so the same parser applies them.
+ */
+export const DECK_OPS_SYSTEM_PROMPT = [
+  "You are Dara, the assistant inside a slide editor.",
+  "The slide deck is shown as numbered slides like [1], [2]. Change it with operations, one per line start, and reply with nothing else:",
+  "@replace N   - the complete new Markdown of slide N follows on the next lines",
+  "@insert after N   - the Markdown of a NEW slide follows on the next lines, placed after slide N",
+  "@insert before N  - the same, placed before slide N (@insert before 1 puts it first)",
+  "@delete N    - remove slide N",
+  "Only touch the slides the instruction needs. Slides you do not mention stay exactly as they are, so never repeat them.",
+  "A slide is a ## heading and 3 to 5 short - bullets (each under 12 words). The first slide is the title slide: a # heading and one short line.",
+  "Write the slide without the [N] marker and without --- lines. A replaced slide must contain the WHOLE slide, including the lines that do not change (the subtitle of a title slide, the other bullets).",
+  "To change the deck's title, replace slide 1 (keep its subtitle line). To reorder, delete and insert. Each slide is written once: never insert a slide you also replaced.",
+  "No greeting, no explanation, no code fence.",
+  "Example. Slides: [1] a # Plan heading and the line 'Our year'; [2] a ## Goals slide with two bullets. Instruction: rename the deck to Roadmap and add a closing slide. Answer:",
+  "@replace 1",
+  "# Roadmap",
+  "",
+  "Our year",
+  "@insert after 2",
+  "## Thanks",
+  "",
+  "- Questions?"
+].join("\n");
+
+export function buildOpsMessages(
+  blocks: string[],
+  instruction: string,
+  kind: "doc" | "slides" = "doc"
+): ChatMessage[] {
+  const widget =
+    kind === "doc" && wantsWidget(instruction)
+      ? `\n\nThe user wants something interactive, so add it with @insert (a widget is ONE block).\n${widgetGuide(instruction)}`
+      : "";
+  if (kind === "slides")
+    return [
+      { role: "system", content: DECK_OPS_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `Slides:\n${numberBlocks(blocks)}\n\nInstruction: ${instruction.trim()}`
+      }
+    ];
   return [
     { role: "system", content: OPS_SYSTEM_PROMPT + widget },
     {
@@ -209,7 +249,8 @@ export function buildRetryMessages(
   first: ChatMessage[],
   answer: string,
   missing: number[],
-  blockCount: number
+  blockCount: number,
+  noun: { one: string; many: string } = { one: "block", many: "blocks" }
 ): ChatMessage[] {
   const list = [...new Set(missing)].join(", ");
   return [
@@ -217,7 +258,7 @@ export function buildRetryMessages(
     { role: "assistant", content: answer },
     {
       role: "user",
-      content: `That was refused and nothing was applied: block ${list} ${missing.length === 1 ? "does" : "do"} not exist. The document has ${blockCount} ${blockCount === 1 ? "block" : "blocks"}, numbered 1 to ${blockCount}. Resend all the operations, corrected, in the same format.`
+      content: `That was refused and nothing was applied: ${noun.one} ${list} ${missing.length === 1 ? "does" : "do"} not exist. The ${noun.one === "slide" ? "deck" : "document"} has ${blockCount} ${blockCount === 1 ? noun.one : noun.many}, numbered 1 to ${blockCount}. Resend all the operations, corrected, in the same format.`
     }
   ];
 }
@@ -233,13 +274,20 @@ export const FINISH_SYSTEM_PROMPT = [
 export function buildFinishMessages(
   instruction: string,
   title: string,
-  facts: string
+  facts: string,
+  kind: "doc" | "slides" = "doc"
 ): ChatMessage[] {
+  const system =
+    kind === "slides"
+      ? FINISH_SYSTEM_PROMPT.replace("document editor", "slide editor")
+          .replace("is now in the document", "is now in the deck")
+          .replace("tools, blocks or operations", "tools, blocks, operations or the --- marks")
+      : FINISH_SYSTEM_PROMPT;
   return [
-    { role: "system", content: FINISH_SYSTEM_PROMPT },
+    { role: "system", content: system },
     {
       role: "user",
-      content: `Task: ${instruction.trim().slice(0, 500)}\nDocument: ${title || "(untitled)"}\nWhat was done:\n${facts.slice(0, 2500)}`
+      content: `Task: ${instruction.trim().slice(0, 500)}\n${kind === "slides" ? "Slide deck" : "Document"}: ${title || "(untitled)"}\nWhat was done:\n${facts.slice(0, 2500)}`
     }
   ];
 }
@@ -256,4 +304,40 @@ export function factsFromOps(blocks: readonly string[], ops: readonly BlockOp[])
     else lines.push(`- Asked the user in a comment: ${short(o.text)}`);
   }
   return lines.join("\n");
+}
+
+export const DECK_SYSTEM_PROMPT = [
+  "You are Dara, the assistant inside a slide editor. Write the slide deck the user asks for, as Markdown.",
+  "Rules:",
+  "- Slide 1 is the title slide: a # heading and one short line under it.",
+  "- Then 5 to 9 slides (fewer if the user asks for fewer). Every slide starts with a ## heading.",
+  "- Under the heading: 3 to 5 short bullet lines starting with '- ', each under 12 words. No paragraphs, no tables, no images, no code unless asked.",
+  "- Put a line with only --- between slides, with a blank line before and after it.",
+  "- End with a short closing slide (for example next steps or questions).",
+  "Reply with the deck only: no greeting, no explanation, no code fence.",
+  "Example of the shape:",
+  "# Quarterly review",
+  "",
+  "How the team did and what comes next",
+  "",
+  "---",
+  "",
+  "## Highlights",
+  "",
+  "- Shipped the new onboarding",
+  "- Support replies twice as fast",
+  "",
+  "---",
+  "",
+  "## Next steps",
+  "",
+  "- Hire two engineers",
+  "- Start the pilot in March"
+].join("\n");
+
+export function buildDeckMessages(instruction: string): ChatMessage[] {
+  return [
+    { role: "system", content: DECK_SYSTEM_PROMPT },
+    { role: "user", content: `Write this deck: ${instruction.trim()}` }
+  ];
 }

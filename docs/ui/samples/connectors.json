@@ -2,9 +2,9 @@
   "audit": [
     {
       "argsJson": "{\"text\":\"hi\"}",
-      "connectorId": "3242f706-3b31-4f45-83f8-f61289af5384",
-      "createdAt": 1795224176598,
-      "durationMs": 0,
+      "connectorId": "e5c5d06a-ad09-4b9e-a747-4a5fe32680d2",
+      "createdAt": 1795443014857,
+      "durationMs": 1,
       "id": 2,
       "outcome": "ok",
       "resultChars": 2,
@@ -12,8 +12,8 @@
     },
     {
       "argsJson": "{\"text\":\"hi\"}",
-      "connectorId": "3242f706-3b31-4f45-83f8-f61289af5384",
-      "createdAt": 1795224176596,
+      "connectorId": "e5c5d06a-ad09-4b9e-a747-4a5fe32680d2",
+      "createdAt": 1795443014854,
       "durationMs": 0,
       "id": 1,
       "outcome": "needs_approval",
@@ -43,12 +43,16 @@
   "connectors": [
     {
       "config": {
+        "apiKey": {
+          "hasKey": false,
+          "header": null
+        },
         "args": [],
-        "command": "mock-mcp",
-        "createdAt": 1795224176427,
+        "command": "D:\\darap-ai\\app\\src-tauri\\target\\debug\\mock_mcp.exe",
+        "createdAt": 1795443014794,
         "enabled": true,
         "envNames": [],
-        "id": "3242f706-3b31-4f45-83f8-f61289af5384",
+        "id": "e5c5d06a-ad09-4b9e-a747-4a5fe32680d2",
         "kind": "stdio",
         "name": "Mock",
         "oauth": {

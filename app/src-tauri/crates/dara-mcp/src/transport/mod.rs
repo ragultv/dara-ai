@@ -23,6 +23,11 @@ pub trait TokenProvider: Send + Sync {
     async fn refresh(&self) -> bool {
         false
     }
+    /// The header the value goes in. `None` (the default) is `Authorization: Bearer <value>`; a name sends the value as it is under that
+    /// header (for servers that want `X-API-Key: <key>`).
+    fn header_name(&self) -> Option<String> {
+        None
+    }
 }
 
 /// What the server told us on the side (shared by the transport and the client).

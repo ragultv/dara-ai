@@ -89,6 +89,8 @@ export const CatalogList: React.FC<{
 
   const add = async (item: ConnectorItem) => {
     if (!item.catalog) return;
+    // a server with no sign-in needs its API key first: its page asks for it
+    if (item.catalog.registers === "api-key") return onOpen(item.key);
     const problem = await addFromCatalog(item.catalog);
     if (problem) toast.show(problem, "error");
     else onOpen(item.key);

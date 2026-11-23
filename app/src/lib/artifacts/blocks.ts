@@ -41,12 +41,13 @@ export type BlockOp =
   | { op: "delete"; n: number }
   | { op: "comment"; n: number; text: string }; // a question for the user about block n; the text is left as it is
 
-const OP_LINE = /^@(replace|insert|delete|comment)(?:\s+after)?\s+\[?(\d+)\]?\s*:?\s*$/i;
+const OP_LINE = /^@(replace|insert|delete|comment)(?:\s+(after|before))?\s+\[?(\d+)\]?\s*:?\s*$/i;
 
 /**
  * Reads the model's answer. Each operation starts on its own line:
  *   @replace 3   (the new text of block 3 follows)
  *   @insert 3    (new blocks go after block 3; @insert 0 puts them at the start)
+ *   @insert before 4   (the same as @insert 3: a model copies the words of "before the last slide" more reliably than it subtracts)
  *   @delete 5
  * Text before the first operation is ignored. Works on a partial answer while it streams.
  */
@@ -73,11 +74,10 @@ export function parseOps(raw: string): BlockOp[] {
       const m = OP_LINE.exec(line.trim());
       if (m) {
         close();
-        cur = {
-          op: m[1]!.toLowerCase() as "replace" | "insert" | "delete",
-          n: Number(m[2]),
-          body: []
-        };
+        const op = m[1]!.toLowerCase() as "replace" | "insert" | "delete" | "comment";
+        // "before 4" is after 3; only an insert has a position, so the word means nothing to the other operations
+        const before = op === "insert" && m[2]?.toLowerCase() === "before";
+        cur = { op, n: Math.max(0, Number(m[3]) - (before ? 1 : 0)), body: [] };
         continue;
       }
       if (/^@(done|end)\s*$/i.test(line.trim())) {
@@ -153,13 +153,14 @@ export function applyOps(blocks: string[], ops: BlockOp[]): ApplyResult {
 
 /** "Changed 2 blocks, added 1, removed 1." for the chat line. */
 export function describeChange(
-  r: Pick<ApplyResult, "replaced" | "inserted" | "deleted"> & { questions?: unknown[] }
+  r: Pick<ApplyResult, "replaced" | "inserted" | "deleted"> & { questions?: unknown[] },
+  noun: { one: string; many: string } = { one: "block", many: "blocks" }
 ): string {
   const part = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
   const bits: string[] = [];
-  if (r.replaced) bits.push(`changed ${part(r.replaced, "block", "blocks")}`);
-  if (r.inserted) bits.push(`added ${part(r.inserted, "block", "blocks")}`);
-  if (r.deleted) bits.push(`removed ${part(r.deleted, "block", "blocks")}`);
+  if (r.replaced) bits.push(`changed ${part(r.replaced, noun.one, noun.many)}`);
+  if (r.inserted) bits.push(`added ${part(r.inserted, noun.one, noun.many)}`);
+  if (r.deleted) bits.push(`removed ${part(r.deleted, noun.one, noun.many)}`);
   const asked = r.questions?.length ?? 0;
   if (asked) bits.push(`asked ${part(asked, "question", "questions")} in the comments`);
   if (!bits.length) return "Nothing needed to change.";

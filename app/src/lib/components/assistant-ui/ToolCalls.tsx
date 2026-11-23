@@ -5,6 +5,7 @@ import { displayText, extractBlocks } from "../../chat/tools/protocol.ts";
 import { useChatToolsStore } from "../../stores/useChatToolsStore.ts";
 import { useConnectorsStore } from "../../stores/useConnectorsStore.ts";
 import { Markdown } from "../../ui/Markdown.tsx";
+import { Reasoning } from "./Reasoning.tsx";
 import type {
   CallDecision,
   CallState,
@@ -242,6 +243,19 @@ export const ToolCall: React.FC<{ row: ToolRow }> = ({ row }) => {
   );
 };
 
+/**
+ * The thinking a tool step printed before its calls. Every step keeps its own, but only the last message of a reply showed it, so the
+ * thinking between tool calls vanished once the answer was done. `skipReasoningOf` is the message the reply prints below the fold itself.
+ */
+export function stepThinking(
+  step: TurnStep,
+  skipReasoningOf?: string
+): { text: string; durationMs: number | undefined; cut: boolean | undefined } | null {
+  const text = step.message.reasoning?.trim();
+  if (!text || step.message.id === skipReasoningOf) return null;
+  return { text: step.message.reasoning ?? text, durationMs: step.message.reasoningMs, cut: step.message.reasoningCut };
+}
+
 function groupTitle(
   rows: ToolRow[],
   working: boolean
@@ -269,19 +283,22 @@ function groupTitle(
 }
 
 /**
- * Every tool step of one reply in one fold. Inside, in order: what the model said between steps (muted) and each call.
+ * Every tool step of one reply in one fold. Inside, in order: what the model thought and said between steps (muted) and each call.
  * Open while a call runs or waits for approval, folded once done, unless the reader opened or closed it.
  */
-export const ToolGroup: React.FC<{ steps: TurnStep[]; streaming: boolean }> = ({
-  steps,
-  streaming
-}) => {
+export const ToolGroup: React.FC<{
+  steps: TurnStep[];
+  streaming: boolean;
+  /** the message the reply is showing already prints its own thinking below the fold, so it is not repeated inside */
+  skipReasoningOf?: string;
+}> = ({ steps, streaming, skipReasoningOf }) => {
   const live = useChatToolsStore((s) => s.calls);
   const entries = useConnectorsStore((s) => s.entries);
   const [manual, setManual] = useState<boolean | null>(null);
 
   const parts = steps.map((step, i) => ({
     step,
+    thinking: stepThinking(step, skipReasoningOf),
     text: displayText(step.message.content),
     rows: stepRows(step, streaming && i === steps.length - 1, live, entries)
   }));
@@ -316,6 +333,14 @@ export const ToolGroup: React.FC<{ steps: TurnStep[]; streaming: boolean }> = ({
           <div className="mt-1 space-y-1 border-l border-border-strong/60 pl-4">
             {parts.map((p) => (
               <React.Fragment key={p.step.message.id}>
+                {p.thinking && (
+                  <Reasoning
+                    text={p.thinking.text}
+                    streaming={false}
+                    durationMs={p.thinking.durationMs}
+                    cut={p.thinking.cut}
+                  />
+                )}
                 {p.text && (
                   <div className="reasoning-body py-0.5 text-xs leading-relaxed text-text-muted">
                     <Markdown content={p.text} />

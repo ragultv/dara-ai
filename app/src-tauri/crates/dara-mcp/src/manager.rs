@@ -3,6 +3,7 @@
 //! The user alone decides what a tool may do (allow, ask, deny). A server's own claims (for example `readOnlyHint`) are shown
 //! but never grant anything, and a tool whose definition changes goes back to "ask".
 
+use crate::apikey::{self, ApiKeyProvider};
 use crate::client::{McpClient, RemoteTool, ServerInfo, ToolResult};
 use crate::error::McpError;
 use crate::oauth::{self, ClientSource, OAuthTokens, SignInParams, DEFAULT_SIGN_IN_TIMEOUT};
@@ -57,6 +58,16 @@ pub struct ConnectorConfig {
     pub enabled: bool,
     pub created_at: i64,
     pub oauth: OAuthInfo,
+    pub api_key: ApiKeyInfo,
+}
+
+/// The API key of an http connector. The key itself is never shown, only that there is one and which header it goes in.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyInfo {
+    pub has_key: bool,
+    /// `None`: sent as `Authorization: Bearer <key>`. A name: sent as it is in that header.
+    pub header: Option<String>,
 }
 
 /// The sign-in settings of an http connector. The secret itself is never shown, only that there is one.
@@ -81,6 +92,7 @@ impl From<ConnectorRow> for ConnectorConfig {
             enabled: r.enabled,
             created_at: r.created_at,
             oauth: OAuthInfo { client_id: r.oauth_client_id, scope: r.oauth_scope, has_secret: false },
+            api_key: ApiKeyInfo { has_key: false, header: r.api_key_header },
         }
     }
 }
@@ -93,6 +105,19 @@ pub struct OAuthInput {
     /// In a patch, an empty string keeps the secret already stored.
     pub client_secret: Option<String>,
     pub scope: Option<String>,
+}
+
+/// What the user may type for a server that wants an API key instead of a sign-in.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyInput {
+    /// The key. In a patch, empty or missing keeps the key already stored.
+    pub value: Option<String>,
+    /// The header to send it in; empty or `Authorization` means `Authorization: Bearer <key>`. In a patch, missing keeps the current one.
+    pub header: Option<String>,
+    /// In a patch: forget the key.
+    #[serde(default)]
+    pub clear: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,6 +135,9 @@ pub struct NewConnector {
     /// http connectors only
     #[serde(default)]
     pub oauth: Option<OAuthInput>,
+    /// http connectors only: an API key, for a server that does not offer a sign-in
+    #[serde(default)]
+    pub api_key: Option<ApiKeyInput>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -122,6 +150,8 @@ pub struct ConnectorPatch {
     pub env: Option<BTreeMap<String, String>>,
     /// http connectors only. `clientId: ""` forgets the client id, its secret and the tokens; `scope: ""` clears the scope.
     pub oauth: Option<OAuthInput>,
+    /// http connectors only. A value sets the key, `clear: true` forgets it, a header changes where it is sent.
+    pub api_key: Option<ApiKeyInput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -412,6 +442,20 @@ fn check_oauth(kind: Kind, o: Option<&OAuthInput>) -> Result<(Option<String>, Op
     Ok((id, secret, scope))
 }
 
+/// The API key from a form: `(key, header)`. An empty key is no key; a header without a key is dropped.
+fn check_api_key_input(kind: Kind, k: Option<&ApiKeyInput>) -> Result<(Option<String>, Option<String>), McpError> {
+    let Some(k) = k else { return Ok((None, None)) };
+    let value = k.value.as_deref().filter(|v| !v.trim().is_empty());
+    if value.is_none() && k.header.as_deref().map_or(true, |h| h.trim().is_empty()) {
+        return Ok((None, None));
+    }
+    if kind != Kind::Http {
+        return Err(McpError::Invalid("only a server address takes an API key".into()));
+    }
+    let Some(value) = value else { return Err(McpError::Invalid("the API key is empty".into())) };
+    Ok((Some(apikey::check_key(value)?), apikey::check_header_name(k.header.as_deref())?))
+}
+
 fn text_chars(content: &[Value]) -> i64 {
     content
         .iter()
@@ -473,7 +517,11 @@ impl Manager {
             }
         };
         let (oauth_client_id, oauth_secret, oauth_scope) = check_oauth(input.kind, input.oauth.as_ref())?;
+        let (api_key, api_key_header) = check_api_key_input(input.kind, input.api_key.as_ref())?;
         let id = uuid::Uuid::new_v4().to_string();
+        if let Some(key) = &api_key {
+            self.secrets.set(&secrets::api_key_key(&id), key)?;
+        }
         if let Some(sec) = &oauth_secret {
             self.secrets.set(&secrets::client_secret_key(&id), sec)?;
         }
@@ -485,6 +533,7 @@ impl Manager {
                     let _ = self.secrets.delete(&env_key(&id, done));
                 }
                 let _ = self.secrets.delete(&secrets::client_secret_key(&id));
+                let _ = self.secrets.delete(&secrets::api_key_key(&id));
                 return Err(e);
             }
             stored.push(k.clone());
@@ -503,12 +552,14 @@ impl Manager {
             oauth_scope,
             oauth_registered: false,
             oauth_redirect_uri: None,
+            api_key_header: if api_key.is_some() { api_key_header } else { None },
         };
         if let Err(e) = self.store.insert_connector(&row) {
             for k in &row.env_names {
                 let _ = self.secrets.delete(&env_key(&row.id, k));
             }
             let _ = self.secrets.delete(&secrets::client_secret_key(&row.id));
+            let _ = self.secrets.delete(&secrets::api_key_key(&row.id));
             return Err(e);
         }
         Ok(self.config_of(row))
@@ -594,7 +645,38 @@ impl Manager {
                 }
             }
         }
+        let mut key_changed = false;
+        if let Some(k) = &patch.api_key {
+            if row.kind != "http" {
+                return Err(McpError::Invalid("only a server address takes an API key".into()));
+            }
+            let had_key = self.secrets.get(&secrets::api_key_key(id))?.is_some();
+            if k.clear {
+                self.secrets.delete(&secrets::api_key_key(id))?;
+                row.api_key_header = None;
+                key_changed = had_key;
+            } else {
+                let new_header = match &k.header {
+                    Some(h) => Some(apikey::check_header_name(Some(h))?),
+                    None => None,
+                };
+                if let Some(v) = k.value.as_deref().filter(|v| !v.trim().is_empty()) {
+                    self.secrets.set(&secrets::api_key_key(id), &apikey::check_key(v)?)?;
+                    key_changed = true;
+                } else if !had_key {
+                    return Err(McpError::Invalid("the API key is empty".into()));
+                }
+                if let Some(h) = new_header {
+                    key_changed |= row.api_key_header != h;
+                    row.api_key_header = h;
+                }
+            }
+        }
         self.store.update_connector(&row)?;
+        if key_changed {
+            // the live connection was made with the old key (or none)
+            self.disconnect(id).await;
+        }
         if forget_sign_in {
             self.oauth_provider(id)?.clear()?;
         }
@@ -616,6 +698,7 @@ impl Manager {
             if row.kind == "http" {
                 let _ = self.forget_sign_in(id, true).await; // best effort: the connector is going away either way
                 self.secrets.delete(&secrets::client_secret_key(id))?;
+                self.secrets.delete(&secrets::api_key_key(id))?;
             }
         }
         self.store.delete_connector(id)?;
@@ -642,6 +725,10 @@ impl Manager {
         let id = row.id.clone();
         let mut c: ConnectorConfig = row.into();
         c.oauth.has_secret = self.secrets.get(&secrets::client_secret_key(&id)).ok().flatten().is_some();
+        c.api_key.has_key = self.secrets.get(&secrets::api_key_key(&id)).ok().flatten().is_some();
+        if !c.api_key.has_key {
+            c.api_key.header = None;
+        }
         c
     }
 
@@ -756,6 +843,11 @@ impl Manager {
             }
             Err(e) => {
                 let status = match &e {
+                    McpError::AuthRequired { .. } if self.uses_api_key(id) => ConnStatus {
+                        state: ConnState::Error,
+                        error: Some("the server did not accept the API key. Check the key in this connector's settings".into()),
+                        ..ConnStatus::idle()
+                    },
                     McpError::AuthRequired { resource_metadata, .. } => ConnStatus {
                         state: ConnState::NeedsAuth,
                         error: Some("this server needs you to sign in".into()),
@@ -949,6 +1041,7 @@ impl Manager {
     fn known_secrets(&self, id: &str) -> Vec<String> {
         let mut v = self.oauth.lock().expect("oauth").get(id).map(|p| p.secret_values()).unwrap_or_default();
         v.extend(self.secrets.get(&secrets::client_secret_key(id)).ok().flatten());
+        v.extend(self.secrets.get(&secrets::api_key_key(id)).ok().flatten());
         if let Ok(Some(row)) = self.store.get_connector(id) {
             for name in &row.env_names {
                 v.extend(self.secrets.get(&env_key(id, name)).ok().flatten());
@@ -977,7 +1070,17 @@ impl Manager {
         if let Some(p) = self.tokens.lock().expect("tokens").get(id).cloned() {
             return Ok(p);
         }
+        // an API key the user pasted wins over signing in
+        if self.secrets.get(&secrets::api_key_key(id))?.is_some() {
+            let header = self.store.get_connector(id)?.and_then(|r| r.api_key_header);
+            return Ok(Arc::new(ApiKeyProvider::new(Arc::clone(&self.secrets), secrets::api_key_key(id), header)));
+        }
         Ok(self.oauth_provider(id)? as Arc<dyn TokenProvider>)
+    }
+
+    /// True when this connector sends an API key (so a 401 means the key was refused, not that a sign-in is due).
+    fn uses_api_key(&self, id: &str) -> bool {
+        self.secrets.get(&secrets::api_key_key(id)).ok().flatten().is_some()
     }
 
     /// How long the user has to finish in the browser (five minutes unless changed; tests shorten it).

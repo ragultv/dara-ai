@@ -14,6 +14,7 @@ import { Dialog } from "../../ui/Dialog.tsx";
 import { Input } from "../../ui/Input.tsx";
 import { Skeleton } from "../../ui/Skeleton.tsx";
 import { toast } from "../../ui/Toast.tsx";
+import { ApiKeyDialog, ApiKeyRow } from "./ApiKeyForm.tsx";
 import { ConnectorAvatar } from "./ConnectorAvatar.tsx";
 import { PermissionsTab } from "./PermissionsTab.tsx";
 import { addFromCatalog } from "./addFromCatalog.ts";
@@ -230,6 +231,7 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
   const [menu, setMenu] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [showTools, setShowTools] = useState(false);
+  const [keyDialog, setKeyDialog] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const ready = connector?.status.state === "ready";
 
@@ -267,11 +269,19 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
   const clientMissing =
     needsClientId && !connector?.config.oauth.clientId && !(catalog && builtinClient(catalog));
   // a stateless server (Google's) lists its tools without a token, so "connected" can still mean "not signed in"
+  // a connector with an API key never signs in: a refused key is an error shown below, fixed by replacing the key
+  const hasKey = connector?.config.apiKey.hasKey === true;
   const wantsSignIn =
-    !!connector && (status?.state === "needs_auth" || (!!catalog && !status?.signedIn));
+    !!connector &&
+    !hasKey &&
+    catalog?.registers !== "api-key" &&
+    catalog?.registers !== "none" &&
+    (status?.state === "needs_auth" || (!!catalog && !status?.signedIn));
 
   const addIt = async () => {
     if (!catalog) return;
+    // a server with no sign-in needs its key first
+    if (catalog.registers === "api-key") return setKeyDialog(true);
     const problem = await addFromCatalog(catalog);
     if (problem) toast.show(problem, "error");
   };
@@ -288,6 +298,8 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
 
   const primary = (() => {
     if (!connector || !status) return null;
+    // a server with only an API key has nothing to connect to until a key is saved (the form below asks for it)
+    if (catalog?.registers === "api-key" && !hasKey) return null;
     if (signingIn)
       return (
         <Button variant="secondary" size="sm" onClick={() => void cancelSignIn(id)}>
@@ -502,12 +514,17 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
                       </Row>
                     )}
                     <Row label="Sign-in">
-                      {catalog
-                        ? "Required"
-                        : connector.config.kind === "http"
-                          ? "If the server asks"
-                          : "Not used"}
+                      {hasKey
+                        ? "Not used (this connector sends an API key)"
+                        : catalog
+                          ? catalog.registers === "api-key" || catalog.registers === "none"
+                            ? "Not used"
+                            : "Required"
+                          : connector.config.kind === "http"
+                            ? "If the server asks"
+                            : "Not used"}
                     </Row>
+                    <ApiKeyRow connector={connector} entry={catalog} Row={Row} />
                     {catalog && needsClientId && (
                       <ClientForm entry={catalog} connector={connector} />
                     )}
@@ -550,7 +567,15 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
                 Can send data to <span className="break-all">{host}</span>
               </Side>
             )}
-            {catalog && <Side label="Authorization">Sign-in required</Side>}
+            {catalog && (
+              <Side label="Authorization">
+                {catalog.registers === "api-key"
+                  ? "API key required"
+                  : catalog.registers === "none"
+                    ? "No sign-in needed"
+                    : "Sign-in required"}
+              </Side>
+            )}
             {catalog && catalog.categories.length > 0 && (
               <Side label="Categories">
                 <div className="flex flex-wrap gap-1.5">
@@ -570,13 +595,21 @@ export const ConnectorDetail: React.FC<{ itemKey: string; onBack: () => void }> 
         </div>
       )}
 
+      {catalog?.registers === "api-key" && (
+        <ApiKeyDialog
+          entry={catalog}
+          isOpen={keyDialog}
+          onClose={() => setKeyDialog(false)}
+          onAdded={() => setKeyDialog(false)}
+        />
+      )}
       {connector && (
         <ToolsDialog connector={connector} open={showTools} onClose={() => setShowTools(false)} />
       )}
       <Dialog
         isOpen={confirmRemove}
         title={`Remove ${item.name}?`}
-        description="Its saved permissions, call history, sign-in and stored variables are deleted from this computer."
+        description="Its saved permissions, call history, sign-in, API key and stored variables are deleted from this computer."
         onclose={() => setConfirmRemove(false)}
         actions={
           <>

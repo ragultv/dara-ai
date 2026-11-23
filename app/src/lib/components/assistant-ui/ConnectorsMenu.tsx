@@ -2,20 +2,28 @@ import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "../../ui/Icon.tsx";
 import { useConnectorsStore } from "../../stores/useConnectorsStore.ts";
 import { useChatToolsStore } from "../../stores/useChatToolsStore.ts";
+import { logoForName } from "../../connectors/catalog.ts";
 import type { ConnectorEntry, ConnectorTool } from "../../connectors/types.ts";
 
 const SETUP_HREF = "#/settings?tab=connectors";
 const NONE: string[] = [];
 
-/** A compact version of ConnectorAvatar (first letter in a rounded square) for menu rows. */
-export const SmallAvatar: React.FC<{ name: string }> = ({ name }) => (
-  <span
-    aria-hidden="true"
-    className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border bg-surface font-[family-name:var(--font-reply)] text-xs font-semibold text-text"
-  >
-    {name.trim().charAt(0).toUpperCase() || "?"}
-  </span>
-);
+/** A compact version of ConnectorAvatar (logo, or first letter) for menu rows. */
+export const SmallAvatar: React.FC<{ name: string }> = ({ name }) => {
+  const logo = logoForName(name);
+  return (
+    <span
+      aria-hidden="true"
+      className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border bg-white font-[family-name:var(--font-reply)] text-xs font-semibold text-text"
+    >
+      {logo ? (
+        <img src={logo} alt="" className="size-4" draggable={false} />
+      ) : (
+        name.trim().charAt(0).toUpperCase() || "?"
+      )}
+    </span>
+  );
+};
 
 /** One line about whether a connector can be used in chat right now. */
 function describe(

@@ -35,6 +35,8 @@ export interface ParseProblem {
   /** short, plain reason, e.g. "not valid JSON", "unknown tool foo", "missing required argument 'start'" */
   reason: string;
   raw: string;
+  /** the tool the block was for, when it was found and only its arguments were wrong (the fix message then shows its arguments) */
+  tool?: string;
 }
 
 export interface ParseResult {
@@ -90,6 +92,11 @@ export const MAX_STEPS = 12; // model turns per user message (room for a job tha
 /** Dara's own tool: wait, so a job a tool started (a design being generated) can be checked again in the same reply. */
 export const WAIT_TOOL = "dara__wait";
 export const MAX_WAIT_SECONDS = 60;
+/**
+ * Dara's own tool for a long tool list: the prompt then names each tool in one line, and the model looks up one tool's arguments here
+ * before its first call (see `shouldUseCompactList` in protocol.ts).
+ */
+export const DESCRIBE_TOOL = "dara__describe_tool";
 export const MAX_CALLS_PER_TURN = 6;
 export const MAX_RESULT_CHARS = 6000;
 export const MAX_REPAIRS = 2;

@@ -16,6 +16,8 @@ import {
 export type PanelTab = "chat" | "comments" | "history";
 
 interface Props {
+  /** a deck has no comments and its own wording; the default is a document */
+  kind?: "doc" | "slides";
   docId: string;
   docIsEmpty: boolean;
   busy: boolean;
@@ -28,8 +30,8 @@ interface Props {
   tab: PanelTab;
   onTab: (tab: PanelTab) => void;
   /** the Comments tab content, and how many threads are open (the badge on the tab) */
-  commentsSlot: React.ReactNode;
-  openThreads: number;
+  commentsSlot?: React.ReactNode;
+  openThreads?: number;
   /** text to put in the message box (and focus it) when the Ask Dara button is used */
   prefill: { text: string; nonce: number } | null;
   updatedAt: number;
@@ -45,6 +47,16 @@ const SUGGEST_FILLED = [
   "Add a short summary at the top",
   "Make it more concise",
   "Fix spelling and grammar"
+];
+const SUGGEST_DECK_EMPTY = [
+  "A 6-slide pitch for a local AI app",
+  "Quarterly team update with wins and next steps",
+  "Explain how a hash map works for beginners"
+];
+const SUGGEST_DECK_FILLED = [
+  "Add a slide about pricing",
+  "Make every slide shorter",
+  "Add a closing slide with next steps"
 ];
 
 const StepDot: React.FC<{ state: "todo" | "active" | "done" }> = ({ state }) =>
@@ -131,6 +143,7 @@ const Bubble: React.FC<{ msg: DocChatMsg; onUndo: (id: string) => void }> = ({ m
 
 /** The conversation beside a document: ask for a change, watch Dara plan and write, undo it. */
 export const DocChat: React.FC<Props> = ({
+  kind = "doc",
   docId,
   docIsEmpty,
   busy,
@@ -143,11 +156,13 @@ export const DocChat: React.FC<Props> = ({
   tab,
   onTab,
   commentsSlot,
-  openThreads,
+  openThreads = 0,
   prefill,
   updatedAt,
   onRestored
 }) => {
+  const deck = kind === "slides";
+  const tabs = deck ? (["chat", "history"] as const) : (["chat", "comments", "history"] as const);
   const messages = useDocChatStore(selectMessages(docId));
   const clearChat = useDocChatStore((s) => s.clear);
   const saveProblem = useDocChatStore((s) => s.saveProblem[docId]);
@@ -196,12 +211,12 @@ export const DocChat: React.FC<Props> = ({
 
   return (
     <aside
-      aria-label="Chat with Dara about this document"
+      aria-label={`Chat with Dara about this ${deck ? "deck" : "document"}`}
       className="flex h-full w-[360px] shrink-0 flex-col border-l border-border bg-surface"
     >
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-border pl-3 pr-2">
         <div role="tablist" aria-label="Panel" className="flex items-center gap-1">
-          {(["chat", "comments", "history"] as const).map((t) => (
+          {tabs.map((t) => (
             <button
               key={t}
               type="button"
@@ -253,12 +268,23 @@ export const DocChat: React.FC<Props> = ({
           {messages.length === 0 ? (
             <div className="flex flex-col gap-3 pt-2">
               <p className="text-xs text-text-muted">
-                {docIsEmpty
-                  ? "Describe a document. Dara plans it, then writes it one section at a time."
-                  : "Ask for a change. Dara edits only the parts you mention and leaves the rest as it is."}
+                {deck
+                  ? docIsEmpty
+                    ? "Describe a deck. Dara writes the title slide and the slides after it."
+                    : "Ask for a change. Dara changes only the slides you mention and leaves the rest as they are."
+                  : docIsEmpty
+                    ? "Describe a document. Dara plans it, then writes it one section at a time."
+                    : "Ask for a change. Dara edits only the parts you mention and leaves the rest as it is."}
               </p>
               <div className="flex flex-col items-start gap-2">
-                {(docIsEmpty ? SUGGEST_EMPTY : SUGGEST_FILLED).map((s) => (
+                {(deck
+                  ? docIsEmpty
+                    ? SUGGEST_DECK_EMPTY
+                    : SUGGEST_DECK_FILLED
+                  : docIsEmpty
+                    ? SUGGEST_EMPTY
+                    : SUGGEST_FILLED
+                ).map((s) => (
                   <button
                     key={s}
                     type="button"
@@ -323,7 +349,9 @@ export const DocChat: React.FC<Props> = ({
                 busy
                   ? "Dara is working..."
                   : docIsEmpty
-                    ? "Describe a document"
+                    ? deck
+                      ? "Describe a deck"
+                      : "Describe a document"
                     : "Describe a change"
               }
               aria-label="Message to Dara"

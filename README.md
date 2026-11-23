@@ -55,7 +55,17 @@ Long conversations stay usable: the attention work reads the conversation histor
 
 The installer is not code-signed yet, so Windows SmartScreen may warn when you run it (More info, then Run anyway). Check the SHA-256 file published with each release if you want to verify the download. There is no automatic update yet: install the new version over the old one.
 
+## Code signing policy
+
+The Windows installer is **not code-signed yet**, which is why SmartScreen warns. Signing is being prepared with the free programme of [SignPath Foundation](https://signpath.org) for open-source projects; the build workflow already supports it, and the steps are in [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md). Until then, check the SHA-256 file published with each release.
+
+- **Team and roles.** Authors, reviewers and approvers: [ragultv](https://github.com/ragultv), the repository owner. Every release is built by the public GitHub Actions workflow from the source in this repository.
+- **Privacy.** Dara has no accounts, analytics or update checks and sends your chats and files nowhere. The network is used only when you start it: downloading a model (from Hugging Face) and its Flash drafter (from this project's releases), the installer fetching Microsoft's WebView2 runtime if it is missing, and a connector you add talking to its own service. The project site's Privacy page says the same in full.
+- **Installing and removing.** The installer installs for your user account only, tells you where, and the uninstaller removes it (your models folder is kept).
+
 ## Use it from your own code
+
+The installer adds Dara's `engine` folder to your user PATH (and the uninstaller removes it), so `dara` works in any terminal you open **after** installing. A terminal that was already open needs to be reopened.
 
 ```powershell
 dara pull dara-nano

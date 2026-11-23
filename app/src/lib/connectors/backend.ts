@@ -135,7 +135,10 @@ export function createDemoBackend(): ConnectorsBackend {
           clientId: input.oauth?.clientId?.trim() || null,
           scope: input.oauth?.scope?.trim() || null,
           hasSecret: Boolean(input.oauth?.clientSecret)
-        }
+        },
+        apiKey: input.apiKey?.value?.trim()
+          ? { hasKey: true, header: input.apiKey.header?.trim() || null }
+          : { hasKey: false, header: null }
       };
       configs.set(id, config);
       status.set(id, disconnected());
@@ -163,6 +166,19 @@ export function createDemoBackend(): ConnectorsBackend {
                 // an empty secret keeps the stored one
                 hasSecret: patch.oauth.clientSecret ? true : c.oauth.hasSecret
               }
+            }
+          : {}),
+        ...(patch.apiKey !== undefined
+          ? {
+              apiKey: patch.apiKey.clear
+                ? { hasKey: false, header: null }
+                : {
+                    hasKey: patch.apiKey.value?.trim() ? true : c.apiKey.hasKey,
+                    header:
+                      patch.apiKey.header === undefined
+                        ? c.apiKey.header
+                        : patch.apiKey.header.trim() || null
+                  }
             }
           : {})
       });

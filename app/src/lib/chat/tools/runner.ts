@@ -1,7 +1,7 @@
 import { useConnectorsStore } from "../../stores/useConnectorsStore.ts";
 import { allowKey, useChatToolsStore } from "../../stores/useChatToolsStore.ts";
 import type { ToolCallResult } from "../../connectors/types.ts";
-import { waitTool, buildToolList, resultToText } from "./protocol.ts";
+import { waitTool, buildToolList, resolveTool, resultToText, toolSignature } from "./protocol.ts";
 import {
   CALL_TIMEOUT_MS,
   MAX_RESULT_CHARS,
@@ -12,6 +12,7 @@ import {
   type ParsedCall,
   type ToolResultItem,
   WAIT_TOOL,
+  DESCRIBE_TOOL,
   MAX_WAIT_SECONDS
 } from "./types.ts";
 
@@ -203,6 +204,19 @@ export async function runCalls(
 
     chat().setCall(base);
     refreshStatus(conversationId, ids);
+
+    // Dara's own lookup: answers from the tool list in hand, no connector, no approval
+    if (tool.name === DESCRIBE_TOOL) {
+      const asked = String(call.arguments["name"] ?? "").trim();
+      const listed = tools.filter((t) => t.name !== DESCRIBE_TOOL);
+      const target = asked ? resolveTool(asked, listed) : undefined;
+      if (!target)
+        return end(
+          "error",
+          `There is no tool ${asked ? `named ${asked}` : "with that name"}. Valid tool names: ${listed.map((t) => t.name).join(", ")}`
+        );
+      return end("ok", toolSignature(target), "auto");
+    }
 
     // Dara's own wait: no connector, no approval; Stop ends it at once
     if (tool.name === WAIT_TOOL) {
