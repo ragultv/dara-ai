@@ -5,7 +5,7 @@ Dara is a Windows app with its own CUDA engine that runs Gemma 4 and Qwen3.5 mod
 ### Highlights
 
 - **Long conversations no longer slow down as much.** The attention step now reads the conversation history once per group of heads instead of once per head. Dara Nano on a 4 GB laptop GPU decodes at **59 tokens/s at 16K tokens of context (was 42)** and **39 tokens/s at 65K (was 19)**.
-- **Long prompts are read faster.** Reading a 16K-token prompt is 1.2x faster on Nano and 1.65x faster on Core 4B, with identical answers and no loss in quality.
+- **Long prompts are read faster.** Reading a 16K-token prompt is 1.2x faster on Nano and 1.65x faster on Core 4B, with no loss in our quality check (the parts that round numbers differently were tested on a quality set before being turned on).
 - **Coming back to a conversation is quick.** Dara keeps recent conversations' state in RAM. Returning to a chat takes about **0.15 s to the first word instead of 1.7 to 2.1 s** on Nano, and 0.4 s instead of 3.3 to 3.8 s on Core 4B (conversations of about 1,300 tokens). A conversation you return to after restarting the app is read again.
 - **Dara Nano uses the new Flash drafter v3.** It predicts 69% of the next words correctly in held-out tests (v2: about 55%). With Flash on, Dara Nano averages **1.61x llama.cpp** over our 16 everyday tasks (v2: 1.50x), and up to 2.5x on edits.
 - **No welcome screen.** The app opens straight on Chat. If no model is downloaded yet, Chat points you to **Models**, where you download one. The models folder is a setting in Settings > Engine.
