@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Forward-only. Entry N is migration N+1; the version of a database is how many of these have run.
-const MIGRATIONS: [&str; 2] = [r#"
+const MIGRATIONS: [&str; 3] = [r#"
 CREATE TABLE connectors (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -50,6 +50,9 @@ ALTER TABLE connectors ADD COLUMN oauth_client_id TEXT;
 ALTER TABLE connectors ADD COLUMN oauth_scope TEXT;
 ALTER TABLE connectors ADD COLUMN oauth_registered INTEGER NOT NULL DEFAULT 0 CHECK (oauth_registered IN (0,1));
 ALTER TABLE connectors ADD COLUMN oauth_redirect_uri TEXT;
+"#, r#"
+-- an http connector that takes an API key: only the NAME of the header it goes in is kept here (NULL = "Authorization: Bearer"); the key is in the credential store
+ALTER TABLE connectors ADD COLUMN api_key_header TEXT;
 "#];
 
 pub const AUDIT_KEEP: i64 = 5000;
@@ -80,6 +83,8 @@ pub struct ConnectorRow {
     pub oauth_registered: bool,
     /// The redirect address registered for a dynamically registered client (so the same port can be tried again).
     pub oauth_redirect_uri: Option<String>,
+    /// The header an API key is sent in; `None` means `Authorization: Bearer <key>`. Only meaningful when a key is stored.
+    pub api_key_header: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -171,8 +176,8 @@ impl Store {
     pub fn insert_connector(&self, c: &ConnectorRow) -> Result<(), McpError> {
         self.conn.lock().expect("db").execute(
             "INSERT INTO connectors (id, name, kind, command, args_json, env_names_json, url, enabled, created_at,
-                                     oauth_client_id, oauth_scope, oauth_registered, oauth_redirect_uri)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                                     oauth_client_id, oauth_scope, oauth_registered, oauth_redirect_uri, api_key_header)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 c.id,
                 c.name,
@@ -186,7 +191,8 @@ impl Store {
                 c.oauth_client_id,
                 c.oauth_scope,
                 c.oauth_registered as i64,
-                c.oauth_redirect_uri
+                c.oauth_redirect_uri,
+                c.api_key_header
             ],
         )?;
         Ok(())
@@ -195,7 +201,7 @@ impl Store {
     pub fn update_connector(&self, c: &ConnectorRow) -> Result<(), McpError> {
         let n = self.conn.lock().expect("db").execute(
             "UPDATE connectors SET name=?2, command=?3, args_json=?4, env_names_json=?5, url=?6, enabled=?7,
-                    oauth_client_id=?8, oauth_scope=?9, oauth_registered=?10, oauth_redirect_uri=?11 WHERE id=?1",
+                    oauth_client_id=?8, oauth_scope=?9, oauth_registered=?10, oauth_redirect_uri=?11, api_key_header=?12 WHERE id=?1",
             params![
                 c.id,
                 c.name,
@@ -207,7 +213,8 @@ impl Store {
                 c.oauth_client_id,
                 c.oauth_scope,
                 c.oauth_registered as i64,
-                c.oauth_redirect_uri
+                c.oauth_redirect_uri,
+                c.api_key_header
             ],
         )?;
         if n == 0 {
@@ -240,6 +247,7 @@ impl Store {
             oauth_scope: r.get(10)?,
             oauth_registered: r.get::<_, i64>(11)? != 0,
             oauth_redirect_uri: r.get(12)?,
+            api_key_header: r.get(13)?,
         })
     }
 
@@ -247,7 +255,7 @@ impl Store {
         let conn = self.conn.lock().expect("db");
         let mut stmt = conn.prepare(
             "SELECT id, name, kind, command, args_json, env_names_json, url, enabled, created_at,
-                    oauth_client_id, oauth_scope, oauth_registered, oauth_redirect_uri
+                    oauth_client_id, oauth_scope, oauth_registered, oauth_redirect_uri, api_key_header
              FROM connectors ORDER BY created_at, id",
         )?;
         let rows = stmt.query_map([], Self::connector_from)?.collect::<Result<Vec<_>, _>>()?;
@@ -261,7 +269,7 @@ impl Store {
             .expect("db")
             .query_row(
                 "SELECT id, name, kind, command, args_json, env_names_json, url, enabled, created_at,
-                        oauth_client_id, oauth_scope, oauth_registered, oauth_redirect_uri
+                        oauth_client_id, oauth_scope, oauth_registered, oauth_redirect_uri, api_key_header
                  FROM connectors WHERE id=?1",
                 params![id],
                 Self::connector_from,

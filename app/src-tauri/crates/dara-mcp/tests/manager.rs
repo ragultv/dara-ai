@@ -29,6 +29,7 @@ fn stdio(name: &str, vars: &[(&str, &str)]) -> NewConnector {
         env: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         url: None,
         oauth: None,
+        api_key: None,
     }
 }
 
@@ -58,6 +59,7 @@ async fn adding_checks_its_input() {
         env: BTreeMap::new(),
         url: Some(u.into()),
         oauth: None,
+        api_key: None,
     };
     assert!(bad(http("http://example.com/mcp")).unwrap().contains("https"));
     assert!(bad(http("https://u:p@example.com/mcp")).is_some());
@@ -283,6 +285,7 @@ async fn a_failed_connection_is_a_state_with_a_reason() {
             env: BTreeMap::new(),
             url: Some("http://127.0.0.1:1/mcp".into()),
             oauth: None,
+            api_key: None,
         })
         .unwrap();
     assert!(e.m.connect(&http.id).await.is_err());
@@ -295,12 +298,33 @@ async fn the_database_is_versioned_and_reopens() {
     let path = dir.path().join("c.db");
     let id = {
         let m = Manager::new(&path, Arc::new(MemorySecrets::new()), dir.path()).unwrap();
-        assert_eq!(m.store().schema_version().unwrap(), 2);
+        assert_eq!(m.store().schema_version().unwrap(), 3);
         m.add(stdio("kept", &[])).unwrap().id
     };
     let m = Manager::new(&path, Arc::new(MemorySecrets::new()), dir.path()).unwrap();
     assert_eq!(m.list().unwrap()[0].config.id, id);
     let _: Value = json!(null);
+}
+
+/// A connectors.db made by an earlier version of the app (before API keys) opens, keeps its connectors, and gains the new column.
+#[tokio::test]
+async fn a_database_from_before_api_keys_is_upgraded_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("c.db");
+    let id = {
+        let m = Manager::new(&path, Arc::new(MemorySecrets::new()), dir.path()).unwrap();
+        m.add(stdio("old", &[])).unwrap().id
+    };
+    {
+        // turn it back into a version 2 database
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("ALTER TABLE connectors DROP COLUMN api_key_header; DELETE FROM schema_version WHERE version = 3;").unwrap();
+    }
+    let m = Manager::new(&path, Arc::new(MemorySecrets::new()), dir.path()).unwrap();
+    assert_eq!(m.store().schema_version().unwrap(), 3);
+    let list = m.list().unwrap();
+    assert_eq!(list[0].config.id, id);
+    assert!(!list[0].config.api_key.has_key);
 }
 
 #[cfg(windows)]
@@ -333,6 +357,7 @@ async fn a_changed_tool_goes_back_to_ask_for_an_http_connector_too() {
             env: BTreeMap::new(),
             url: Some("https://example.com/mcp".into()),
             oauth: None,
+            api_key: None,
         })
         .unwrap();
     let tool = |description: &str, title: Option<&str>| RemoteTool {

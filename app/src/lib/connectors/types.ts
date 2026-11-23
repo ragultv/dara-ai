@@ -21,6 +21,8 @@ export interface ConnectorConfig {
   createdAt: number;
   /** sign-in settings for a server that asks you to sign in (the secret itself is in the credential store) */
   oauth: { clientId: string | null; scope: string | null; hasSecret: boolean };
+  /** an API key the user pasted for a server that wants one instead of a sign-in (the key itself is in the credential store, never shown) */
+  apiKey: { hasKey: boolean; header: string | null };
 }
 
 export interface ConnectorStatus {
@@ -87,6 +89,18 @@ export interface OAuthSettings {
   scope?: string;
 }
 
+/**
+ * For a server that wants an API key instead of a sign-in. By default the key is sent as `Authorization: Bearer <key>`; a `header`
+ * name (for example "X-API-Key") sends it as it is in that header instead.
+ */
+export interface ApiKeySettings {
+  /** In a patch, "" or missing keeps the key already stored. */
+  value?: string;
+  header?: string;
+  /** In a patch: forget the key. */
+  clear?: boolean;
+}
+
 export interface AddConnectorInput {
   name: string;
   kind: ConnectorKind;
@@ -95,6 +109,7 @@ export interface AddConnectorInput {
   env?: Record<string, string>;
   url?: string;
   oauth?: OAuthSettings;
+  apiKey?: ApiKeySettings;
 }
 
 export interface ConnectorPatch {
@@ -104,6 +119,7 @@ export interface ConnectorPatch {
   env?: Record<string, string>;
   /** a clientSecret of "" keeps the one already stored */
   oauth?: OAuthSettings;
+  apiKey?: ApiKeySettings;
 }
 
 /** What the UI needs from the desktop layer. The desktop app implements it with Tauri commands; a browser tab gets a demo with sample data. */

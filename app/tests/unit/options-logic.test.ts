@@ -77,6 +77,8 @@ describe("options logic", () => {
   });
 
   it("never shows a speed that was not measured", () => {
+    // a setup that does not fit has no speed at all (the options page crashed on this)
+    expect(speedText(undefined)).toEqual({ main: "—", detail: null, isMeasured: false });
     expect(speedText({ source: "not_measured" })).toEqual({
       main: "Not measured yet",
       detail: null,

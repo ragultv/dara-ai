@@ -115,8 +115,12 @@ export interface SpeedText {
   isMeasured: boolean;
 }
 
-/** Measured speeds as the server gave them, or "Not measured yet". */
-export function speedText(speed: Speed): SpeedText {
+/**
+ * Measured speeds as the server gave them, or "Not measured yet". A setup that does not fit this GPU comes with no speed at all (the
+ * server answers `{ ok: false, error }` for it), which shows as a dash.
+ */
+export function speedText(speed: Speed | undefined): SpeedText {
+  if (!speed) return { main: "—", detail: null, isMeasured: false };
   if (speed.source !== "measured")
     return { main: "Not measured yet", detail: null, isMeasured: false };
   const parts: string[] = [];

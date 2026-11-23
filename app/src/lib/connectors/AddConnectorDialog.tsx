@@ -24,6 +24,8 @@ export const AddConnectorDialog: React.FC<{ isOpen: boolean; onClose: () => void
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [scope, setScope] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [keyHeader, setKeyHeader] = useState("");
   const [trust, setTrust] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,6 +39,8 @@ export const AddConnectorDialog: React.FC<{ isOpen: boolean; onClose: () => void
     setClientId("");
     setClientSecret("");
     setScope("");
+    setApiKey("");
+    setKeyHeader("");
     setTrust(false);
     setError(null);
     onClose();
@@ -61,6 +65,14 @@ export const AddConnectorDialog: React.FC<{ isOpen: boolean; onClose: () => void
                     ...(clientId.trim() ? { clientId: clientId.trim() } : {}),
                     ...(clientSecret ? { clientSecret } : {}),
                     ...(scope.trim() ? { scope: scope.trim() } : {})
+                  }
+                }
+              : {}),
+            ...(apiKey.trim() || keyHeader.trim()
+              ? {
+                  apiKey: {
+                    value: apiKey,
+                    ...(keyHeader.trim() ? { header: keyHeader.trim() } : {})
                   }
                 }
               : {})
@@ -173,6 +185,34 @@ export const AddConnectorDialog: React.FC<{ isOpen: boolean; onClose: () => void
                 label="Scope (optional)"
                 value={scope}
                 onChange={(e) => setScope(e.target.value)}
+                spellCheck={false}
+              />
+            </div>
+          </details>
+        )}
+        {kind === "http" && (
+          <details className="rounded-lg border border-border px-3 py-2">
+            <summary className="cursor-pointer text-xs font-semibold text-text-muted">
+              API key (only if the server wants a key instead of a sign-in)
+            </summary>
+            <div className="mt-3 space-y-3">
+              <p className="text-xs text-text-muted">
+                Paste the key the service gave you. It is kept in the Windows credential store, never
+                in Dara's database, and is sent with every request to this server.
+              </p>
+              <Input
+                label="API key"
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <Input
+                label="Header (optional)"
+                hint="Left empty, the key is sent as Authorization: Bearer <key>. Some servers want it in their own header, for example X-API-Key."
+                value={keyHeader}
+                onChange={(e) => setKeyHeader(e.target.value)}
                 spellCheck={false}
               />
             </div>

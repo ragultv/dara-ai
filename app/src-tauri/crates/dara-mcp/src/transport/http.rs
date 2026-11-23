@@ -122,7 +122,10 @@ impl HttpTransport {
         }
         if let Some(provider) = &self.token {
             if let Some(token) = provider.bearer().await {
-                rb = rb.header(AUTHORIZATION, format!("Bearer {token}"));
+                rb = match provider.header_name() {
+                    Some(name) => rb.header(name, token),
+                    None => rb.header(AUTHORIZATION, format!("Bearer {token}")),
+                };
             }
         }
         rb.send()

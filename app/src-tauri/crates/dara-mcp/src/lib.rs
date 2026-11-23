@@ -8,6 +8,7 @@
 //! - [`secrets`]: where secret values live (Windows Credential Manager, or memory in tests).
 //! - [`manager`]: connectors, connections, permission gating and audit, the API the shell calls.
 
+pub mod apikey;
 pub mod client;
 pub mod error;
 pub mod manager;
@@ -20,7 +21,7 @@ pub mod transport;
 pub use client::{McpClient, RemoteTool, ServerInfo, ToolResult, SUPPORTED_PROTOCOLS};
 pub use error::McpError;
 pub use manager::{
-    AuditEntry, CallOutcome, ConnState, ConnStatus, ConnectorConfig, ConnectorPatch, ConnectorView, Kind, Manager,
+    ApiKeyInfo, ApiKeyInput, AuditEntry, CallOutcome, ConnState, ConnStatus, ConnectorConfig, ConnectorPatch, ConnectorView, Kind, Manager,
     NewConnector, OAuthInfo, OAuthInput, Outcome, ToolView,
 };
 pub use oauth::{OAuthTokens, StoredTokens, DEFAULT_SIGN_IN_TIMEOUT};

@@ -10,8 +10,13 @@ import type { ConnectorsBackend } from "../../src/lib/connectors/types.ts";
 import { useConnectorsStore } from "../../src/lib/stores/useConnectorsStore.ts";
 import { allowKey, useChatToolsStore } from "../../src/lib/stores/useChatToolsStore.ts";
 import { loadChatTools, runCalls } from "../../src/lib/chat/tools/runner.ts";
-import { WAIT_TOOL, type ChatTool, type ParsedCall } from "../../src/lib/chat/tools/types.ts";
-import { waitTool } from "../../src/lib/chat/tools/protocol.ts";
+import {
+  DESCRIBE_TOOL,
+  WAIT_TOOL,
+  type ChatTool,
+  type ParsedCall
+} from "../../src/lib/chat/tools/types.ts";
+import { describeTool, waitTool } from "../../src/lib/chat/tools/protocol.ts";
 
 let backend: ConnectorsBackend;
 let delay: (tool: string, args: Record<string, unknown>) => number;
@@ -350,5 +355,49 @@ describe("waiting for a job", () => {
     ac.abort();
     const [item] = await run;
     expect(item!.status).toBe("skipped");
+  });
+});
+
+describe("looking a tool up", () => {
+  const rich = (): ChatTool[] => [
+    {
+      ...tool("list_events"),
+      description: "Lists events.",
+      inputSchema: {
+        type: "object",
+        properties: { range: { type: "string", description: "today or a date" } },
+        required: ["range"]
+      }
+    },
+    describeTool()
+  ];
+
+  it("answers with the tool's arguments, with no connector call and no approval", async () => {
+    const out = await runCalls(
+      "c1",
+      [call(0, DESCRIBE_TOOL, { name: "demo__list_events" })],
+      rich(),
+      new AbortController().signal
+    );
+    expect(out[0]!.status).toBe("ok");
+    expect(out[0]!.text).toContain("### demo__list_events");
+    expect(out[0]!.text).toContain("- range (string, required): today or a date");
+    expect(out[0]!.text).toContain("Call it like this");
+    expect(useChatToolsStore.getState().calls["m1:0"]?.decision).toBe("auto");
+    expect(useChatToolsStore.getState().approvals).toEqual([]);
+  });
+
+  it("finds a tool by a looser name, and says what is valid for one that is not there", async () => {
+    const out = await runCalls(
+      "c1",
+      [call(0, DESCRIBE_TOOL, { name: "list_events" }), call(1, DESCRIBE_TOOL, { name: "nope" })],
+      rich(),
+      new AbortController().signal
+    );
+    expect(out[0]!.status).toBe("ok");
+    expect(out[0]!.text).toContain("### demo__list_events");
+    expect(out[1]!.status).toBe("error");
+    expect(out[1]!.text).toContain("There is no tool named nope");
+    expect(out[1]!.text).toContain("demo__list_events");
   });
 });

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  checkApiKey,
   checkServerUrl,
   parseArgs,
   parseEnv,
@@ -62,6 +63,32 @@ describe("the add form", () => {
         required: ["q", "n", "f"]
       })
     ).toEqual({ q: "", n: 0, f: false });
+  });
+});
+
+describe("API keys", () => {
+  it("accepts a plain key and drops a pasted Bearer prefix", () => {
+    expect(checkApiKey("fc-123abc")).toBeNull();
+    expect(checkApiKey("Bearer fc-123abc", "X-API-Key")).toBeNull();
+    expect(checkApiKey("")).toMatch(/Paste/);
+    expect(checkApiKey("   ")).toMatch(/Paste/);
+    expect(checkApiKey("two words")).toMatch(/just the key/);
+    expect(checkApiKey("line\nbreak")).toMatch(/just the key/);
+    expect(checkApiKey("k".repeat(1501))).toMatch(/longer/);
+  });
+  it("checks the header name like the desktop layer", () => {
+    expect(checkApiKey("k", "")).toBeNull();
+    expect(checkApiKey("k", "X-API-Key")).toBeNull();
+    expect(checkApiKey("k", "bad header")).toMatch(/header name/);
+    expect(checkApiKey("k", "Host")).toMatch(/connection itself/);
+    expect(checkApiKey("k", "Mcp-Session-Id")).toMatch(/connection itself/);
+  });
+  it("is checked when a connector is added", () => {
+    const http = { name: "S", kind: "http" as const, url: "https://example.com/mcp" };
+    expect(validateNewConnector({ ...http, apiKey: { value: "good-key" } }, 0)).toBeNull();
+    expect(validateNewConnector({ ...http, apiKey: { value: "bad key" } }, 0)).toMatch(/just the key/);
+    expect(validateNewConnector({ ...http, apiKey: { header: "X-API-Key" } }, 0)).toMatch(/Paste/);
+    expect(validateNewConnector({ ...http, apiKey: { value: "" } }, 0)).toBeNull(); // an empty form is no key
   });
 });
 
@@ -256,6 +283,82 @@ function differences(a: unknown, b: unknown, path = "$"): string[] {
   return a === b ? [] : [`${path}: ${String(a)} vs ${String(b)}`];
 }
 
+describe("API keys in the store (demo backend)", () => {
+  beforeEach(() => {
+    setBackend(createDemoBackend());
+    useConnectorsStore.setState({ entries: [], tools: {}, audit: {}, busy: {}, error: null });
+  });
+
+  it("keeps only the fact that a key exists, and lets it be replaced and removed", async () => {
+    const st = () => useConnectorsStore.getState();
+    expect(
+      await st().add({
+        name: "Keyed",
+        kind: "http",
+        url: "https://example.com/mcp",
+        apiKey: { value: "secret-key-1", header: "X-API-Key" }
+      })
+    ).toBeNull();
+    const id = st().entries[0]!.config.id;
+    expect(st().entries[0]!.config.apiKey).toEqual({ hasKey: true, header: "X-API-Key" });
+    expect(JSON.stringify(st().entries)).not.toContain("secret-key-1");
+
+    // changing only the header keeps the key
+    expect(await st().update(id, { apiKey: { header: "X-Token" } })).toBeNull();
+    expect(st().entries[0]!.config.apiKey).toEqual({ hasKey: true, header: "X-Token" });
+    expect(await st().update(id, { apiKey: { value: "secret-key-2" } })).toBeNull();
+    expect(st().entries[0]!.config.apiKey.hasKey).toBe(true);
+
+    expect(await st().update(id, { apiKey: { clear: true } })).toBeNull();
+    expect(st().entries[0]!.config.apiKey).toEqual({ hasKey: false, header: null });
+  });
+
+  it("a connector added without a key has none", async () => {
+    await useConnectorsStore.getState().add({ name: "Plain", kind: "http", url: "https://example.com/mcp" });
+    expect(useConnectorsStore.getState().entries[0]!.config.apiKey).toEqual({
+      hasKey: false,
+      header: null
+    });
+  });
+
+  it("adds an open catalog connector with no sign-in and no key, and connects it at once", async () => {
+    const { addFromCatalog } = await import("../../src/lib/features/connectors/addFromCatalog.ts");
+    const { CATALOG } = await import("../../src/lib/connectors/catalog.ts");
+    const open = CATALOG.find((c) => c.id === "context7")!;
+    expect(open.registers).toBe("none");
+    expect(await addFromCatalog(open)).toBeNull();
+    const e = useConnectorsStore.getState().entries[0]!;
+    expect(e.config.url).toBe(open.url);
+    expect(e.config.apiKey).toEqual({ hasKey: false, header: null });
+    expect(e.config.oauth.clientId).toBeNull();
+    await vi.waitFor(() => expect(useConnectorsStore.getState().entries[0]!.status.state).toBe("ready"));
+  });
+
+  it("adds a catalog connector that needs a key only with one, in the header the catalog names", async () => {
+    const { addFromCatalog } = await import("../../src/lib/features/connectors/addFromCatalog.ts");
+    const entry = {
+      id: "keyed",
+      name: "Keyed service",
+      publisher: "Example",
+      tagline: "t",
+      about: "a",
+      url: "https://keyed.example.com/mcp",
+      categories: [],
+      registers: "api-key" as const,
+      keyHeader: "X-API-Key",
+      status: "available" as const
+    };
+    expect(await addFromCatalog(entry)).toMatch(/API key/);
+    expect(await addFromCatalog(entry, "   ")).toMatch(/API key/);
+    expect(useConnectorsStore.getState().entries).toHaveLength(0);
+    expect(await addFromCatalog(entry, "k-123")).toBeNull();
+    expect(useConnectorsStore.getState().entries[0]!.config.apiKey).toEqual({
+      hasKey: true,
+      header: "X-API-Key"
+    });
+  });
+});
+
 describe("the demo backend has the same shapes as the desktop layer", () => {
   it("matches docs/ui/samples/connectors.json", async () => {
     const recorded = JSON.parse(
@@ -291,8 +394,30 @@ describe("the connector catalog", () => {
         expect(c.access?.length).toBeGreaterThan(0);
       }
     }
+    // a server with no sign-in says where to get a key
+    for (const c of CATALOG.filter((x) => x.registers === "api-key"))
+      expect(c.keyHelp?.length || c.keyUrl).toBeTruthy();
     // read-only is always the first (default) level
     for (const c of CATALOG.filter((x) => x.access)) expect(c.access![0]!.id).toBe("read");
+  });
+
+  it("has a logo and a description for every connector, kept out of the code", async () => {
+    const { CATALOG, logoForName } = await import("../../src/lib/connectors/catalog.ts");
+    for (const c of CATALOG) {
+      expect(c.logo, `${c.name} has no logo`).toBeTruthy();
+      expect(logoForName(c.name)).toBe(c.logo);
+      expect(c.about.length).toBeGreaterThan(40);
+      expect(c.tagline.length).toBeGreaterThan(10);
+    }
+    expect(CATALOG.map((c) => c.id)).toEqual(
+      expect.arrayContaining(["firecrawl", "context7", "deepwiki", "huggingface", "todoist", "tavily", "airtable"])
+    );
+    // open servers need nothing from the user; the rest sign in or take a key, so none of them is left without a way in
+    for (const c of CATALOG.filter((x) => x.registers === "none")) {
+      expect(c.access).toBeUndefined();
+      expect(c.clientHelp).toBeUndefined();
+    }
+    expect(logoForName("Some custom server")).toBeUndefined();
   });
 
   it("finds the catalog entry of a connector by its address", async () => {

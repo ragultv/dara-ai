@@ -65,6 +65,7 @@ async fn what_the_ui_receives_matches_the_recorded_sample() {
             env: BTreeMap::new(),
             url: None,
             oauth: None,
+            api_key: None,
         })
         .unwrap();
     m.connect(&c.id).await.unwrap();

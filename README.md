@@ -57,6 +57,8 @@ The installer is not code-signed yet, so Windows SmartScreen may warn when you r
 
 ## Use it from your own code
 
+The installer adds Dara's `engine` folder to your user PATH (and the uninstaller removes it), so `dara` works in any terminal you open **after** installing. A terminal that was already open needs to be reopened.
+
 ```powershell
 dara pull dara-nano
 dara serve --model dara-nano
