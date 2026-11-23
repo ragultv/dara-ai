@@ -199,6 +199,13 @@ impl ServerManager {
         let mut cmd = Command::new(binary);
         cmd.args(settings.serve_args());
         cmd.env("DARA_API_KEY", &key);
+        // The app is a GUI program with no console, so Windows would open a new terminal window for the console-based engine.
+        // The engine runs in the background: its window is never created, and the app is the only thing the user sees.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
 
         let child = cmd.spawn().map_err(|e| {
             format!(
