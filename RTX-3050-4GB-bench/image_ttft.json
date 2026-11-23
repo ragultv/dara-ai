@@ -1,0 +1,91 @@
+{
+ "machine": {
+  "os": "Windows-11-10.0.26300-SP0",
+  "cpu": "AMD Ryzen 7 6800HS with Radeon Graphics",
+  "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "driver": "621.24",
+  "vram": "4096 MiB",
+  "gpu_power_limit": "[N/A]",
+  "ram_gb": 15.3,
+  "power": "AC"
+ },
+ "llama_ngl": {
+  "4b": "99",
+  "nano": "99"
+ },
+ "results": {
+  "4b": {
+   "dara": {
+    "full 1920x1080 (cap 1024)": {
+     "image_tokens": 1008,
+     "prompt_tokens": 1034,
+     "preprocess_s": 0.043,
+     "encode_s": 2.248,
+     "prefill_s": 1.456,
+     "ttft_s": 3.747,
+     "answer": "INVOICE 7731"
+    },
+    "full 1920x1080 (cap 400)": {
+     "image_tokens": 390,
+     "prompt_tokens": 416,
+     "preprocess_s": 0.031,
+     "encode_s": 0.536,
+     "prefill_s": 0.715,
+     "ttft_s": 1.282,
+     "answer": "INVOICE 7731"
+    },
+    "oprel-preprocessed 853x480 (cap 1024)": {
+     "image_tokens": 405,
+     "prompt_tokens": 431,
+     "preprocess_s": 0.014,
+     "encode_s": 0.56,
+     "prefill_s": 0.775,
+     "ttft_s": 1.349,
+     "answer": "INVOICE 7731"
+    }
+   },
+   "llama.cpp": {
+    "full 1920x1080": {
+     "ttft_s": 9.332,
+     "answer": "INVOICE 7731"
+    },
+    "oprel-preprocessed 853x480": {
+     "ttft_s": 1.569,
+     "answer": "INVOICE 7731"
+    }
+   }
+  },
+  "nano": {
+   "dara": {
+    "full 1920x1080": {
+     "image_tokens": 264,
+     "prompt_tokens": 287,
+     "preprocess_s": 0.029,
+     "encode_s": 0.49,
+     "prefill_s": 0.34,
+     "ttft_s": 0.859,
+     "answer": "INVOICE 7731"
+    },
+    "oprel-preprocessed 853x480": {
+     "image_tokens": 264,
+     "prompt_tokens": 287,
+     "preprocess_s": 0.016,
+     "encode_s": 0.507,
+     "prefill_s": 0.35,
+     "ttft_s": 0.873,
+     "answer": "INVOICE 7731"
+    }
+   },
+   "llama.cpp": {
+    "full 1920x1080": {
+     "ttft_s": 1.358,
+     "answer": "INVOICE 7731"
+    },
+    "oprel-preprocessed 853x480": {
+     "ttft_s": 0.259,
+     "answer": "INVOICE 7731"
+    }
+   }
+  }
+ }
+}

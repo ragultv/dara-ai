@@ -29,7 +29,7 @@ concurrency:
 env:
   CUDA_VERSION: "13.1.1"
   CUDA_ROOT: C:\cuda
-  DRAFTER_TAG: flash-drafters-v2   # release whose assets are the Flash drafter files bundled into every build
+  DRAFTER_TAG: flash-drafters-v3   # release whose assets are the Flash drafter files bundled into every build
 
 jobs:
   windows-cuda:
@@ -86,14 +86,14 @@ jobs:
           Copy-Item build\cuda\dara.exe "release\$name\"
           Copy-Item docs\BENCHMARKING.md "release\$name\"
           gh release download $env:DRAFTER_TAG --repo $env:GITHUB_REPOSITORY --pattern "*.dflash" --dir "release\$name\flash"
-          foreach ($f in "drafter_4b_v2.dflash", "drafter_nano_v2.dflash") {
+          foreach ($f in "drafter_4b_v2.dflash", "drafter_nano_v3.dflash") {
             if (-not (Test-Path "release\$name\flash\$f")) { throw "Flash drafter $f missing: attach it to the $env:DRAFTER_TAG release" }
           }
           @(
             "Dara $tag ($env:GITHUB_SHA)",
             "Windows x64, CUDA $env:CUDA_VERSION (runtime linked statically). GPU code for sm_75 sm_86 sm_89 sm_120 + PTX.",
             "Needs an NVIDIA GPU (Turing / GTX 16xx or newer) and a driver that supports CUDA 13 (R580 or newer).",
-            "flash\drafter_4b_v2.dflash, flash\drafter_nano_v2.dflash: Flash speculative decoding for Core 4B and Nano (--flash <file> --spec 4 --flash-min-p 0.6).",
+            "flash\drafter_4b_v2.dflash, flash\drafter_nano_v3.dflash: Flash speculative decoding for Core 4B and Nano (--flash <file> --spec 4 --flash-min-p 0.6).",
             "Usage: dara.exe --gguf <model.gguf> --chat ""Hello""   |   see BENCHMARKING.md"
           ) | Set-Content "release\$name\README.txt"
           Compress-Archive -Path "release\$name\*" -DestinationPath "release\$name.zip" -Force
@@ -167,7 +167,7 @@ jobs:
       - name: Check the engine is in place
         shell: pwsh
         run: |
-          foreach ($f in "dara.exe", "flash\drafter_4b_v2.dflash", "flash\drafter_nano_v2.dflash") {
+          foreach ($f in "dara.exe", "flash\drafter_4b_v2.dflash", "flash\drafter_nano_v3.dflash") {
             if (-not (Test-Path "app\src-tauri\resources\engine\$f")) { throw "$f missing from the staged engine" }
           }
 

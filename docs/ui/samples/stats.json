@@ -47,7 +47,7 @@
   "last_request": null,
   "model": {
     "family": "gemma4",
-    "flash": "d:\\darap-ai\\build\\flash\\drafter_nano_v2.dflash",
+    "flash": "d:\\darap-ai\\build\\flash\\drafter_nano_v3.dflash",
     "flash_note": "",
     "hidden": 1536,
     "id": "dara-nano",

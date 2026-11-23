@@ -439,6 +439,61 @@ void QwenModel::restore_device(const DeviceCheckpoint& c) {
     images_.erase(std::remove_if(images_.begin(), images_.end(), [&](const ImageSpan& sp) { return sp.start >= pos_; }), images_.end());
 }
 
+bool QwenModel::save_host(const DeviceCheckpoint& c, HostCheckpoint& out) {
+    if (!c.valid || c.layer_pos.size() != states_.size() || resident_ != static_cast<int>(states_.size()) || c.pos == 0) return false;
+    const size_t n = c.pos;
+    size_t kv_total = 0;
+    for (const GpuLayerState& s : states_) {
+        if (s.kind == LayerKind::DeltaNet) continue;
+        const size_t b = kv_used_bytes(s.kv_format, static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim, n);
+        if (b == 0 || n > s.kv_cap || n > s.pos) return false;   // an unsupported format, or the K/V is no longer there
+        kv_total += b;
+    }
+    cudaDeviceSynchronize();
+    out.pos = n;
+    out.layer_pos = c.layer_pos;
+    out.conv.assign(states_.size(), {});
+    out.S.assign(states_.size(), {});
+    out.kv.resize(kv_total);
+    size_t off = 0;
+    for (size_t i = 0; i < states_.size(); ++i) {
+        GpuLayerState& s = states_[i];
+        if (s.kind == LayerKind::DeltaNet) { out.conv[i] = c.conv[i].get(); out.S[i] = c.S[i].get(); continue; }
+        const size_t w = static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim;
+        if (!kv_export({&s.Kc, &s.Vc, &s.Kq, &s.Vq, &s.Kn, &s.Vn, &s.Kr, &s.Krs}, s.kv_format, w, n, out.kv.data() + off)) { out = HostCheckpoint(); return false; }
+        off += kv_used_bytes(s.kv_format, w, n);
+    }
+    return true;
+}
+
+bool QwenModel::restore_host(const HostCheckpoint& h) {
+    if (h.layer_pos.size() != states_.size() || resident_ != static_cast<int>(states_.size()) || h.pos == 0) return false;
+    cudaDeviceSynchronize();
+    size_t off = 0;
+    for (size_t i = 0; i < states_.size(); ++i) {
+        GpuLayerState& s = states_[i];
+        if (s.kind == LayerKind::DeltaNet) {
+            if (h.conv[i].size() != s.conv_state.n || h.S[i].size() != s.S.n) return false;
+            continue;
+        }
+        const size_t w = static_cast<size_t>(cfg_.kv_heads) * cfg_.head_dim;
+        if (h.pos > s.kv_cap || off + kv_used_bytes(s.kv_format, w, h.pos) > h.kv.size()) return false;
+        if (!kv_import({&s.Kc, &s.Vc, &s.Kq, &s.Vq, &s.Kn, &s.Vn, &s.Kr, &s.Krs}, s.kv_format, w, h.pos, h.pos, h.kv.data() + off)) return false;
+        off += kv_used_bytes(s.kv_format, w, h.pos);
+    }
+    for (size_t i = 0; i < states_.size(); ++i) {
+        GpuLayerState& s = states_[i];
+        s.pos = h.layer_pos[i];
+        if (s.kind != LayerKind::DeltaNet) continue;
+        cuda_check(cudaMemcpy(s.conv_state.p, h.conv[i].data(), s.conv_state.n * sizeof(float), cudaMemcpyHostToDevice), "restore conv");
+        cuda_check(cudaMemcpy(s.S.p, h.S[i].data(), s.S.n * sizeof(float), cudaMemcpyHostToDevice), "restore S");
+    }
+    pos_ = h.pos;
+    cpu_current_ = false;
+    images_.clear();
+    return true;
+}
+
 void QwenModel::reset() {
     for (GpuLayerState& s : states_) {
         s.pos = 0;

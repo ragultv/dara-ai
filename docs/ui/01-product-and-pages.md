@@ -19,8 +19,7 @@ Every page needs these states: loading (skeleton, not spinner-only), empty, erro
 ### 0. Startup and first run
 
 - The app starts the sidecar server (see 03). While `GET /health` fails, show a splash with the Dara mark and "Starting the engine".
-- If no model is installed (`GET /v1/models`, none with `status: installed`), show onboarding: three cards (Nano / Core 4B / Pro 9B) with `description`, `download_size_mb`, `fits_gpu` and a "Recommended" badge picked from `fits_gpu`; one primary button "Download" (`POST /dara/models/pull`) with progress (bytes, %, MB/s, ETA) and a cancel.
-- After the download, load it (`POST /dara/models/load`) and show load progress from `GET /dara/load` (poll every 300 ms); then go to Chat.
+- There is no welcome or first-run screen. If no model is installed (`GET /v1/models`, none with `status: installed`), Chat shows a short note with a "Go to Models" button. Downloading (`POST /dara/models/pull`, with progress and cancel) and loading (`POST /dara/models/load`, progress from `GET /dara/load`) happen on the Models page.
 - If the server fails to start, show the stderr tail and buttons: "Try again", "Copy details".
 
 ### 1. Chat

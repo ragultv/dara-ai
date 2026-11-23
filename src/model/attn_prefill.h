@@ -8,6 +8,14 @@ namespace dara::model {
 
 constexpr int kPrefillAttnMinTokens = 48;
 
+// int8 queries x int8 keys (dp4a) for the attention scores of Q8 caches (hd % 256 == 0), only on GPUs where the tensor-core attention is not used. LOSSY (8-bit
+// queries), default on. mode: -1 = DARA_ATTN_QK_INT8 (default on), 0 = off, 1 = on. See attn_prefill.cu.
+void attn_prefill_set_qk_int8(int mode);
+
+// Grouped-query prefill: the query heads that share a K/V head run as rows of one GEMM pair instead of one pair per head (models with 2+ K/V heads; Nano's single
+// K/V head always did). Bitwise identical output. mode: -1 = DARA_ATTN_GROUP_PREFILL (default on), 0 = off, 1 = on.
+void attn_prefill_set_group(int mode);
+
 // Scratch floats needed for a chunk of n tokens starting at absolute position pos0 (window 0 = full causal attention).
 // Scratch (floats) for attn_prefill_cuda. Bounded (64 MiB) at long contexts: the kernel then takes fewer query tokens per sub-chunk.
 size_t attn_prefill_scratch_floats(int n, int pos0, int window, int heads, int kv_heads = 1);

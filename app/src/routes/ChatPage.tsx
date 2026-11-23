@@ -2,7 +2,9 @@ import React, { useRef, useEffect } from "react";
 import { useChatStore, type Conversation } from "../lib/stores/useChatStore.ts";
 import { useModelsStore } from "../lib/stores/useModelsStore.ts";
 import { useServerStore } from "../lib/stores/useServerStore.ts";
+import { useRouter } from "../lib/router/useRouter.ts";
 import { Icon } from "../lib/ui/Icon.tsx";
+import { Button } from "../lib/ui/Button.tsx";
 import { Composer } from "../lib/components/assistant-ui/Composer.tsx";
 import { MessagePair } from "../lib/components/assistant-ui/MessagePair.tsx";
 import { toast } from "../lib/ui/Toast.tsx";
@@ -48,6 +50,11 @@ export const ChatPage: React.FC = () => {
   const activeConv = getActiveConversation();
   const loadedModel = useModelsStore((s) => s.models.find((m) => m.dara.loaded) ?? null);
   const serverLoaded = useServerStore((s) => s.loadedModel);
+  // the list is known (not still loading) and nothing is downloaded: point the user to the Models page
+  const noModelInstalled = useModelsStore(
+    (s) => s.models.length > 0 && !s.models.some((m) => m.dara.status === "installed")
+  );
+  const navigate = useRouter((s) => s.navigate);
 
   const setupVisionThenRetry = async (messageId: string) => {
     if (!loadedModel) return;
@@ -173,8 +180,27 @@ export const ChatPage: React.FC = () => {
                 </p>
               </div>
 
+              {noModelInstalled && (
+                <div
+                  role="status"
+                  className="w-full rounded-xl border border-border bg-surface p-4 space-y-3"
+                >
+                  <p className="text-xs text-text-muted leading-relaxed">
+                    No model is downloaded yet. Open Models, pick one that fits your graphics card
+                    and download it. Then come back here to chat.
+                  </p>
+                  <Button variant="primary" size="sm" onClick={() => navigate("models")}>
+                    Go to Models
+                  </Button>
+                </div>
+              )}
+
               {/* Starter Suggestions */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full pt-2">
+              <div
+                className={`grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full pt-2 ${
+                  noModelInstalled ? "hidden" : ""
+                }`}
+              >
                 {[
                   "Explain quantum entanglement in plain English",
                   "Write a fast Python merge sort algorithm",
