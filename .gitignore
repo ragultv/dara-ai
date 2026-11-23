@@ -9,3 +9,7 @@ release/
 # engine files staged for the installer (tools/stage_engine.ps1)
 app/src-tauri/resources/engine/*
 !app/src-tauri/resources/engine/README.txt
+
+# benchmark results from individual test laptops (kept locally, not in the repository)
+/RTX-3050-4GB-bench/
+/RTX-4050-6GB-bench/
