@@ -27,7 +27,7 @@ app\tools\build_installer.bat        # stages the engine (tools\stage_engine.ps1
 
 Set `CARGO_TARGET_DIR` to build elsewhere and leave a running `tauri dev` alone. The installer lands in `<target>\release\bundle\nsis\`.
 
-On GitHub: `.github/workflows/build-release.yml` has two jobs. `windows-cuda` builds the engine (all supported architectures) and keeps `dara.exe` and the drafters as an artifact; `installer` builds the app from them (tests first) and uploads the installer. A push to `main` (or a manual run with "release" ticked) publishes release `b<run number>` with the engine zip and the installer, each with a `.sha256`.
+On GitHub: `.github/workflows/build-release.yml` has two jobs. `windows-cuda` builds the engine (all supported architectures) and keeps `dara.exe` and the drafters as an artifact; `installer` builds the app from them (tests first) and uploads the installer. A push to `main` (or a manual run with "release" ticked) publishes release `b<run number>` with the engine zip and the installer, each with a `.sha256`. A manual run can also tick "sign" to sign the installer without publishing (SignPath's test policy).
 
 ## Checked
 
@@ -35,7 +35,7 @@ Built the installer, installed it silently into a chosen folder, started the ins
 
 ## Not done yet
 
-- **Code signing.** The installer is unsigned, so Windows SmartScreen warns on download. Needs a code-signing certificate (set `bundle.windows.certificateThumbprint` or sign in the workflow).
+- **Code signing.** The installer is still unsigned, so Windows SmartScreen warns on download. The workflow is prepared to sign it through SignPath Foundation's free programme for open-source projects (it signs once the repository variable `SIGNPATH_ORGANIZATION_ID` is set; nothing changes before). What is left is applying to SignPath and setting the secret and variables: [CODE_SIGNING.md](CODE_SIGNING.md). The signing step itself has not run yet.
 - **Auto-update.** Users reinstall to update. Tauri's updater plugin needs a signing key and a hosted update manifest.
 - **The release workflow's new job has not run on GitHub yet.** First run: use "Run workflow" without ticking "release", and check the `dara-installer` artifact.
 - **Clean-machine test.** Tried on the development machine only. Try a Windows install that never had Dara, WebView2 absent (the installer downloads it), and a machine without an NVIDIA card.
