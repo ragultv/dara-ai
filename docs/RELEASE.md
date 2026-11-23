@@ -12,9 +12,9 @@ What users get: one file, `Dara_<version>_x64-setup.exe` (about 125 MB). It inst
 ```
 
 - **Per user**: installs to `%LOCALAPPDATA%\Dara` by default, no administrator prompt. The installer lets the user pick another folder; `Dara_..._setup.exe /S /D=<folder>` installs silently there.
-- **Models folder** is a different choice, made in onboarding (`StorageChooser`): a drive, then `Dara\models` on it. Default `%LOCALAPPDATA%\Dara\models`. It is kept when the app is uninstalled.
+- **Models folder**: default `%LOCALAPPDATA%\Dara\models`; change it in Settings > Engine. There is no welcome screen: the app opens on Chat, and models are downloaded from the Models page. The folder is kept when the app is uninstalled.
 - The app finds the engine in `engine\` next to itself (`installed_engine` in `app/src-tauri/src/sidecar.rs`); a development run still finds `build\cuda\dara.exe`.
-- Needs an NVIDIA GPU from Turing (GTX 16xx / RTX 20xx) on and a driver with CUDA 13 (R580+). Onboarding says plainly when the engine did not start, there is no NVIDIA card, or it is older than Turing (`startupCheck.ts`).
+- Needs an NVIDIA GPU from Turing (GTX 16xx / RTX 20xx) on and a driver with CUDA 13 (R580+). The Models page says plainly when the engine did not start, there is no NVIDIA card, or it is older than Turing (`startupCheck.ts`).
 
 ## Building it
 
