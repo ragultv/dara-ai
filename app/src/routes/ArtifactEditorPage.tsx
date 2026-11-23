@@ -5,6 +5,7 @@ import { useArtifactsStore } from "../lib/stores/useArtifactsStore.ts";
 import { useModelsStore } from "../lib/stores/useModelsStore.ts";
 import { useCommentsStore } from "../lib/stores/useCommentsStore.ts";
 import { setMarkdown, useDocEditor } from "../lib/artifacts/useDocEditor.ts";
+import { DeckView } from "../lib/slides/DeckView.tsx";
 import { DocToolbar } from "../lib/artifacts/DocToolbar.tsx";
 import { TableControls } from "../lib/artifacts/TableControls.tsx";
 import { SelectionMenu } from "../lib/artifacts/SelectionMenu.tsx";
@@ -23,7 +24,7 @@ import {
   mentionsDara,
   type Thread
 } from "../lib/artifacts/threads.ts";
-import { useDocAssistant } from "../lib/artifacts/useDocAssistant.ts";
+import { editorTarget, useDocAssistant } from "../lib/artifacts/useDocAssistant.ts";
 import { displayTitle, exportFileName, relativeTime } from "../lib/artifacts/format.ts";
 import { Icon } from "../lib/ui/Icon.tsx";
 import { Button } from "../lib/ui/Button.tsx";
@@ -88,7 +89,8 @@ const DocView: React.FC = () => {
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const { busy, send, stop, undo } = useDocAssistant(editor, doc.id);
+  const target = useMemo(() => (editor ? editorTarget(editor) : null), [editor]);
+  const { busy, send, stop, undo } = useDocAssistant(target, doc.id);
 
   // the comments belong to the document: read them when it opens, redraw the highlights when they change
   const comments = useCommentsStore((s) => s.items);
@@ -524,5 +526,5 @@ export const ArtifactEditorPage: React.FC = () => {
       </div>
     );
   }
-  return <DocView key={doc.id} />;
+  return doc.kind === "slides" ? <DeckView key={doc.id} /> : <DocView key={doc.id} />;
 };

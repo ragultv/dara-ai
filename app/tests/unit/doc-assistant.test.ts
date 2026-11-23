@@ -52,6 +52,13 @@ describe("parseOps", () => {
       { op: "insert", n: 3, text: "hello" }
     ]);
   });
+  it("reads 'before N' as after N-1, for an insert only", () => {
+    expect(parseOps("@insert before 4\nnew")).toEqual([{ op: "insert", n: 3, text: "new" }]);
+    expect(parseOps("@insert before 1\nnew")).toEqual([{ op: "insert", n: 0, text: "new" }]);
+    expect(parseOps("@insert after 4\nnew")).toEqual([{ op: "insert", n: 4, text: "new" }]);
+    expect(parseOps("@replace before 4\nnew")).toEqual([{ op: "replace", n: 4, text: "new" }]);
+    expect(parseOps("@delete after 2")).toEqual([{ op: "delete", n: 2 }]);
+  });
   it("does not read an @ line inside a code fence as an operation", () => {
     const ops = parseOps("@replace 1\n```\n@delete 2\n```");
     expect(ops).toEqual([{ op: "replace", n: 1, text: "```\n@delete 2\n```" }]);

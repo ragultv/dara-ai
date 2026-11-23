@@ -2,13 +2,13 @@
 
 Documents (now) and slides and designs (later) that you write yourself or ask Dara to write, kept on this computer. The gallery is the **Artifacts** page; a document opens in its own editor. The model is the local one already loaded for chat; nothing is sent anywhere.
 
-Status: **Milestone 1, documents (with the chat panel).** Slides and designs show as "Soon" tiles and use the same table when they arrive.
+Status: **documents (with the chat panel) and slides.** Designs show as a "Soon" tile and will use the same table.
 
 ## What the user sees
 
 | Screen | Route | What it does |
 | --- | --- | --- |
-| Gallery | `#/artifacts` | "Make something new" tiles (Docs works; Slides and Design say Soon), search, and a card per artifact: a shrunken preview of the start of the document, its title, and "Docs · 5 minutes ago". A card's menu duplicates or deletes (delete is confirmed). An empty gallery explains itself and offers New doc. |
+| Gallery | `#/artifacts` | "Make something new" tiles (Docs and Slides work; Design says Soon), search, and a card per artifact: a shrunken preview of the start of the document (the first slide, in the deck's look, for a deck), its title, and "Docs · 5 minutes ago". A card's menu duplicates or deletes (delete is confirmed). An empty gallery explains itself and offers New doc. |
 | Document | `#/artifacts/<uuid>` | Back arrow, the title menu (Rename, Duplicate, Export as Markdown, Delete, and when it was last updated), a large serif title, the editor with a floating formatting bar, and the **chat** panel on the right (hide or show it with "Show chat"). Saved by itself a moment after the last keystroke ("Saving...", "Saved", or "Not saved" in red). |
 
 The editor is what-you-see-is-what-you-get: headings 1 to 3, bold, italic, inline code, bulleted, numbered and task lists, tables, code blocks, quotes and dividers. The page is set in the reply font from Settings > Appearance (a serif by default), like Dara's chat answers.
@@ -54,9 +54,33 @@ Common to both:
 - With no model loaded the panel says so and offers a button to the Models page.
 - Raw Markdown from the model goes through the same cleaning as before (`cleanEditResult`: a fence around the whole answer, a lead-in line and `<document>` tags are removed).
 
+## Slides
+
+A deck is an artifact of kind `slides`. It opens in its own page (`app/src/lib/slides/`), not the document editor, but uses the same table, version history, chat storage, gallery and Markdown-only rule.
+
+**Format.** One Markdown text. A line with only `---`, between blank lines, ends a slide (a `---` straight under a line of text is a heading underline, and one inside a code fence is code). An optional first line `[//]: # (theme: midnight)` sets the look of the whole deck; it is a Markdown comment, so it shows nowhere else, and it is kept out of what the model sees and put back afterwards. Themes: Paper (the default, never written), Midnight, Ocean, Sunrise. A deck of one blank slide with the default look is the empty string. `lib/slides/deck.ts` reads, writes and changes decks and is unit-tested (`tests/unit/slides-deck.test.ts`).
+
+**Layout** comes from what a slide holds, not from positions: a lone `#` heading with at most one plain line under it is a **title** slide, a lone `##` heading is a **section** slide (both centred and large), anything else is a **content** slide, written from the top left. Every size is in container units (`cqw`), so the same slide is a thumbnail, the editing page, the full screen and a printed page.
+
+**The page.** A slide list on the left (thumbnails; drag to reorder, or use the buttons on a slide to move, duplicate or delete it; deleting keeps a "Before deleting slide N" version), the slide being edited in the middle (the slide itself is the editor: the same Tiptap and Markdown as a document, one editor per slide so each keeps its own undo history, and no horizontal rule because that line ends a slide), the theme picker, **Present**, and the same Dara panel as a document (Chat and History; no Comments). Images and video are added, pasted or dropped like in a document and kept as `dara-asset:<id>`.
+
+**Present** fills the window (and the screen: the desktop app uses the window's full screen, a browser the page's) with the slide that is open. Right arrow, Space, Enter, PageDown or a click go forward; left arrow, PageUp, Backspace or a click on the left third go back; Home and End jump; Escape ends. Controls and a progress bar show while the mouse moves.
+
+**Export.** PDF: one 16:9 page per slide (1280 x 720, in the deck's colours) through the print dialog, like a document. Markdown: the stored text. There is no PowerPoint export yet.
+
+**Dara and decks.** The model is told it writes slides, with a fixed shape small models follow (a title slide, then `##` slides of 3 to 5 short bullets, a closing slide).
+- *An empty deck* is written in one request and streams into the page slide by slide. An answer with no heading and no slide break (an apology, a question) is not a deck and changes nothing.
+- *An existing deck* is changed with the document's operations (`@replace`, `@insert`, `@delete`), but the numbered units are **whole slides**, not paragraphs, so the model never has to place a `---` line. Besides `@insert N` (after slide N) it may write `@insert before N` or `@insert after N`; a model copies the words of "before the last slide" more reliably than it subtracts one.
+- A small model that has said what it was asked sometimes keeps going and writes the rest of the deck back as new slides; an insert whose text holds a slide that is already there, or repeats the operation before it, is dropped (`dropRepeats`).
+- There are no comments in a deck, so a question the model wanted to ask is not kept. Each answer is one Undo, and a "Before Dara: ..." version is saved first, exactly as in a document.
+
+Measured with the real engine (Dara Nano, 3 tries each of 3 requests, judged on what happened to the deck, not on whether the answer parsed): writing a deck gave a well-formed deck in 8 of 9 (the other had a closing line with no `##` heading, which still displays correctly); editing did what was asked in 9 of 9 once the repeat filter and the `before` form were in, against 3 of 9 with paragraphs as units and 2 of 9 before the filter. Only Nano was tried.
+
+**Tests.** Unit: `slides-deck`, `slides-assistant` (the model is a queue of answers), `slides-render` (what a slide may contain). Browser: `tests/e2e/slides.spec.ts` makes a deck, lets a stubbed model write and edit it, arranges slides, changes the theme, presents and checks the gallery. It runs the app and the mock server on their own ports (1421 and 11436) and sends the page's calls to port 11435 to the mock, so it can run next to a live engine and never touches its data.
+
 ## Storage and API
 
-The table `artifacts` (schema version 2, migration [`db/0002_artifacts.sql`](db/0002_artifacts.sql); its history is in `artifact_versions`, below): `id` (UUID), `kind` (`doc`, `slides`, `design`), `title`, `content`, `pinned`, `created_at`, `updated_at`. A document's `content` is **Markdown exactly as written, never HTML**; Markdown is also what the local model reads and writes, and what Export gives. Slides and designs will keep JSON in the same column.
+The table `artifacts` (schema version 2, migration [`db/0002_artifacts.sql`](db/0002_artifacts.sql); its history is in `artifact_versions`, below): `id` (UUID), `kind` (`doc`, `slides`, `design`), `title`, `content`, `pinned`, `created_at`, `updated_at`. A document's `content` is **Markdown exactly as written, never HTML**; Markdown is also what the local model reads and writes, and what Export gives. A deck is Markdown too (slides separated by `---`, see Slides below); a design will keep JSON in the same column.
 
 | Call | Purpose |
 | --- | --- |
@@ -102,13 +126,16 @@ The panel beside the page has two tabs, **Chat** and **History**. History lists 
 | Export | `export/docx.ts`, `export/print.ts`, `export/download.ts`; print rules at the end of `app/src/app.css` |
 | Assistant logic (pure, tested) | `assistant.ts` (the two flows), `plan.ts` (plan and section prompts and parsing), `blocks.ts` (split, operations, apply), `completion.ts` (one streamed request with thinking), `askDara.ts` (cleaning, whole-document fallback) |
 | Unit tests | `app/tests/unit/artifacts.test.ts`, `doc-assistant.test.ts`, `collab.test.ts` |
+| Slides | `app/src/lib/slides/`: `deck.ts` (format, layouts, slide operations, `dropRepeats`), `SlideSurface.tsx` (one slide as a page; the safe renderer), `useSlideEditor.ts`, `DeckView.tsx` (the page), `Present.tsx`, `printDeck.ts`; slide and print styles at the end of `app/src/app.css`; `assistant.ts` (`runDeck`, `writeDeck`) and `plan.ts` (`DECK_SYSTEM_PROMPT`, `DECK_OPS_SYSTEM_PROMPT`) |
+| Slides tests | `app/tests/unit/slides-deck.test.ts`, `slides-assistant.test.ts`, `slides-render.test.ts`; `app/tests/e2e/slides.spec.ts` |
 
 ## Safety
 
 - A document is plain text. The editor never renders raw HTML from Markdown (`html: false`) and keeps Tiptap's link protocol check, so a document written by the model cannot run anything.
 - The gallery preview goes through the same sanitized Markdown renderer as chat.
 - Everything stays local; the only network call is to the local engine.
+- A slide is drawn by its own renderer, not the chat's: raw HTML is shown as text, a link is shown as text (so a click on a slide never leaves the app), and an image is drawn only when it is stored with the deck (`dara-asset:<id>`); any other image address is dropped, so a slide can never contact a server.
 
 ## Next
 
-Slides (a slide list, text, image and shape tools, present mode) and designs on the same table and gallery; moving the assistant loop to the server (`POST /dara/artifacts/{id}/assist`, streaming steps, thinking and document patches) so other clients can use it and a run survives leaving the page; saving the chat per document; search across document text; "Save as artifact" from a chat answer.
+Slides: PowerPoint export, speaker notes, slide transitions, a free-form canvas (text boxes, images and shapes placed anywhere) and the same on the Core 4B and Pro 9B models (only Dara Nano was measured); designs on the same table and gallery; moving the assistant loop to the server (`POST /dara/artifacts/{id}/assist`, streaming steps, thinking and document patches) so other clients can use it and a run survives leaving the page; saving the chat per document; search across document text; "Save as artifact" from a chat answer.

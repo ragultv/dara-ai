@@ -33,7 +33,7 @@ export function assetIdOf(src: string): string | null {
 const urls = new Map<string, Promise<string>>();
 
 /** A blob URL for a stored asset (the request carries the API key, which an <img src> cannot). Cached for the session. */
-function assetUrl(docId: string, assetId: string): Promise<string> {
+export function assetUrl(docId: string, assetId: string): Promise<string> {
   const key = `${docId}/${assetId}`;
   let p = urls.get(key);
   if (!p) {

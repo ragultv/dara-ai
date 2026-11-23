@@ -4,6 +4,8 @@ import { useArtifactsStore } from "../lib/stores/useArtifactsStore.ts";
 import type { ArtifactKind, DbArtifactSummary } from "../lib/api/types.ts";
 import { KIND_LABEL, displayTitle, relativeTime } from "../lib/artifacts/format.ts";
 import { Markdown } from "../lib/ui/Markdown.tsx";
+import { SlideSurface } from "../lib/slides/SlideSurface.tsx";
+import { firstSlide } from "../lib/slides/deck.ts";
 import { Icon } from "../lib/ui/Icon.tsx";
 import { Button } from "../lib/ui/Button.tsx";
 import { Dialog } from "../lib/ui/Dialog.tsx";
@@ -11,7 +13,7 @@ import { Skeleton } from "../lib/ui/Skeleton.tsx";
 
 const TILES: Array<{ kind: ArtifactKind; icon: string; ready: boolean }> = [
   { kind: "doc", icon: "file-text", ready: true },
-  { kind: "slides", icon: "presentation", ready: false },
+  { kind: "slides", icon: "presentation", ready: true },
   { kind: "design", icon: "palette", ready: false }
 ];
 
@@ -44,21 +46,35 @@ const Card: React.FC<{
         className="block w-full cursor-pointer text-left focus-visible:outline-2 focus-visible:outline-focus"
         aria-label={`Open ${displayTitle(item.title)}`}
       >
-        {/* a shrunken copy of the start of the document */}
-        <div className="relative h-44 overflow-hidden bg-surface-sunken px-5 pt-5">
-          <div
-            className="pointer-events-none w-[200%] origin-top-left scale-50 select-none"
-            aria-hidden="true"
-          >
-            {item.title && (
-              <h3 className="mb-2 font-[family-name:var(--font-reply)] text-[1.6rem] font-semibold leading-tight">
-                {item.title}
-              </h3>
-            )}
-            <Markdown content={item.snippet} />
+        {item.kind === "slides" ? (
+          /* the first slide, as it looks in the deck */
+          <div className="relative flex h-44 items-center justify-center overflow-hidden bg-surface-sunken p-4">
+            <div className="w-full overflow-hidden rounded-md border border-border shadow-xs">
+              <SlideSurface
+                className="slide-thumb"
+                docId={item.id}
+                markdown={firstSlide(item.snippet).slide}
+                theme={firstSlide(item.snippet).theme}
+              />
+            </div>
           </div>
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-linear-to-t from-surface-sunken to-transparent" />
-        </div>
+        ) : (
+          /* a shrunken copy of the start of the document */
+          <div className="relative h-44 overflow-hidden bg-surface-sunken px-5 pt-5">
+            <div
+              className="pointer-events-none w-[200%] origin-top-left scale-50 select-none"
+              aria-hidden="true"
+            >
+              {item.title && (
+                <h3 className="mb-2 font-[family-name:var(--font-reply)] text-[1.6rem] font-semibold leading-tight">
+                  {item.title}
+                </h3>
+              )}
+              <Markdown content={item.snippet} />
+            </div>
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-linear-to-t from-surface-sunken to-transparent" />
+          </div>
+        )}
         <div className="border-t border-border px-4 py-3">
           <p className="truncate text-sm font-semibold text-text">{displayTitle(item.title)}</p>
           <p className="mt-0.5 text-xs text-text-muted">
@@ -141,8 +157,8 @@ export const ArtifactsPage: React.FC = () => {
     );
   }, [items, query]);
 
-  const newDoc = async () => {
-    const id = await create("doc");
+  const newDoc = async (kind: ArtifactKind = "doc") => {
+    const id = await create(kind);
     if (id) navigate("artifact", id);
   };
 
@@ -181,7 +197,7 @@ export const ArtifactsPage: React.FC = () => {
             key={t.kind}
             type="button"
             disabled={!t.ready}
-            onClick={() => t.ready && void newDoc()}
+            onClick={() => t.ready && void newDoc(t.kind)}
             className="group flex w-36 flex-col gap-2 text-left disabled:cursor-not-allowed"
           >
             <span

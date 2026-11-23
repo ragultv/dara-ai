@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Editor } from "@tiptap/react";
+import type { ArtifactKind } from "../api/types.ts";
 import { newId } from "../api/store-api.ts";
 import { useArtifactsStore } from "../stores/useArtifactsStore.ts";
 import { useDocChatStore } from "../stores/useDocChatStore.ts";
@@ -7,6 +8,24 @@ import { useEffortStore } from "../stores/useEffortStore.ts";
 import { getMarkdown, setMarkdown } from "./useDocEditor.ts";
 import { useCommentsStore } from "../stores/useCommentsStore.ts";
 import { runAssistant, type AssistantResult } from "./assistant.ts";
+
+/**
+ * What the assistant writes into: the text it reads, a place for the live preview and the final text, and a switch that stops the person
+ * typing while it works. A document's target is its editor; a deck's is the deck page.
+ */
+export interface DocTarget {
+  get: () => string;
+  set: (markdown: string) => void;
+  setEditable: (editable: boolean) => void;
+}
+
+export function editorTarget(editor: Editor): DocTarget {
+  return {
+    get: () => getMarkdown(editor),
+    set: (md) => setMarkdown(editor, md),
+    setEditable: (e) => editor.setEditable(e)
+  };
+}
 
 export interface SendOptions {
   /** what the chat shows as the user's message, when the instruction is longer than what they typed (a comment reply) */
@@ -16,7 +35,11 @@ export interface SendOptions {
 }
 
 /** Runs the assistant against the open editor: live preview into the page, progress into the chat, one Undo per answer. */
-export function useDocAssistant(editor: Editor | null, docId: string) {
+export function useDocAssistant(
+  target: DocTarget | null,
+  docId: string,
+  kind: Extract<ArtifactKind, "doc" | "slides"> = "doc"
+) {
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -26,11 +49,11 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
   const send = useCallback(
     async (instruction: string, opts: SendOptions = {}) => {
       const text = instruction.trim();
-      if (!editor || !text || abortRef.current) return;
+      if (!target || !text || abortRef.current) return;
       const chat = useDocChatStore.getState();
       const docs = useArtifactsStore.getState();
       await docs.flush(); // the saved text is what a "Before Dara" version will keep
-      const snapshot = getMarkdown(editor);
+      const snapshot = target.get();
       const startTitle = docs.doc?.title ?? "";
       const msgId = newId();
       const controller = new AbortController();
@@ -59,7 +82,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
         if (m) void useDocChatStore.getState().persist(docId, m);
       };
 
-      editor.setEditable(false);
+      target.setEditable(false);
       let last = 0;
       const startedAt = Date.now();
       const began: Record<number, string> = {}; // when each step first became active, as m:ss into the task
@@ -69,6 +92,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
       };
       try {
         const result = await runAssistant({
+          kind,
           markdown: snapshot,
           title: startTitle,
           instruction: text,
@@ -79,7 +103,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
               const now = Date.now();
               if (now - last > 150) {
                 last = now;
-                setMarkdown(editor, md);
+                target.set(md);
               }
             },
             setTitle: (t) => useArtifactsStore.getState().setTitle(t),
@@ -96,14 +120,14 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
           }
         });
         if (result.changed) {
-          setMarkdown(editor, result.markdown);
+          target.set(result.markdown);
           useArtifactsStore.getState().setContent(result.markdown, {
             snapshot: `Before Dara: ${(opts.display ?? text).replace(/\s+/g, " ").slice(0, 70)}`
           });
           if (result.title !== (useArtifactsStore.getState().doc?.title ?? ""))
             useArtifactsStore.getState().setTitle(result.title);
         } else {
-          setMarkdown(editor, snapshot);
+          target.set(snapshot);
           if ((useArtifactsStore.getState().doc?.title ?? "") !== startTitle)
             useArtifactsStore.getState().setTitle(startTitle);
         }
@@ -124,7 +148,7 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
         save();
         await opts.onResult?.(result);
       } catch (err) {
-        setMarkdown(editor, snapshot);
+        target.set(snapshot);
         if ((useArtifactsStore.getState().doc?.title ?? "") !== startTitle)
           useArtifactsStore.getState().setTitle(startTitle);
         patch({
@@ -136,28 +160,28 @@ export function useDocAssistant(editor: Editor | null, docId: string) {
         save();
       } finally {
         abortRef.current = null;
-        editor.setEditable(true);
+        target.setEditable(true);
         setBusy(false);
       }
     },
-    [editor, docId]
+    [target, docId, kind]
   );
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
 
   const undo = useCallback(
     (msgId: string) => {
-      if (!editor) return;
+      if (!target) return;
       const chat = useDocChatStore.getState();
       const msg = (chat.byDoc[docId] ?? []).find((m) => m.id === msgId);
       if (!msg || msg.role !== "assistant" || !msg.undo) return;
-      setMarkdown(editor, msg.undo.markdown);
+      target.set(msg.undo.markdown);
       useArtifactsStore.getState().setContent(msg.undo.markdown);
       if ((useArtifactsStore.getState().doc?.title ?? "") !== msg.undo.title)
         useArtifactsStore.getState().setTitle(msg.undo.title);
       chat.patch(docId, msgId, { undo: null, text: `${msg.text} (undone)` });
     },
-    [editor, docId]
+    [target, docId]
   );
 
   return { busy, send, stop, undo };

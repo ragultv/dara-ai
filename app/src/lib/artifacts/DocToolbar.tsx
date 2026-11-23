@@ -8,7 +8,10 @@ interface Props {
   disabled?: boolean;
   /** a file picked with the image or video button */
   onMedia: (file: File) => void;
-  onComment: () => void;
+  /** wrap onto a second row when the column is narrower than the toolbar (a slide, beside its list and the chat) */
+  wrap?: boolean;
+  /** left out where there are no comments (a slide) */
+  onComment?: (() => void) | undefined;
   onAsk: () => void;
 }
 
@@ -76,7 +79,8 @@ export const DocToolbar: React.FC<Props> = ({
   disabled = false,
   onMedia,
   onComment,
-  onAsk
+  onAsk,
+  wrap = false
 }) => {
   const fileRef = useRef<HTMLInputElement>(null);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
@@ -108,7 +112,9 @@ export const DocToolbar: React.FC<Props> = ({
     <div
       role="toolbar"
       aria-label="Formatting"
-      className="flex items-center gap-0.5 rounded-lg border border-border bg-surface-raised px-1.5 py-1 shadow-md"
+      className={`flex items-center gap-0.5 rounded-lg border border-border bg-surface-raised px-1.5 py-1 shadow-md ${
+        wrap ? "max-w-full flex-wrap justify-center" : ""
+      }`}
     >
       <div ref={menuRef} className="relative">
         <button
@@ -241,14 +247,19 @@ export const DocToolbar: React.FC<Props> = ({
         active={editor.isActive("blockquote")}
         onClick={() => editor.chain().focus().toggleBlockquote().run()}
       />
-      <Btn
-        label="Divider"
-        icon="minus"
-        disabled={disabled}
-        onClick={() => editor.chain().focus().setHorizontalRule().run()}
-      />
+      {/* a slide has no divider: that line is what ends a slide */}
+      {editor.extensionManager.extensions.some((x) => x.name === "horizontalRule") && (
+        <Btn
+          label="Divider"
+          icon="minus"
+          disabled={disabled}
+          onClick={() => editor.chain().focus().setHorizontalRule().run()}
+        />
+      )}
       <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
-      <Btn label="Comment" icon="message-circle" disabled={disabled} onClick={onComment} />
+      {onComment && (
+        <Btn label="Comment" icon="message-circle" disabled={disabled} onClick={onComment} />
+      )}
       <button
         type="button"
         onMouseDown={(e) => e.preventDefault()}
